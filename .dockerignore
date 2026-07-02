@@ -1,0 +1,6 @@
+.git
+.gitignore
+.monkeycode
+.monkeycode-tmp-files
+node_modules
+npm-debug.log
