@@ -105,4 +105,34 @@ docker compose --env-file .env.production -f docker-compose.prod.yml up -d --bui
 
 ## 版本
 
-当前版本：`1.0.1`
+当前版本：`1.0.2`
+
+### 软件包下载
+
+最新版本：**[v1.0.2 - 安全加固与生产部署就绪](https://github.com/hnhywjw/onsite-ops-system/releases/tag/v1.0.2)**
+
+下载 `onsite-ops-system-v1.0.2-production.tar.gz` 后解压即可部署，SHA256 校验文件随 Release 一同提供。
+
+### v1.0.2 版本说明
+
+基于 v1.0.1 进行全面安全加固并新增生产级 Docker Compose 部署方案。
+
+安全修复 (20 项)：
+- IP 校验补全 CGNAT/IETF 协议保留/文档/测试网段，修复 IPv6 Teredo 精确匹配
+- probeHostReachable/executeSSHCheck 命令注入防御 (execFile)
+- normalizeDb 角色白名单 (admin/engineer/viewer/auditor/customer)
+- 服务器入口密码改用 scrypt 并启用 crypto.timingSafeEqual 防时序攻击
+- sanitizeUploadFilename 路径穿越防御
+- 全局 uncaughtException/unhandledRejection 异常处理器
+- 系统设置 POST 8 字段白名单验证
+- 文档详情/下载端点 HMAC token 校验 (签名+ID 绑定+10 分钟过期)
+- XSS 防护 (textContent 替换 innerHTML)，Cookie Secure 条件设置
+- 注册接口 + 前端注册表单 CAPTCHA 验证码
+- gracefulShutdown 可重入保护
+- 启动时清理遗留 sshpass 临时文件
+
+新增生产支持：
+- Dockerfile (npm ci 可复现构建 + 系统工具依赖)
+- docker-compose.prod.yml (MySQL 8.4 编排 + 健康检查)
+- .env.production.example (28 项环境变量模板)
+- PRODUCTION_DEPLOY.md (完整部署文档)
