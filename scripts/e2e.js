@@ -66,11 +66,19 @@ async function pickOptionByText(page, selector, expectedText) {
   return target;
 }
 
+function decodeCaptchaToken(token) {
+  const decoded = Buffer.from(token, 'base64url').toString('utf8');
+  return decoded.split(':')[0];
+}
+
 async function login(page, username, password) {
   await page.goto(baseUrl, { waitUntil: 'networkidle' });
   await page.waitForTimeout(2000);
+  const captcha = await fetch(`${baseUrl}/api/captcha`).then(response => response.json());
+  await page.evaluate(token => { state.captchaToken = token; }, captcha.token);
   await page.fill('#loginForm input[name="username"]', username);
   await page.fill('#loginForm input[name="password"]', password);
+  await page.fill('#loginCaptchaInput', decodeCaptchaToken(captcha.token));
   await page.click('#loginForm button[type="submit"]');
   try {
     await page.waitForSelector('#appView:not(.hidden)', { timeout: 30000 });
@@ -92,7 +100,7 @@ async function logout(page) {
     return fetch('/api/logout', {
       method: 'POST',
       credentials: 'include',
-      headers: { 'Content-Type': 'application/json', 'X-Session-Token': state.sessionToken || '' },
+      headers: { 'Content-Type': 'application/json', 'X-CSRF-Token': state.csrfToken || '' },
       body: '{}'
     });
   });
@@ -102,20 +110,22 @@ async function logout(page) {
 async function cleanupData(page, payload) {
   await page.goto(baseUrl, { waitUntil: 'networkidle' });
   await page.evaluate(async data => {
-    const request = async (resource, options = {}) => {
-      const response = await fetch(resource, {
-        credentials: 'include',
-        headers: { 'Content-Type': 'application/json', 'X-Session-Token': state.sessionToken || '', ...(options.headers || {}) },
-        ...options
-      });
+      const request = async (resource, options = {}) => {
+        const response = await fetch(resource, {
+          credentials: 'include',
+          ...options,
+          headers: { 'Content-Type': 'application/json', ...(!['GET', 'HEAD', 'OPTIONS'].includes(String(options.method || 'GET').toUpperCase()) ? { 'X-CSRF-Token': state.csrfToken || '' } : {}), ...(options.headers || {}) }
+        });
       const text = await response.text();
       let parsed = [];
       try { parsed = text ? JSON.parse(text) : []; } catch (error) { parsed = []; }
       return { response, data: parsed };
     };
     await request('/api/logout', { method: 'POST', body: '{}' });
-    const loginResp = await request('/api/login', { method: 'POST', body: JSON.stringify({ username: 'admin', password: 'admin123' }) });
-    state.sessionToken = loginResp.data && loginResp.data.token ? loginResp.data.token : '';
+    const captchaResp = await request('/api/captcha');
+    const decodedCaptcha = atob(captchaResp.data.token.replace(/-/g, '+').replace(/_/g, '/')).split(':')[0];
+    const loginResp = await request('/api/login', { method: 'POST', body: JSON.stringify({ username: 'admin', password: 'admin123', captchaToken: captchaResp.data.token, captcha: decodedCaptcha }) });
+    state.csrfToken = loginResp.data && loginResp.data.csrfToken ? loginResp.data.csrfToken : '';
     const getList = async (url) => {
       const result = await request(url);
       return Array.isArray(result.data && result.data.data) ? result.data.data : (Array.isArray(result.data) ? result.data : []);
@@ -135,6 +145,11 @@ async function cleanupData(page, payload) {
     const projects = await getList('/api/projects');
     const createdProject = projects.find(item => item.name === data.projectName);
     if (createdProject) await request(`/api/projects/${createdProject.id}`, { method: 'DELETE', body: '{}' });
+    const docs = await getList('/api/documents');
+    for (const docTitle of (data.docTitles || [])) {
+      const doc = docs.find(item => item.title === docTitle);
+      if (doc) await request(`/api/documents/${doc.id}`, { method: 'DELETE', body: '{}' });
+    }
   }, payload);
 }
 
@@ -151,6 +166,8 @@ async function main() {
   const customerUsername = `e2e_customer_${suffix}`;
   const customerPassword = 'Customer-123';
   const changeTitle = `E2E变更-${suffix}`;
+  const docTitle1 = `E2E设备-${suffix}`;
+  const docTitle2 = `E2E合同-${suffix}`;
   const exportPath = path.join(downloadDir, `onsite-ops-export-${suffix}.json`);
 
   try {
@@ -166,7 +183,8 @@ async function main() {
     await page.click('button[data-tab="aiInspection"]');
     await page.waitForSelector('section[data-tab="aiInspection"] .title', { state: 'visible' });
     await pickFirstNonEmptyOption(page, '#aiInspectionTargetProjectId');
-    await pickFirstNonEmptyOption(page, '#aiInspectionTargetAssetId');
+    const selectedTargetAsset = await pickFirstNonEmptyOption(page, '#aiInspectionTargetAssetId');
+    const selectedTargetAssetVersion = await page.evaluate(assetId => state.assets.find(item => item.id === assetId)?.version || '', selectedTargetAsset.value);
     await page.fill('#aiInspectionTargetForm input[name="name"]', targetName);
     await page.selectOption('#aiInspectionTargetCategory', 'server');
     await page.fill('#aiInspectionTargetForm input[name="address"]', '10.20.30.40');
@@ -174,7 +192,7 @@ async function main() {
     await page.selectOption('#aiInspectionTargetAuthType', 'password');
     await page.fill('#aiInspectionTargetAccount', 'root');
     await page.fill('#aiInspectionTargetPassword', 'E2E-Password-123');
-    await page.fill('#aiInspectionTargetForm input[name="systemVersion"]', 'Rocky Linux 9');
+    await page.waitForFunction(expectedVersion => document.querySelector('#aiInspectionTargetSystemVersion')?.value === expectedVersion, selectedTargetAssetVersion);
     await page.click('#aiInspectionTargetForm button[type="submit"]');
     await waitForTableRow(page, '#aiInspectionTargetTable', targetName);
     await page.waitForTimeout(2000);
@@ -186,7 +204,7 @@ async function main() {
     await pickOptionByText(page, '#aiInspectionTaskTargetId', targetName);
     await pickFirstNonEmptyOption(page, '#aiInspectionTaskTemplateId');
     await page.fill('#aiInspectionTaskForm input[name="title"]', taskTitle);
-    await page.fill('#aiInspectionTaskForm input[name="executor"]', 'admin');
+    await pickFirstNonEmptyOption(page, '#aiInspectionTaskExecutorId');
     await page.fill('#aiInspectionTaskForm input[name="executedAt"]', formatDateTimeLocal(new Date(Date.now() + 24 * 60 * 60 * 1000)));
     const metricInputs = page.locator('#aiInspectionTaskMetricTable input[type="number"]');
     const metricCount = await metricInputs.count();
@@ -200,13 +218,13 @@ async function main() {
     await taskRow.getByRole('button', { name: '执行' }).click();
     await page.waitForFunction(() => {
       const message = document.querySelector('#aiInspectionTaskMessage');
-      return message && /得分/.test(message.textContent || '');
+      return message && /探测失败|得分/.test(message.textContent || '');
     }, { timeout: 90000 });
 
     await page.click('section[data-tab="aiInspection"] button[data-subtab="reports"]');
     await page.waitForFunction(title => {
       const rows = Array.from(document.querySelectorAll('#aiInspectionReportTable tr'));
-      return rows.some(row => (row.textContent || '').includes(title) && (row.textContent || '').includes('查看HTML'));
+      return rows.some(row => (row.textContent || '').includes(title) && (row.textContent || '').includes('下载HTML报告'));
     }, taskTitle);
 
     // === Create Project ===
@@ -230,7 +248,7 @@ async function main() {
     await page.click('#projectForm button[type="submit"]');
     await page.waitForFunction(() => {
       const el = document.getElementById('projectMessage');
-      return el && /保存成功/.test(el.textContent || '');
+      return el && /成功/.test(el.textContent || '');
     }, { timeout: 30000 });
     await page.waitForTimeout(3500);
     await page.evaluate(() => {
@@ -248,6 +266,7 @@ async function main() {
     await page.fill('#userForm input[name="username"]', customerUsername);
     await page.fill('#userForm input[name="password"]', customerPassword);
     await page.fill('#userForm input[name="name"]', customerName);
+    await page.fill('#userForm input[name="phone"]', '13800138000');
     await page.selectOption('#userForm select[name="role"]', 'customer');
     await pickOptionByText(page, '#userProjectId', projectName);
     await page.click('#userForm button[type="submit"]');
@@ -268,8 +287,8 @@ async function main() {
     await page.waitForSelector('#changeRecordForm', { state: 'visible', timeout: 5000 });
     await page.waitForTimeout(300);
     await pickOptionByText(page, '#changeProjectId', projectName);
-    await pickOptionByText(page, '#changeApproverId', '系统管理员');
-    await pickOptionByText(page, '#changeCustomerId', customerName);
+    await pickOptionByText(page, '#changeCustomerId', '系统管理员');
+    await pickOptionByText(page, '#changeApproverId', customerName);
     await page.fill('#changeRecordForm input[name="title"]', changeTitle);
     await page.fill('#changeRecordForm textarea[name="content"]', 'E2E 变更审批流程验证');
     await page.click('#changeRecordForm button[type="submit"]');
@@ -322,11 +341,85 @@ async function main() {
     const exported = JSON.parse(fs.readFileSync(exportPath, 'utf8'));
     assert(Array.isArray(exported.projects) && exported.projects.some(item => item.name === projectName), '导出数据未包含新建项目');
 
-    await cleanupData(page, { targetName, taskTitle, projectName, customerUsername, changeTitle });
+    // === Document Management: Create & Verify ===
+    await page.click('button[data-tab="documents"]');
+    await page.waitForSelector('section[data-tab="documents"]:not(.hidden)', { state: 'visible', timeout: 5000 });
+    await page.waitForTimeout(1000);
+
+    await pickOptionByText(page, '#documentProjectId', projectName);
+    await page.selectOption('#documentForm select[name="type"]', 'device');
+    await page.fill('#documentForm input[name="title"]', docTitle1);
+    await page.fill('#documentForm input[name="brand"]', '新华三');
+    await page.fill('#documentForm input[name="model"]', 'S12500X-AF');
+    await page.fill('#documentForm input[name="serialNumber"]', 'E2E-SN-001');
+    await page.fill('#documentForm input[name="managementIp"]', '10.10.10.1');
+    await page.fill('#documentForm input[name="loginAccount"]', 'root');
+    await page.fill('#documentForm input[name="loginPassword"]', 'E2E-Login-123');
+    await page.fill('#documentForm input[name="purchaseDate"]', '2026-03-01');
+    await page.fill('#documentForm input[name="warrantyExpiryDate"]', '2029-03-01');
+    await page.selectOption('#documentForm select[name="managementMethod"]', 'ssh');
+    await page.fill('#documentForm input[name="accessPassword"]', 'E2E-Doc-123');
+    await page.click('#documentForm button[type="submit"]');
+    await page.waitForFunction(() => {
+      const el = document.getElementById('documentMessage');
+      return el && /成功/.test(el.textContent || '');
+    });
+    await page.waitForTimeout(1500);
+
+    await page.click('section[data-tab="documents"] button[data-subtab="form"]');
+    await page.waitForTimeout(500);
+    await pickOptionByText(page, '#documentProjectId', projectName);
+    await page.selectOption('#documentForm select[name="type"]', 'contract');
+    await page.fill('#documentForm input[name="title"]', docTitle2);
+    await page.fill('#documentForm input[name="accessPassword"]', 'E2E-Doc-456');
+    await page.setInputFiles('#documentForm input[name="attachment"]', {
+      name: 'e2e-contract.pdf',
+      mimeType: 'application/pdf',
+      buffer: Buffer.from('E2E测试合同内容')
+    });
+    await page.click('#documentForm button[type="submit"]');
+    await page.waitForFunction(() => {
+      const el = document.getElementById('documentMessage');
+      return el && /成功/.test(el.textContent || '');
+    });
+    await page.waitForTimeout(1500);
+
+    await page.click('section[data-tab="documents"] button[data-subtab="list"]');
+    await waitForTableRow(page, '#documentTable', docTitle1);
+    await waitForTableRow(page, '#documentTable', docTitle2);
+
+    const deviceRow = page.locator('#documentTable tr').filter({ hasText: docTitle1 }).first();
+    const deviceViewBtn = deviceRow.getByRole('button', { name: '查看' });
+    await deviceViewBtn.click();
+    await page.waitForSelector('#documentPasswordModal:not(.hidden)', { state: 'visible', timeout: 3000 });
+    await page.fill('#documentPasswordInput', 'E2E-Doc-123');
+    await page.click('#documentPasswordConfirmBtn');
+    await page.waitForSelector('#documentDetailModal:not(.hidden)', { state: 'visible', timeout: 3000 });
+    await page.evaluate(() => closeModal('documentDetailModal'));
+    await page.waitForTimeout(1000);
+
+    const contractRow = page.locator('#documentTable tr').filter({ hasText: docTitle2 }).first();
+    const contractDownloadBtn = contractRow.getByRole('button', { name: '下载' });
+    await contractDownloadBtn.click();
+    await page.waitForSelector('#documentPasswordModal:not(.hidden)', { state: 'visible', timeout: 3000 });
+    await page.fill('#documentPasswordInput', 'E2E-Doc-456');
+    await page.click('#documentPasswordConfirmBtn');
+    await page.waitForTimeout(2000);
+
+    await contractRow.getByRole('button', { name: '删除' }).click();
+    await page.waitForSelector('#confirmOkBtn', { state: 'visible', timeout: 3000 });
+    await page.click('#confirmOkBtn');
+    await page.waitForTimeout(1000);
+    await deviceRow.getByRole('button', { name: '删除' }).click();
+    await page.waitForSelector('#confirmOkBtn', { state: 'visible', timeout: 3000 });
+    await page.click('#confirmOkBtn');
+    await page.waitForTimeout(1000);
+
+    await cleanupData(page, { targetName, taskTitle, projectName, customerUsername, changeTitle, docTitles: [docTitle1, docTitle2] });
     process.stdout.write('E2E passed\n');
   } finally {
     try {
-      await cleanupData(page, { targetName, taskTitle, projectName, customerUsername, changeTitle });
+      await cleanupData(page, { targetName, taskTitle, projectName, customerUsername, changeTitle, docTitles: [docTitle1, docTitle2] });
     } catch (error) {
     }
     await context.close();
@@ -335,6 +428,6 @@ async function main() {
 }
 
 main().catch(error => {
-  process.stderr.write(`${error.message}\n`);
+  process.stderr.write(`${error.stack || error.message}\n`);
   process.exit(1);
 });

@@ -1,7 +1,18 @@
 const base = process.env.BASE_URL || `http://localhost:${process.env.PORT || 3000}`;
 
+const csrfByCookie = new Map();
+
+function withCsrf(headers = {}, method = 'GET') {
+  const result = { ...headers };
+  const unsafe = !['GET', 'HEAD', 'OPTIONS'].includes(String(method || 'GET').toUpperCase());
+  const cookie = result.cookie || result.Cookie;
+  if (unsafe && cookie && csrfByCookie.has(cookie)) result['X-CSRF-Token'] = csrfByCookie.get(cookie);
+  return result;
+}
+
 async function request(path, options = {}) {
-  const response = await fetch(base + path, options);
+  const method = options.method || 'GET';
+  const response = await fetch(base + path, { ...options, headers: withCsrf(options.headers || {}, method) });
   const text = await response.text();
   let data = text;
   try {
@@ -21,15 +32,23 @@ function assert(condition, message) {
   }
 }
 
+function decodeCaptchaToken(token) {
+  const decoded = Buffer.from(token, 'base64url').toString('utf8');
+  return decoded.split(':')[0];
+}
+
 async function login(username, password) {
+  const captcha = await request('/api/captcha');
   const result = await request('/api/login', {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ username, password })
+    body: JSON.stringify({ username, password, captchaToken: captcha.data.token, captcha: decodeCaptchaToken(captcha.data.token) })
   });
+  const cookie = (result.headers['set-cookie'] || '').split(';')[0];
+  if (cookie && result.data.csrfToken) csrfByCookie.set(cookie, result.data.csrfToken);
   return {
     ...result,
-    cookie: (result.headers['set-cookie'] || '').split(';')[0]
+    cookie
   };
 }
 
@@ -65,6 +84,9 @@ async function main() {
   });
   assert(backup.status === 200, '系统备份创建失败（文件 DB 路径异常）');
   assert(backup.data.filename, '备份未返回文件名');
+
+  const documents = await request('/api/documents', { headers });
+  assert(documents.status === 200 && Array.isArray(documents.data.data), '资料列表读取失败');
 
   process.stdout.write('Smoke passed\n');
 }

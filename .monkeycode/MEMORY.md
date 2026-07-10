@@ -31,6 +31,13 @@ Agent 在任务执行过程中发现的条目应遵循以下格式：
 
 ## 条目
 
+[GitHub 手动提交版本号同步]
+- Date: 2026-07-09
+- Context: 用户说明手动提交到 GitHub 时的版本管理要求
+- Category: 工作流协作
+- Instructions:
+  - 每次用户要求手动提交到 GitHub 时，需要同步修改项目版本号。
+
 [生产部署数据库要求]
 - Date: 2026-06-19
 - Context: Agent 在执行 MySQL 存储改造与生产收敛时更新
@@ -66,3 +73,10 @@ Agent 在任务执行过程中发现的条目应遵循以下格式：
 - Instructions:
   - 存活检查使用 `GET /api/health`。
   - 就绪检查使用 `GET /api/ready`，会校验 MySQL 与备份目录状态。
+
+[Git 推送目标分支]
+- Date: 2026-07-02
+- Context: 用户指定 GitHub 推送目标分支
+- Category: 工作流协作
+- Instructions:
+  - 所有 git push 操作必须推送到 `main` 分支，不要使用 `master`。

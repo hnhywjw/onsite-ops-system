@@ -1,38 +1,38 @@
 # 需求实施计划
 
-- [ ] 1. 后端数据模型与存储初始化
-  - [ ] 1.1 在 server.js 中扩展 dbCollectionKeys 添加 "documents" 集合
+- [x] 1. 后端数据模型与存储初始化
+  - [x] 1.1 在 server.js 中扩展 dbCollectionKeys 添加 "documents" 集合
     - 修改第44行 dbCollectionKeys 数组，追加 "documents"
-  - [ ] 1.2 在 seed() 函数中添加 documents 空数组和示例数据
+  - [x] 1.2 在 seed() 函数中添加 documents 空数组和示例数据
     - 修改 seed() 返回对象，添加 documents: []
-  - [ ] 1.3 在 normalizeDb() 中添加 documents 规范化逻辑
+  - [x] 1.3 在 normalizeDb() 中添加 documents 规范化逻辑
     - 确保每个条目包含 id、projectId、type、title、accessPasswordHash 等字段默认值
-  - [ ] 1.4 确保 data/uploads/documents/ 目录存在（服务启动时）
+  - [x] 1.4 确保 data/uploads/documents/ 目录存在（服务启动时）
     - 在 main() 或确保目录存在的逻辑中添加 fs.mkdirSync
 
-- [ ] 2. 后端资料管理 API 路由
-  - [ ] 2.1 实现 GET /api/documents 列表查询接口
+- [x] 2. 后端资料管理 API 路由
+  - [x] 2.1 实现 GET /api/documents 列表查询接口
     - 支持 projectId、type、keyword 筛选，分页参数 page/pageSize
     - 参考 kb 的 GET /api/kb 路由模式（第3900行）
-  - [ ] 2.2 实现 POST /api/documents 新增资料接口（multipart）
+  - [x] 2.2 实现 POST /api/documents 新增资料接口（multipart）
     - 使用 parseMultipart 解析表单和文件
     - 支持设备信息字段和附件上传
     - accessPassword 和 loginPassword 使用 hash() 进行 scrypt 加密
     - 附件写入 data/uploads/documents/{docId}/
     - 添加 appendAuditLog 审计日志
-  - [ ] 2.3 实现 PUT /api/documents/:id 修改资料接口
+  - [x] 2.3 实现 PUT /api/documents/:id 修改资料接口
     - 支持 JSON body 或 multipart 更新
     - 若上传新附件则替换旧文件
     - 可修改 accessPassword（用新密码哈希替换）
     - 仅创建者可修改（admin 可修改任意）
-  - [ ] 2.4 实现 DELETE /api/documents/:id 删除资料接口
+  - [x] 2.4 实现 DELETE /api/documents/:id 删除资料接口
     - 删除时同步删除 data/uploads/documents/{docId}/ 目录
     - 添加 appendAuditLog 审计日志
-  - [ ] 2.5 实现 POST /api/documents/:id/verify-password 密码验证接口
+  - [x] 2.5 实现 POST /api/documents/:id/verify-password 密码验证接口
     - 使用 verifyPassword() 校验密码
     - 生成 HMAC-SHA256 下载令牌，有效期10分钟
     - 实现速率限制：连续3次错误锁定5分钟，存储在 runtimeState 中
-  - [ ] 2.6 实现 GET /api/documents/:id/download 附件下载接口
+  - [x] 2.6 实现 GET /api/documents/:id/download 附件下载接口
     - 校验 token 合法性与时效性
     - 设置 Content-Disposition 为 attachment 触发下载
     - 以流式方式读取文件返回
@@ -40,7 +40,7 @@
 - [ ] 3. 检查点 - 后端 API 验证
   - 使用 curl 手动验证各接口基本可用，如有疑问请询问用户
 
-- [ ] 4. 前端资料管理 UI 结构
+- [x] 4. 前端资料管理 UI 结构
   - [ ] 4.1 在导航栏添加"资料管理"按钮
     - 插入在 AI智能巡检 按钮之后
     - 使用 SVG 文件夹图标
@@ -65,7 +65,7 @@
     - 与新增表单结构一致，预填数据
     - 保存修改/取消按钮
 
-- [ ] 5. 前端资料管理 JS 逻辑
+- [x] 5. 前端资料管理 JS 逻辑
   - [ ] 5.1 在 state 中添加 documents 字段并在 loadBaseData 中加载
     - state.documents = []
     - loadBaseData 中添加 { key: 'documents', path: '/api/documents' }

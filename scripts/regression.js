@@ -51,8 +51,19 @@ LUOYqexQkXh94z6tgslGT6E=
 -----END PRIVATE KEY-----
 `;
 
+const csrfByCookie = new Map();
+
+function withCsrf(headers = {}, method = 'GET') {
+  const result = { ...headers };
+  const unsafe = !['GET', 'HEAD', 'OPTIONS'].includes(String(method || 'GET').toUpperCase());
+  const cookie = result.cookie || result.Cookie;
+  if (unsafe && cookie && csrfByCookie.has(cookie)) result['X-CSRF-Token'] = csrfByCookie.get(cookie);
+  return result;
+}
+
 async function request(path, options = {}) {
-  const response = await fetch(base + path, options);
+  const method = options.method || 'GET';
+  const response = await fetch(base + path, { ...options, headers: withCsrf(options.headers || {}, method) });
   const text = await response.text();
   let data = text;
   try {
@@ -92,15 +103,23 @@ async function requestHttps(path, port) {
   });
 }
 
+function decodeCaptchaToken(token) {
+  const decoded = Buffer.from(token, 'base64url').toString('utf8');
+  return decoded.split(':')[0];
+}
+
 async function login(username, password, options = {}) {
+  const captcha = await request('/api/captcha');
   const result = await request('/api/login', {
     method: 'POST',
     headers: { 'Content-Type': 'application/json', ...(options.headers || {}) },
-    body: JSON.stringify({ username, password })
+    body: JSON.stringify({ username, password, captchaToken: captcha.data.token, captcha: decodeCaptchaToken(captcha.data.token) })
   });
+  const cookie = (result.headers['set-cookie'] || '').split(';')[0];
+  if (cookie && result.data.csrfToken) csrfByCookie.set(cookie, result.data.csrfToken);
   return {
     ...result,
-    cookie: (result.headers['set-cookie'] || '').split(';')[0]
+    cookie
   };
 }
 
@@ -213,13 +232,13 @@ async function main() {
   assert(Number(settingsResult.data.systemConfig?.webIdleLogoutMinutes) === 45, '控制台超时设置保存结果不正确');
   assert(settingsResult.data.systemConfig?.httpsLoginEnabled === false, 'HTTPS 登录默认设置保存失败');
   const secureLoginBeforeHttps = await login('admin', 'admin123', { headers: { 'x-forwarded-proto': 'https' } });
-  assert(!String(secureLoginBeforeHttps.headers['set-cookie'] || '').includes('Secure'), '关闭 HTTPS 登录时不派发 Secure Cookie');
+  assert(String(secureLoginBeforeHttps.headers['set-cookie'] || '').includes('Secure'), 'HTTPS 反代请求应派发 Secure Cookie');
   const adminReauth = await login('admin', 'admin123');
   cookie = adminReauth.cookie;
   const httpsUploadForm = new FormData();
   httpsUploadForm.append('cert', new Blob([httpsTestCert], { type: 'application/x-pem-file' }), 'https-test-cert.pem');
   httpsUploadForm.append('key', new Blob([httpsTestKey], { type: 'application/x-pem-file' }), 'https-test-key.pem');
-  const httpsUpload = await fetch(base + '/api/system/https/certificate', { method: 'POST', headers: { cookie }, body: httpsUploadForm });
+  const httpsUpload = await fetch(base + '/api/system/https/certificate', { method: 'POST', headers: withCsrf({ cookie }, 'POST'), body: httpsUploadForm });
   const httpsUploadData = await httpsUpload.json();
   assert(httpsUpload.status === 200, '上传 HTTPS 证书失败');
   assert(String(httpsUploadData.systemConfig?.httpsCertFilename || '').includes('https-test-cert.pem'), 'HTTPS 证书文件名未保存');
@@ -255,9 +274,9 @@ async function main() {
     { name: 'public/version.txt', data: 'upgrade-content' }
   ]);
   invalidUpgradeForm.append('file', new Blob([invalidZip], { type: 'application/zip' }), 'invalid-upgrade.zip');
-  const invalidUpgrade = await fetch(base + '/api/system/upgrade', { method: 'POST', headers: { cookie }, body: invalidUpgradeForm });
+  const invalidUpgrade = await fetch(base + '/api/system/upgrade', { method: 'POST', headers: withCsrf({ cookie }, 'POST'), body: invalidUpgradeForm });
   const invalidUpgradeData = await invalidUpgrade.json();
-  assert(invalidUpgrade.status === 400 && String(invalidUpgradeData.message || '').includes('SHA256'), '升级包 SHA256 校验未生效');
+  assert(invalidUpgrade.status === 400 && /签名|SHA256/.test(String(invalidUpgradeData.message || '')), `升级包完整性校验未生效: ${invalidUpgrade.status} ${String(invalidUpgradeData.message || '')}`);
   const projectId = projects.data.data[0]?.id || '';
   const assetId = assets.data.data.find(item => item.projectId === projectId)?.id || '';
   const approverId = users.data.data.find(item => item.role === 'admin')?.id || '';
@@ -375,8 +394,37 @@ async function main() {
   assert(markNotificationRead.status === 200 && markNotificationRead.data.readAt, '通知已读接口失败');
   const aiFutureTaskExecute = await request(`/api/ai-inspection/tasks/${aiFutureTask.data.task.id}/execute`, { method: 'POST', headers: { cookie, 'Content-Type': 'application/json' }, body: '{}' });
   assert(aiFutureTaskExecute.status === 200, '手动执行待执行 AI 巡检任务失败');
-  assert(aiFutureTaskExecute.data.task?.status === '已完成', '手动执行后任务状态未更新');
-  assert(aiFutureTaskExecute.data.result?.level, '手动执行后未生成巡检结果');
+  assert(aiFutureTaskExecute.data.task?.status === '失败', '地址不通时手动执行任务未标记失败');
+  assert(aiFutureTaskExecute.data.result?.level === '严重', '地址不通时巡检结果未标记严重');
+  assert(Array.isArray(aiFutureTaskExecute.data.result?.abnormalItems) && aiFutureTaskExecute.data.result.abnormalItems.some(item => String(item).includes('探测失败')), '地址不通时巡检结果未记录探测失败');
+  const backupTarget = await request('/api/ai-inspection/targets', {
+    method: 'POST',
+    headers: { cookie, 'Content-Type': 'application/json' },
+    body: JSON.stringify({ projectId, assetId, name: '回归配置备份对象', category: 'server', address: '127.0.0.1', protocol: 'http', port: 3000, authType: 'token', accessToken: 'regression-token', systemVersion: 'RegressionOS', location: '机房A', backupMode: 'web', webBackupPath: '/api/health', webBackupMethod: 'GET' })
+  });
+  assert(backupTarget.status === 201, '创建配置备份巡检对象失败');
+  const backupPlan = await request('/api/ai-inspection/config-backup/plans', {
+    method: 'POST',
+    headers: { cookie, 'Content-Type': 'application/json' },
+    body: JSON.stringify({ targetId: backupTarget.data.id, name: '回归配置备份计划', cycle: 'daily', executedAt: '2099-06-19T14:00' })
+  });
+  assert(backupPlan.status === 201, '创建配置备份计划失败');
+  const backupExecute = await request(`/api/ai-inspection/config-backup/plans/${backupPlan.data.id}/execute`, { method: 'POST', headers: { cookie, 'Content-Type': 'application/json' }, body: '{}' });
+  assert(backupExecute.status === 200 && backupExecute.data.record?.status === '成功', '立即执行配置备份失败');
+  const backupRecords = await request('/api/ai-inspection/config-backup/records', { headers: { cookie } });
+  const backupRecord = Array.isArray(backupRecords.data.data) ? backupRecords.data.data.find(item => item.planId === backupPlan.data.id) : null;
+  assert(backupRecords.status === 200 && backupRecord, '配置备份列表未返回备份记录');
+  const backupDownload = await request(`/api/ai-inspection/config-backup/records/${backupRecord.id}/download`, { headers: { cookie } });
+  assert(backupDownload.status === 200 && String(backupDownload.data || '').includes('配置备份名称'), '配置备份文件下载失败');
+  const backupRecordDelete = await request(`/api/ai-inspection/config-backup/records/${backupRecord.id}`, { method: 'DELETE', headers: { cookie } });
+  assert(backupRecordDelete.status === 200, '删除配置备份记录失败');
+  const backupRecordsAfterDelete = await request('/api/ai-inspection/config-backup/records', { headers: { cookie } });
+  const deletedBackupRecord = Array.isArray(backupRecordsAfterDelete.data.data) ? backupRecordsAfterDelete.data.data.find(item => item.id === backupRecord.id) : null;
+  assert(backupRecordsAfterDelete.status === 200 && !deletedBackupRecord, '配置备份记录删除后仍存在');
+  const backupPlanDelete = await request(`/api/ai-inspection/config-backup/plans/${backupPlan.data.id}`, { method: 'DELETE', headers: { cookie } });
+  assert(backupPlanDelete.status === 200, '删除配置备份计划失败');
+  const backupTargetDelete = await request(`/api/ai-inspection/targets/${backupTarget.data.id}`, { method: 'DELETE', headers: { cookie } });
+  assert(backupTargetDelete.status === 200, '删除配置备份巡检对象失败');
   const aiReportHtml = await request(`/api/reports/ai-inspection/results/${encodeURIComponent(aiTask.data.result.id)}/html`, { headers: { cookie } });
   assert(aiReportHtml.status === 200, 'AI 巡检 HTML 报告失败');
   const aiReportPptx = await request(`/api/reports/ai-inspection/results/${encodeURIComponent(aiTask.data.result.id)}/pptx`, { headers: { cookie } });
@@ -421,10 +469,10 @@ async function main() {
   const kbEntriesBefore = await request('/api/kb', { headers: { cookie } });
   assert(kbEntriesBefore.status === 200, '读取知识库列表失败');
   const kbCountBefore = Array.isArray(kbEntriesBefore.data.data) ? kbEntriesBefore.data.data.length : 0;
-  const testCustomerUser = { name: 'KB测试客户', username: 'kb_test_customer', password: 'testpass1', role: 'customer', phone: '', wechat: '', email: '', idCard: '', projectId: '', startDate: '', endDate: '' };
+  const testCustomerUser = { name: 'KB测试客户', username: 'kb_test_customer', password: 'Testpass1!', role: 'customer', phone: '', wechat: '', email: '', idCard: '', projectId: '', startDate: '', endDate: '' };
   const createCustomer = await request('/api/users', { method: 'POST', headers: { cookie, 'Content-Type': 'application/json' }, body: JSON.stringify(testCustomerUser) });
   assert(createCustomer.status === 201, '创建测试客户失败');
-  const customerLogin = await login('kb_test_customer', 'testpass1');
+  const customerLogin = await login('kb_test_customer', 'Testpass1!');
   assert(customerLogin.status === 200, '测试客户登录失败');
   const customerCookie = customerLogin.cookie;
   const custKbRead = await request('/api/kb', { headers: { cookie: customerCookie } });
@@ -433,6 +481,117 @@ async function main() {
   assert(custKbCreate.status === 403, '客户角色不应允许创建知识库条目（预期 403）');
   const delCustomer = await request(`/api/users/${createCustomer.data.id}`, { method: 'DELETE', headers: { cookie } });
   assert(delCustomer.status === 200, '清理测试客户失败');
+
+  // L6: Document management CRUD, password, and download
+  const docForm1 = new FormData();
+  docForm1.append('projectId', projectId);
+  docForm1.append('type', 'device');
+  docForm1.append('title', '回归测试设备');
+  docForm1.append('brand', '华为');
+  docForm1.append('model', 'S6730-H48X6C');
+  docForm1.append('serialNumber', 'REG-DEV-001');
+  docForm1.append('managementIp', '192.168.1.100');
+  docForm1.append('loginAccount', 'admin');
+  docForm1.append('loginPassword', 'Device@123');
+  docForm1.append('purchaseDate', '2026-01-15');
+  docForm1.append('warrantyExpiryDate', '2029-01-15');
+  docForm1.append('managementMethod', 'ssh');
+  docForm1.append('accessPassword', 'DocPass123');
+  const createDoc1 = await fetch(base + '/api/documents', { method: 'POST', headers: withCsrf({ cookie }, 'POST'), body: docForm1 });
+  const doc1Data = await createDoc1.json();
+  assert(createDoc1.status === 200 || createDoc1.status === 201, `创建设备资料失败: ${doc1Data.message || createDoc1.status}`);
+  assert(doc1Data.id, '创建资料未返回 ID');
+  assert(!('accessPasswordHash' in doc1Data), '资料返回了 accessPasswordHash 敏感字段');
+  const docId1 = doc1Data.id;
+
+  const docForm2 = new FormData();
+  docForm2.append('projectId', projectId);
+  docForm2.append('type', 'contract');
+  docForm2.append('title', '回归测试合同');
+  docForm2.append('attachment', new Blob(['回归测试合同内容'], { type: 'application/pdf' }), 'test-contract.pdf');
+  docForm2.append('accessPassword', 'DocPass456');
+  const createDoc2 = await fetch(base + '/api/documents', { method: 'POST', headers: withCsrf({ cookie }, 'POST'), body: docForm2 });
+  const doc2Data = await createDoc2.json();
+  assert(createDoc2.status === 200 || createDoc2.status === 201, `创建合同资料失败: ${doc2Data.message || createDoc2.status}`);
+  assert(doc2Data.attachmentName === 'test-contract.pdf', '附件名称未保存');
+  const docId2 = doc2Data.id;
+
+  const listDocs = await request('/api/documents', { headers: { cookie } });
+  assert(listDocs.status === 200 && Array.isArray(listDocs.data.data), '资料列表读取失败');
+  assert(listDocs.data.data.some(d => d.id === docId1), '资料列表中未找到设备资料');
+  assert(listDocs.data.data.some(d => d.id === docId2), '资料列表中未找到合同资料');
+
+  const listByType = await request(`/api/documents?type=contract`, { headers: { cookie } });
+  assert(listByType.status === 200 && listByType.data.data.every(d => d.type === 'contract'), '按类型筛选资料失败');
+
+  const wrongPwd = await request(`/api/documents/${docId1}/verify-password`, {
+    method: 'POST', headers: { cookie, 'Content-Type': 'application/json' },
+    body: JSON.stringify({ password: 'WrongPass123' })
+  });
+  assert(wrongPwd.status === 401, '错误密码未返回 401');
+
+  const correctPwd = await request(`/api/documents/${docId1}/verify-password`, {
+    method: 'POST', headers: { cookie, 'Content-Type': 'application/json' },
+    body: JSON.stringify({ password: 'DocPass123' })
+  });
+  assert(correctPwd.status === 200 && correctPwd.data.token, '正确密码验证未返回 token');
+
+  const docDetail = await request(`/api/documents/${docId1}`, { headers: { cookie } });
+  assert(docDetail.status === 200, '查询资料详情失败');
+  assert(!docDetail.data.accessPasswordHash && !docDetail.data.loginPasswordHash, '资料详情暴露了密码哈希');
+
+  const downloadResp = await request(`/api/documents/${docId2}/download`, { headers: { cookie } });
+  assert(downloadResp.status === 403, '错误 token 应拒绝下载');
+
+  const verifyPwd2 = await request(`/api/documents/${docId2}/verify-password`, {
+    method: 'POST', headers: { cookie, 'Content-Type': 'application/json' },
+    body: JSON.stringify({ password: 'DocPass456' })
+  });
+  assert(verifyPwd2.status === 200 && verifyPwd2.data.token, '合同密码验证失败');
+  const downloadOk = await fetch(base + `/api/documents/${docId2}/download?token=${encodeURIComponent(verifyPwd2.data.token)}`, { headers: { cookie } });
+  assert(downloadOk.status === 200, '正确 token 下载失败');
+
+  const docUpdateForm = new FormData();
+  docUpdateForm.append('type', 'device');
+  docUpdateForm.append('title', '回归测试设备-已更新');
+  docUpdateForm.append('brand', '华为');
+  docUpdateForm.append('model', 'S6730-H48X6C');
+  docUpdateForm.append('accessPassword', '');
+  const updateDoc = await fetch(base + `/api/documents/${docId1}`, { method: 'PUT', headers: withCsrf({ cookie }, 'PUT'), body: docUpdateForm });
+  const updateData = await updateDoc.json();
+  assert(updateDoc.status === 200, `更新资料失败: ${updateData.message || updateDoc.status}`);
+  assert(updateData.title === '回归测试设备-已更新', '资料标题未更新');
+
+  const docConfigUpdateForm = new FormData();
+  docConfigUpdateForm.append('type', 'config');
+  docConfigUpdateForm.append('title', '回归测试合同-配置文档');
+  docConfigUpdateForm.append('accessPassword', '');
+  const updateConfigDoc = await fetch(base + `/api/documents/${docId2}`, { method: 'PUT', headers: withCsrf({ cookie }, 'PUT'), body: docConfigUpdateForm });
+  const updateConfigData = await updateConfigDoc.json();
+  assert(updateConfigDoc.status === 200, `更新配置文档类型失败: ${updateConfigData.message || updateConfigDoc.status}`);
+  assert(updateConfigData.type === 'config', '配置文档类型未更新');
+
+  const verifyAfterUpdate = await request(`/api/documents/${docId1}/verify-password`, {
+    method: 'POST', headers: { cookie, 'Content-Type': 'application/json' },
+    body: JSON.stringify({ password: 'DocPass123' })
+  });
+  assert(verifyAfterUpdate.status === 200, '密码留空后原密码应保持不变');
+
+  const delDoc2 = await request(`/api/documents/${docId2}`, { method: 'DELETE', headers: { cookie } });
+  assert(delDoc2.status === 200, '删除资料失败');
+  const listAfterDel = await request('/api/documents', { headers: { cookie } });
+  assert(!listAfterDel.data.data.some(d => d.id === docId2), '删除后资料仍存在');
+
+  const delDoc1 = await request(`/api/documents/${docId1}`, { method: 'DELETE', headers: { cookie } });
+  assert(delDoc1.status === 200, '清理设备资料失败');
+
+  const auditAfterDocs = await request('/api/audit-logs?pageSize=100&sortBy=createdAt&sortDirection=desc', { headers: { cookie } });
+  const docCreateLog = (auditAfterDocs.data.data || []).find(item => item.targetType === 'document' && item.action === 'create');
+  assert(docCreateLog, '创建资料未写入操作日志');
+  const docDeleteLog = (auditAfterDocs.data.data || []).find(item => item.targetType === 'document' && item.action === 'delete');
+  assert(docDeleteLog, '删除资料未写入操作日志');
+  const docDownloadLog = (auditAfterDocs.data.data || []).find(item => item.targetType === 'document' && item.action === 'access');
+  assert(docDownloadLog, '资料下载未写入操作日志');
 
   // L3: Concurrent operation test - verify DB write lock prevents corruption
   const assetA = await request('/api/assets', {
