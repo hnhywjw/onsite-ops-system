@@ -842,7 +842,7 @@
         </div>
         <div class="input-group" style="margin-bottom:4px;">
           <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="11" width="18" height="11" rx="2"/><path d="M7 11V7a5 5 0 0110 0v4"/></svg>
-          <input name="password" id="loginPassword" type="password" placeholder="密码，如admin123" required />
+          <input name="password" id="loginPassword" type="password" placeholder="请输入密码" required />
         </div>
         <div style="display:flex; justify-content:space-between; margin-bottom:12px;">
           <a class="forgot-link" href="#" onclick="openModal('forgotPwdModal'); return false;">忘记密码</a>
@@ -920,6 +920,10 @@
       <input id="regSecurityQuestion" placeholder="例如：您母亲的名字是？" required />
       <label>安全问题答案 <em style="color:#dc2626;font-style:normal;">*</em></label>
       <input id="regSecurityAnswer" placeholder="请输入答案" required />
+      <div class="captcha-row" style="justify-content:flex-start;margin:8px 0;">
+        <input id="regCaptchaInput" placeholder="验证码" maxlength="4" autocomplete="off" style="text-transform:uppercase;letter-spacing:4px;text-align:center;font-size:13px;width:90px;" />
+        <img id="regCaptchaImg" src="" alt="验证码" title="点击刷新" style="height:38px;width:90px;cursor:pointer;" />
+      </div>
       <div id="registerError" class="modal-error"></div>
       <div class="btn-row">
         <button class="secondary" onclick="closeModal('registerModal')">取消</button>
@@ -1448,10 +1452,10 @@
         <button data-tab="users" data-admin-only="true"><span class="nav-icon"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M16 21v-2a4 4 0 0 0-4-4H7a4 4 0 0 0-4 4v2"></path><circle cx="9.5" cy="7" r="3"></circle><path d="M20 21v-2a4 4 0 0 0-3-3.87"></path><path d="M16 4.13a3 3 0 0 1 0 5.74"></path></svg></span><span class="nav-label">人员管理</span></button>
         <button data-tab="assets"><span class="nav-icon"><svg viewBox="0 0 24 24" aria-hidden="true"><rect x="3" y="4" width="18" height="14" rx="2"></rect><path d="M8 20h8"></path><path d="M12 18v2"></path></svg></span><span class="nav-label">资产管理</span></button>
         <button data-tab="logs"><span class="nav-icon"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M8 6h13"></path><path d="M8 12h13"></path><path d="M8 18h13"></path><path d="M3 6h.01"></path><path d="M3 12h.01"></path><path d="M3 18h.01"></path></svg></span><span class="nav-label">运维日志</span></button>
-        <button data-tab="kb"><span class="nav-icon"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 19.5A2.5 2.5 0 0 1 6.5 17H20"></path><path d="M6.5 2H20v20H6.5A2.5 2.5 0 0 1 4 19.5v-15A2.5 2.5 0 0 1 6.5 2z"></path></svg></span><span class="nav-label">知识库</span></button>
         <button data-tab="assetOps"><span class="nav-icon"><svg viewBox="0 0 24 24" aria-hidden="true"><rect x="3" y="4" width="18" height="6" rx="1"></rect><rect x="3" y="14" width="18" height="6" rx="1"></rect><path d="M7 7h.01"></path><path d="M7 17h.01"></path></svg></span><span class="nav-label">深化运维</span></button>
         <button data-tab="aiInspection"><span class="nav-icon"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 3l2.8 5.7 6.2.9-4.5 4.4 1.1 6.2L12 17.8 6.4 20.2l1.1-6.2L3 9.6l6.2-.9z"></path></svg></span><span class="nav-label">自动化巡检</span></button>
         <button data-tab="governance"><span class="nav-icon"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 3l7 4v5c0 5-3.5 8-7 9-3.5-1-7-4-7-9V7l7-4z"></path><path d="M9 12l2 2 4-4"></path></svg></span><span class="nav-label">审批管理</span></button>
+        <button data-tab="kb"><span class="nav-icon"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 19.5A2.5 2.5 0 0 1 6.5 17H20"></path><path d="M6.5 2H20v20H6.5A2.5 2.5 0 0 1 4 19.5v-15A2.5 2.5 0 0 1 6.5 2z"></path></svg></span><span class="nav-label">知识库</span></button>
         <button data-tab="documents"><span class="nav-icon"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M13 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V9z"></path><polyline points="13 2 13 9 20 9"></polyline><line x1="9" y1="13" x2="15" y2="13"></line><line x1="9" y1="17" x2="15" y2="17"></line></svg></span><span class="nav-label">资料管理</span></button>
         <button data-tab="reports"><span class="nav-icon"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 19h16"></path><path d="M7 16V9"></path><path d="M12 16V5"></path><path d="M17 16v-4"></path></svg></span><span class="nav-label">报表管理</span></button>
         <button data-tab="system" data-admin-only="true"><span class="nav-icon"><svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="12" r="3"></circle><path d="M19.4 15a1.7 1.7 0 0 0 .34 1.87l.06.06a2 2 0 1 1-2.83 2.83l-.06-.06A1.7 1.7 0 0 0 15 19.4a1.7 1.7 0 0 0-1 .6 1.7 1.7 0 0 0-.4 1V21a2 2 0 1 1-4 0v-.09a1.7 1.7 0 0 0-.4-1 1.7 1.7 0 0 0-1-.6 1.7 1.7 0 0 0-1.87.34l-.06.06a2 2 0 1 1-2.83-2.83l.06-.06A1.7 1.7 0 0 0 4.6 15a1.7 1.7 0 0 0-.6-1 1.7 1.7 0 0 0-1-.4H3a2 2 0 1 1 0-4h.09a1.7 1.7 0 0 0 1-.4 1.7 1.7 0 0 0 .6-1 1.7 1.7 0 0 0-.34-1.87l-.06-.06a2 2 0 1 1 2.83-2.83l.06.06A1.7 1.7 0 0 0 9 4.6a1.7 1.7 0 0 0 1-.6 1.7 1.7 0 0 0 .4-1V3a2 2 0 1 1 4 0v.09a1.7 1.7 0 0 0 .4 1 1.7 1.7 0 0 0 1 .6 1.7 1.7 0 0 0 1.87-.34l.06-.06a2 2 0 1 1 2.83 2.83l-.06.06A1.7 1.7 0 0 0 19.4 9c.26.3.47.65.6 1 .09.33.13.67.1 1.01-.03.34-.13.68-.3.99-.16.32-.39.6-.66.84z"></path></svg></span><span class="nav-label">系统管理</span></button>
@@ -2563,6 +2567,7 @@
       user: null,
       csrfToken: '',
       captchaToken: '',
+      regCaptchaToken: '',
       projects: [],
       users: [],
       assets: [],
@@ -2734,8 +2739,33 @@
       const box = document.getElementById(id);
       if (box) {
         if (box._msgTimer) { clearTimeout(box._msgTimer); box._msgTimer = null; }
-        box.innerHTML = html ? `<div class="message ${type}">${html}</div>` : '';
-        if (html) box._msgTimer = setTimeout(() => { box.innerHTML = ''; box._msgTimer = null; }, 5000);
+        box.innerHTML = '';
+        if (html) {
+          const wrapper = document.createElement('div');
+          wrapper.className = 'message ' + type;
+          wrapper.textContent = html;
+          box.appendChild(wrapper);
+          box._msgTimer = setTimeout(() => { box.innerHTML = ''; box._msgTimer = null; }, 5000);
+        }
+      }
+      showToast(toastText || '', type);
+    }
+
+    function appendBackupLinkToMessage(id, href, filename, toastText, type = 'success') {
+      const box = document.getElementById(id);
+      if (box) {
+        if (box._msgTimer) { clearTimeout(box._msgTimer); box._msgTimer = null; }
+        box.innerHTML = '';
+        const wrapper = document.createElement('div');
+        wrapper.className = 'message ' + type;
+        const prefix = document.createTextNode('备份创建成功: ');
+        const link = document.createElement('a');
+        link.href = href;
+        link.textContent = filename;
+        wrapper.appendChild(prefix);
+        wrapper.appendChild(link);
+        box.appendChild(wrapper);
+        box._msgTimer = setTimeout(() => { box.innerHTML = ''; box._msgTimer = null; }, 5000);
       }
       showToast(toastText || '', type);
     }
@@ -4355,7 +4385,7 @@
         const result = await api(`/api/documents/${id}/verify-password`, { method: 'POST', body: JSON.stringify({ password }) });
         closeModal('documentPasswordModal');
         if (pendingDocumentAction === 'view') {
-          showDocumentDetail(id);
+          showDocumentDetail(id, result.token);
         } else if (pendingDocumentAction === 'download') {
           const item = state.documents.find(d => d.id === id);
           if (item && item.attachmentName) {
@@ -4364,6 +4394,9 @@
             a.download = item.attachmentName;
             a.click();
           }
+        } else if (pendingDocumentAction === 'edit') {
+          state.editDocumentAccessKey = password;
+          await editDocument(id, result.token, password);
         } else if (pendingDocumentAction === 'edit-credentials') {
           document.getElementById('edDocumentLoginPassword').disabled = false;
           document.getElementById('edDocumentLoginPassword').type = 'password';
@@ -4380,24 +4413,71 @@
       }
     }
 
-    async function showDocumentDetail(id) {
+    const DOCUMENT_MANAGEMENT_PROTOCOLS = new Set(['http', 'https', 'ssh', 'telnet']);
+
+    function buildDocumentManagementUrl(method, host, port) {
+      const protocol = String(method || '').trim().toLowerCase();
+      const hostname = String(host || '').trim();
+      const portValue = String(port || '').trim();
+      if (!DOCUMENT_MANAGEMENT_PROTOCOLS.has(protocol) || !hostname) return '';
+      if (/[\s<>"'`\\]/.test(hostname)) return '';
+      if (portValue) {
+        const portNumber = Number(portValue);
+        if (!/^\d{1,5}$/.test(portValue) || !Number.isInteger(portNumber) || portNumber < 1 || portNumber > 65535) return '';
+      }
+      return `${protocol}://${hostname}${portValue ? ':' + portValue : ''}`;
+    }
+
+    function appendDocumentDetailRow(tbody, label, value, href) {
+      const tr = document.createElement('tr');
+      const labelTd = document.createElement('td');
+      const valueTd = document.createElement('td');
+      labelTd.textContent = label;
+      if (href) {
+        const a = document.createElement('a');
+        a.href = href;
+        a.target = '_blank';
+        a.rel = 'noopener noreferrer';
+        a.style.color = 'var(--primary)';
+        a.textContent = value;
+        valueTd.appendChild(a);
+      } else {
+        valueTd.textContent = value;
+      }
+      tr.appendChild(labelTd);
+      tr.appendChild(valueTd);
+      tbody.appendChild(tr);
+    }
+
+    async function showDocumentDetail(id, token) {
       try {
-        const detail = await api(`/api/documents/${id}`);
-        const lines = [];
-        if (detail.brand) lines.push(`<tr><td>品牌</td><td>${esc(detail.brand)}</td></tr>`);
-        if (detail.model) lines.push(`<tr><td>规格型号</td><td>${esc(detail.model)}</td></tr>`);
-        if (detail.serialNumber) lines.push(`<tr><td>序列号</td><td>${esc(detail.serialNumber)}</td></tr>`);
-        if (detail.purchaseDate) lines.push(`<tr><td>购买日期</td><td>${esc(detail.purchaseDate)}</td></tr>`);
-        if (detail.warrantyExpiryDate) lines.push(`<tr><td>过保日期</td><td>${esc(detail.warrantyExpiryDate)}</td></tr>`);
-        if (detail.managementMethod && detail.managementIp) {
-          const url = `${detail.managementMethod}://${detail.managementIp}${detail.managementPort ? ':' + detail.managementPort : ''}`;
-          lines.push(`<tr><td>管理URL</td><td><a href="${esc(url)}" target="_blank" rel="noopener" style="color:var(--primary);">${esc(url)}</a></td></tr>`);
-        }
-        if (detail.loginAccount) lines.push(`<tr><td>登录账号</td><td>${esc(detail.loginAccount)}</td></tr>`);
+        const detail = await api(`/api/documents/${id}?token=${encodeURIComponent(token || '')}`);
+        const rows = [];
+        if (detail.brand) rows.push(['品牌', detail.brand]);
+        if (detail.model) rows.push(['规格型号', detail.model]);
+        if (detail.serialNumber) rows.push(['序列号', detail.serialNumber]);
+        if (detail.purchaseDate) rows.push(['购买日期', detail.purchaseDate]);
+        if (detail.warrantyExpiryDate) rows.push(['过保日期', detail.warrantyExpiryDate]);
+        const managementUrl = buildDocumentManagementUrl(detail.managementMethod, detail.managementIp, detail.managementPort);
+        if (managementUrl) rows.push(['管理URL', managementUrl, managementUrl]);
+        if (detail.loginAccount) rows.push(['登录账号', detail.loginAccount]);
         document.getElementById('documentDetailTitle').textContent = detail.title || '资料详情';
-        document.getElementById('documentDetailContent').innerHTML = lines.length
-          ? `<table style="width:100%;border-collapse:collapse;"><tbody>${lines.join('')}</tbody></table>`
-          : '<p style="color:var(--sub);">无设备信息</p>';
+        const content = document.getElementById('documentDetailContent');
+        content.textContent = '';
+        if (rows.length) {
+          const table = document.createElement('table');
+          const tbody = document.createElement('tbody');
+          table.style.width = '100%';
+          table.style.borderCollapse = 'collapse';
+          rows.forEach(row => appendDocumentDetailRow(tbody, row[0], row[1], row[2]));
+          table.appendChild(tbody);
+          content.appendChild(table);
+        } else {
+          const empty = document.createElement('p');
+          empty.style.color = 'var(--sub)';
+          empty.textContent = '无设备信息';
+          content.appendChild(empty);
+        }
         openModal('documentDetailModal');
       } catch (error) {
         showGlobalError(error.message || '获取资料详情失败');
@@ -4447,9 +4527,10 @@
       }
     }
 
-    async function editDocument(id) {
+    async function editDocument(id, token, accessKey) {
       try {
-        const item = await api(`/api/documents/${id}`);
+        const item = await api(`/api/documents/${id}?token=${encodeURIComponent(token || '')}`);
+        if (accessKey) state.editDocumentAccessKey = accessKey;
         document.getElementById('edDocumentId').value = item.id;
         fillSelect('edDocumentProjectId', state.projects.map(p => ({ id: p.id, name: formatProjectDisplay(p) })));
         document.getElementById('edDocumentProjectId').value = item.projectId || '';
@@ -4463,12 +4544,16 @@
         const method = item.managementMethod || '';
         const ip = item.managementIp || '';
         const port = item.managementPort || '';
-        document.getElementById('edDocumentManagementUrl').value = method && ip ? `${method}://${ip}${port ? ':' + port : ''}` : '';
+        const managementUrl = buildDocumentManagementUrl(method, ip, port);
+        document.getElementById('edDocumentManagementUrl').value = managementUrl;
         document.getElementById('edDocumentLoginAccount').value = item.loginAccount || '';
-        document.getElementById('edDocumentLoginPassword').value = '';
-        document.getElementById('edDocumentLoginPassword').disabled = true;
-        document.getElementById('edDocumentLoginPassword').type = 'password';
-        document.getElementById('edDocumentLoginPassword').placeholder = item.loginAccount ? '点击眼睛图标验证后输入新密码' : '输入密码';
+        const loginPasswordInput = document.getElementById('edDocumentLoginPassword');
+        const verifyPasswordBtn = document.getElementById('edDocumentVerifyPasswordBtn');
+        const hasVerifiedAccess = Boolean(accessKey);
+        loginPasswordInput.value = '';
+        loginPasswordInput.disabled = !hasVerifiedAccess;
+        loginPasswordInput.type = 'password';
+        loginPasswordInput.placeholder = hasVerifiedAccess ? '输入新密码，留空保持原密码' : (item.loginAccount ? '点击眼睛图标验证后输入新密码' : '输入密码');
         document.getElementById('edDocumentAccessPassword').value = '';
         document.getElementById('edDocumentAttachment').value = '';
         const edType = item.type || '';
@@ -4478,13 +4563,16 @@
         if (edTitleLabel) edTitleLabel.textContent = edType === 'device' ? '设备名称' : '资料名称';
         const edTitleInput = document.getElementById('edDocumentTitle');
         if (edTitleInput) edTitleInput.placeholder = edType === 'device' ? '请输入设备名称' : '请输入资料名称';
-        if (item.loginAccount) {
-          document.getElementById('edDocumentVerifyPasswordBtn').style.color = 'var(--sub)';
-          document.getElementById('edDocumentVerifyPasswordBtn').style.pointerEvents = 'auto';
-          state.edDocumentPasswordVerified = false;
+        if (item.loginAccount || hasVerifiedAccess) {
+          verifyPasswordBtn.style.color = hasVerifiedAccess ? '#16a34a' : 'var(--sub)';
+          verifyPasswordBtn.style.pointerEvents = 'auto';
+          verifyPasswordBtn.innerHTML = hasVerifiedAccess
+            ? '<svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M17.94 17.94A10.07 10.07 0 0112 20c-7 0-11-8-11-8a18.45 18.45 0 015.06-5.94M9.9 4.24A9.12 9.12 0 0112 4c7 0 11 8 11 8a18.5 18.5 0 01-2.16 3.19m-6.72-1.07a3 3 0 11-4.24-4.24"/><line x1="1" y1="1" x2="23" y2="23"/></svg>'
+            : '<svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M1 12s4-8 11-8 11 8 11 8-4 8-11 8-11-8-11-8z"/><circle cx="12" cy="12" r="3"/></svg>';
+          state.edDocumentPasswordVerified = hasVerifiedAccess;
         } else {
-          document.getElementById('edDocumentVerifyPasswordBtn').style.color = '#ccc';
-          document.getElementById('edDocumentVerifyPasswordBtn').style.pointerEvents = 'none';
+          verifyPasswordBtn.style.color = '#ccc';
+          verifyPasswordBtn.style.pointerEvents = 'none';
           state.edDocumentPasswordVerified = false;
         }
         document.getElementById('documentEditMessage').textContent = '';
@@ -4499,14 +4587,17 @@
       if (!url) return { managementMethod: '', managementIp: '', managementPort: '' };
       try {
         const u = new URL(url);
+        const protocol = u.protocol.replace(':', '').toLowerCase();
+        const safeUrl = buildDocumentManagementUrl(protocol, u.hostname, u.port || '');
+        if (!safeUrl) return { managementMethod: '', managementIp: '', managementPort: '' };
         return {
-          managementMethod: u.protocol.replace(':', ''),
+          managementMethod: protocol,
           managementIp: u.hostname,
           managementPort: u.port || ''
         };
       } catch (_) {
-        const m = url.match(/^([a-zA-Z][a-zA-Z0-9+.-]*):\/\/([^:/]+)(?::(\d+))?/);
-        if (m) return { managementMethod: m[1], managementIp: m[2], managementPort: m[3] || '' };
+        const m = url.match(/^([a-zA-Z][a-zA-Z0-9+.-]*):\/\/([^:/\s<>"'`\\]+)(?::(\d{1,5}))?/);
+        if (m && buildDocumentManagementUrl(m[1], m[2], m[3] || '')) return { managementMethod: m[1].toLowerCase(), managementIp: m[2], managementPort: m[3] || '' };
         return { managementMethod: '', managementIp: '', managementPort: '' };
       }
     }
@@ -5930,7 +6021,10 @@
 
     function closeModal(id) {
       const el = document.getElementById(id);
-      if (el) el.classList.add('hidden');
+      if (el) {
+        el.classList.add('hidden');
+        el.dispatchEvent(new CustomEvent('modalClosed'));
+      }
     }
 
     function showConfirm(message) {
@@ -6026,7 +6120,21 @@
 
     async function openRegisterModal() {
       openModal('registerModal');
+      try {
+        const result = await api('/api/captcha');
+        state.regCaptchaToken = result.token;
+        document.getElementById('regCaptchaImg').src = result.svg;
+      } catch (_) {}
     }
+
+    document.getElementById('regCaptchaImg').addEventListener('click', async () => {
+      try {
+        const result = await api('/api/captcha');
+        state.regCaptchaToken = result.token;
+        document.getElementById('regCaptchaImg').src = result.svg;
+        document.getElementById('regCaptchaInput').value = '';
+      } catch (_) {}
+    });
 
     async function registerSubmit() {
       const username = document.getElementById('regUsername').value.trim();
@@ -6035,8 +6143,10 @@
       const phone = document.getElementById('regPhone').value.trim();
       const securityQuestion = document.getElementById('regSecurityQuestion').value.trim();
       const securityAnswer = document.getElementById('regSecurityAnswer').value;
+      const captcha = document.getElementById('regCaptchaInput').value.trim();
       const err = (msg) => { document.getElementById('registerError').textContent = msg; };
       document.getElementById('registerError').textContent = '';
+      if (!captcha) { err('请输入验证码'); return; }
       if (!username) { err('请输入账号'); return; }
       if (!name) { err('请输入姓名'); return; }
       if (!password) { err('请输入密码'); return; }
@@ -6046,10 +6156,10 @@
       if (!securityQuestion) { err('请输入安全问题'); return; }
       if (!securityAnswer) { err('请输入安全问题答案'); return; }
       try {
-        const result = await api('/api/register', { method: 'POST', body: JSON.stringify({ username, name, password, phone, securityQuestion, securityAnswer }) });
+        const result = await api('/api/register', { method: 'POST', body: JSON.stringify({ username, name, password, phone, securityQuestion, securityAnswer, captchaToken: state.regCaptchaToken || '', captcha }) });
         closeModal('registerModal');
         setMessage('loginMessage', result.message || '注册成功，请登录');
-        ['regUsername','regName','regPassword','regPhone','regSecurityQuestion','regSecurityAnswer'].forEach(id => {
+        ['regUsername','regName','regPassword','regPhone','regSecurityQuestion','regSecurityAnswer','regCaptchaInput'].forEach(id => {
           const el = document.getElementById(id);
           if (el) el.value = '';
         });
@@ -7507,7 +7617,7 @@
     document.getElementById('systemBackupBtn').addEventListener('click', async () => {
       try {
         const result = await api('/api/system/backup', { method: 'POST', body: '{}' });
-        setMessageHtml('systemBackupMessage', `备份创建成功: <a href="${result.href}">${result.filename}</a>`, `备份创建成功: ${result.filename}`);
+        appendBackupLinkToMessage('systemBackupMessage', result.href, result.filename, `备份创建成功: ${result.filename}`);
         await refreshSystemManagement();
       } catch (error) {
         setMessage('systemBackupMessage', error.message, 'error');
@@ -8062,7 +8172,7 @@
     });
 
     document.getElementById('documentEditModal').addEventListener('click', function(e) { if (e.target === this) closeModal('documentEditModal'); });
-    document.getElementById('documentEditModal').addEventListener('closeModal', () => { delete state.editDocumentAccessKey; });
+    document.getElementById('documentEditModal').addEventListener('modalClosed', () => { delete state.editDocumentAccessKey; });
     document.getElementById('documentPasswordModal').addEventListener('click', function(e) { if (e.target === this) closeModal('documentPasswordModal'); });
     document.getElementById('documentDetailModal').addEventListener('click', function(e) { if (e.target === this) closeModal('documentDetailModal'); });
 
@@ -8080,7 +8190,7 @@
       const id = btn.dataset.id;
       if (btn.dataset.action === 'view-document') { promptDocumentPassword(id, 'view'); }
       if (btn.dataset.action === 'download-document') { promptDocumentPassword(id, 'download'); }
-      if (btn.dataset.action === 'edit-document') { editDocument(id); }
+      if (btn.dataset.action === 'edit-document') { promptDocumentPassword(id, 'edit'); }
       if (btn.dataset.action === 'delete-document') { removeDocument(id); }
     });
 

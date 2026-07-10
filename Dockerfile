@@ -5,12 +5,13 @@ WORKDIR /app
 ENV NODE_ENV=production
 ENV PORT=3000
 
-COPY package.json ./
-RUN npm install --omit=dev
+RUN apt-get update && DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends ca-certificates iputils-ping openssh-client sshpass
+
+COPY package.json package-lock.json ./
+RUN npm ci --omit=dev
 
 COPY server.js ./
 COPY public ./public
-COPY data ./data
 COPY pptx-template.json ./
 
 RUN mkdir -p /app/data && chown -R node:node /app

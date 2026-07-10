@@ -139,10 +139,13 @@ function verifyPassword(password, storedHash) {
     const expected = parts[3];
     if (!salt || !expected) return false;
     const derived = crypto.scryptSync(String(password), salt, 64);
-    return derived.toString('hex') === expected;
+    const derivedHex = derived.toString('hex');
+    if (derivedHex.length !== expected.length) return false;
+    return crypto.timingSafeEqual(Buffer.from(derivedHex), Buffer.from(expected));
   }
   const legacyHash = crypto.createHash('sha256').update(String(password)).digest('hex');
-  return legacyHash === storedHash;
+  if (legacyHash.length !== storedHash.length) return false;
+  return crypto.timingSafeEqual(Buffer.from(legacyHash), Buffer.from(storedHash));
 }
 
 function encryptLoginPassword(plaintext, accessPassword) {
@@ -1101,17 +1104,13 @@ function normalizeAiInspectionAuthType(authType, protocol = 'ssh') {
 }
 
 function sanitizeUploadFilename(filename) {
-  const base = path.basename(String(filename || '')).replace(/[^a-zA-Z0-9._\-\u4e00-\u9fa5]/g, '_');
-  return base || `upload-${Date.now()}`;
-}
-
-function resolveSafeChildPath(parentDir, childName) {
-  const parent = path.resolve(parentDir);
-  const resolved = path.resolve(parent, childName);
-  if (!(resolved === parent || resolved.startsWith(parent + path.sep))) {
-    throw new Error('Invalid file path');
-  }
-  return resolved;
+  const base = String(filename || '')
+    .replace(/[/\\]/g, '_')
+    .replace(/[^\x20-\x7E\u4e00-\u9fff\u3400-\u4dbf\uf900-\ufaff]/g, '')
+    .trim()
+    || `upload-${Date.now()}`;
+  if (base === '.' || base === '..') return `upload-${Date.now()}`;
+  return base;
 }
 
 function sanitizeAiInspectionTarget(item) {
@@ -1239,10 +1238,16 @@ function isPrivateOrReservedIp(ip) {
     const ranges = [
       ['0.0.0.0', '0.255.255.255'],
       ['10.0.0.0', '10.255.255.255'],
+      ['100.64.0.0', '100.127.255.255'],
       ['127.0.0.0', '127.255.255.255'],
       ['169.254.0.0', '169.254.255.255'],
       ['172.16.0.0', '172.31.255.255'],
+      ['192.0.0.0', '192.0.0.255'],
+      ['192.0.2.0', '192.0.2.255'],
       ['192.168.0.0', '192.168.255.255'],
+      ['198.18.0.0', '198.19.255.255'],
+      ['198.51.100.0', '198.51.100.255'],
+      ['203.0.113.0', '203.0.113.255'],
       ['224.0.0.0', '239.255.255.255'],
       ['240.0.0.0', '255.255.255.255']
     ];
@@ -1250,7 +1255,19 @@ function isPrivateOrReservedIp(ip) {
   }
   if (net.isIP(ip) === 6) {
     const normalized = ip.toLowerCase();
-    return normalized === '::1' || normalized === '::' || normalized.startsWith('fc') || normalized.startsWith('fd') || normalized.startsWith('fe80:');
+    return normalized === '::1'
+      || normalized === '::'
+      || normalized.startsWith('fc')
+      || normalized.startsWith('fd')
+      || normalized.startsWith('fe80:')
+      || normalized.startsWith('ff')
+      || normalized.startsWith('2001:db8:')
+      || normalized.startsWith('2001:0db8:')
+      || normalized.startsWith('2001::')
+      || normalized.startsWith('2001:0:')
+      || normalized.startsWith('2002:')
+      || normalized === '64:ff9b::'
+      || normalized.startsWith('64:ff9b::');
   }
   return true;
 }
@@ -1269,7 +1286,7 @@ async function assertPublicHttpTarget(url, expectedHost) {
 function probeHostReachable(host) {
   if (!validateHost(host)) return Promise.resolve({ reachable: false, latency: null });
   return new Promise((resolve) => {
-    exec(`ping -c 1 -W 2 ${host}`, { timeout: 5000 }, (error, stdout) => {
+    execFile('ping', ['-c', '1', '-W', '2', host], { timeout: 5000 }, (error, stdout) => {
       if (error) return resolve({ reachable: false, latency: null });
       const match = stdout.match(/time=([\d.]+)\s*ms/);
       const latency = match ? parseFloat(match[1]) : null;
@@ -1299,14 +1316,19 @@ function executeSSHCheck(host, port, username, password) {
   if (!validateHost(host) || !validatePort(port)) return Promise.resolve({ success: false, stdout: '', stderr: 'Invalid host or port' });
   if (!username || typeof username !== 'string' || !/^[a-zA-Z0-9_.-]+$/.test(username)) return Promise.resolve({ success: false, stdout: '', stderr: 'Invalid username' });
   return new Promise((resolve) => {
-    const escapedHost = host.replace(/'/g, "'\\''");
-    const escapedUsername = username.replace(/'/g, "'\\''");
-    const escapedPassword = (password || '').replace(/'/g, "'\\''");
     const passFile = `/tmp/sshpass-${Date.now()}-${Math.random().toString(36).slice(2)}`;
-    require('fs').writeFileSync(passFile, escapedPassword, { mode: 0o600 });
-    const sshCmd = `sshpass -f '${passFile}' ssh -o StrictHostKeyChecking=accept-new -o ConnectTimeout=5 -p ${port} ${escapedUsername}@${escapedHost} 'uptime && df -h && free'; rm -f '${passFile}'`;
-    exec(sshCmd, { timeout: 15000 }, (error, stdout, stderr) => {
-      require('fs').unlink(passFile, () => {});
+    fs.writeFileSync(passFile, password || '', { mode: 0o600 });
+    const args = [
+      '-f', passFile,
+      'ssh',
+      '-o', 'StrictHostKeyChecking=accept-new',
+      '-o', 'ConnectTimeout=5',
+      '-p', String(port),
+      `${username}@${host}`,
+      'uptime && df -h && free'
+    ];
+    execFile('sshpass', args, { timeout: 15000, maxBuffer: 1024 * 1024 }, (error, stdout, stderr) => {
+      fs.unlink(passFile, () => {});
       if (error) return resolve({ success: false, stdout: '', stderr: stderr || error.message });
       resolve({ success: true, stdout: stdout || '', stderr: '' });
     });
@@ -1330,7 +1352,7 @@ function normalizeDb(raw = {}) {
     id: user.id || id('user'),
     username: user.username || '',
     passwordHash: user.passwordHash || hash(crypto.randomUUID()),
-    role: user.role || 'engineer',
+    role: ['admin', 'engineer', 'viewer', 'auditor', 'customer'].includes(user.role) ? user.role : 'engineer',
     name: user.name || user.username || '',
     phone: user.phone || '',
     idCard: user.idCard || '',
@@ -2611,7 +2633,7 @@ async function executeAiInspectionTask(db, task, options = {}) {
   const template = (db.aiInspectionTemplates || []).find(item => item.id === task.templateId);
   if (!target || !template) return null;
   const existing = (db.aiInspectionResults || []).find(item => item.taskId === task.id);
-  if (existing) {
+  if (existing && !task.cycle) {
     task.status = '已完成';
     task.completedAt = task.completedAt || existing.createdAt || now();
     return existing;
@@ -2695,7 +2717,8 @@ async function executeAiInspectionTask(db, task, options = {}) {
       };
       db.aiInspectionResults = db.aiInspectionResults || [];
       db.aiInspectionResults.push(result);
-      task.status = '失败';
+      task.status = task.cycle ? '待执行' : '失败';
+      task.executedAt = result.createdAt;
       task.completedAt = result.createdAt;
       const operator = (db.users || []).find(item => item.id === task.createdBy);
       if (operator) {
@@ -2764,7 +2787,8 @@ async function executeAiInspectionTask(db, task, options = {}) {
     };
     db.aiInspectionResults = db.aiInspectionResults || [];
     db.aiInspectionResults.push(result);
-    task.status = '失败';
+    task.status = task.cycle ? '待执行' : '失败';
+    task.executedAt = result.createdAt;
     task.completedAt = result.createdAt;
     const operator = (db.users || []).find(item => item.id === task.createdBy);
     if (operator) {
@@ -4260,6 +4284,9 @@ const requestHandler = async (req, res) => {
 
     if (req.method === 'POST' && pathname === '/api/register') {
       const body = await readBody(req);
+      if (!verifyCaptchaToken(body.captchaToken, body.captcha)) {
+        return json(res, 401, { message: '验证码错误' });
+      }
       const username = String(body.username || '').trim();
       if (!username) {
         return json(res, 400, { message: '账号不能为空' });
@@ -5008,6 +5035,24 @@ const requestHandler = async (req, res) => {
       const target = db.documents.find(item => item.id === docId);
       if (!target) return json(res, 404, { message: '资料不存在' });
       if (user.role !== 'admin' && target.projectId !== user.projectId) return json(res, 403, { message: '无权访问该资料' });
+      if (target.accessPasswordHash) {
+        const rawToken = reqUrl.searchParams.get('token') || '';
+        try {
+          const decoded = Buffer.from(rawToken, 'base64url').toString('utf8');
+          const lastColon = decoded.lastIndexOf(':');
+          if (lastColon === -1) return json(res, 403, { message: '访问令牌无效' });
+          const payload = decoded.slice(0, lastColon);
+          const sig = decoded.slice(lastColon + 1);
+          const expectedSig = crypto.createHmac('sha256', DOCUMENT_TOKEN_SECRET).update(payload).digest('hex');
+          if (sig.length !== expectedSig.length || !crypto.timingSafeEqual(Buffer.from(sig), Buffer.from(expectedSig))) return json(res, 403, { message: '访问令牌无效' });
+          const parts = payload.split(':');
+          if (parts[0] !== docId || parts[1] !== user.id) return json(res, 403, { message: '访问令牌与资料不匹配' });
+          const tokenTime = parseInt(parts[2], 10);
+          if (nowMs() - tokenTime > 10 * 60 * 1000) return json(res, 403, { message: '访问链接已过期，请重新验证密码' });
+        } catch (_) {
+          return json(res, 403, { message: '访问令牌无效' });
+        }
+      }
       const sanitized = { ...target };
       delete sanitized.accessPasswordHash;
       delete sanitized.loginPasswordHash;
@@ -6377,10 +6422,10 @@ const requestHandler = async (req, res) => {
       return json(res, 200, { ok: true });
     }
 
-    if (req.method === 'GET' && pathname === '/api/ai-inspection/results') {
-      const user = requireAuth(req, res, db);
-      if (!user) return;
-      const list = filterByProjectScope(db.aiInspectionResults || [], user, item => item.projectId);
+      if (req.method === 'GET' && pathname === '/api/ai-inspection/results') {
+        const user = requireAuth(req, res, db);
+        if (!user) return;
+        const list = filterByProjectScope(db.aiInspectionResults || [], user, item => item.projectId);
       const query = Object.fromEntries(reqUrl.searchParams);
       const sorted = parseSortQuery(query, list, 'createdAt');
       return json(res, 200, paginateResult(sorted, query));
@@ -6502,7 +6547,12 @@ const requestHandler = async (req, res) => {
       const user = requireAdmin(req, res, db);
       if (!user) return;
       const body = await readBody(req);
-      db.systemConfig = normalizeSystemConfig({ ...db.systemConfig, ...body });
+      const allowedKeys = ['webIdleLogoutMinutes', 'httpsLoginEnabled', 'httpsPort', 'allowRegistration', 'loginRateLimitMaxAttempts', 'loginRateLimitWindowMinutes', 'loginRateLimitLockMinutes', 'timezoneOffset'];
+      const safeBody = {};
+      for (const key of allowedKeys) {
+        if (body[key] !== undefined) safeBody[key] = body[key];
+      }
+      db.systemConfig = normalizeSystemConfig({ ...db.systemConfig, ...safeBody });
       systemTimezoneOffsetMinutes = db.systemConfig.timezoneOffset;
       await applyHttpsServerConfig(db.systemConfig);
       appendAuditLog(db, user, 'update', 'system', '', `更新系统设置`);
@@ -6994,6 +7044,16 @@ function broadcastChange(topic, payload = {}) {
 }
 
 const port = Number(process.env.PORT || 3000);
+
+// Clean up stale SSH password temp files from previous crashed processes
+try {
+  const tmpFiles = fs.readdirSync('/tmp').filter(f => f.startsWith('sshpass-'));
+  for (const f of tmpFiles) {
+    const abs = path.join('/tmp', f);
+    try { fs.unlinkSync(abs); } catch (_) {}
+  }
+} catch (_) {}
+
 server.listen(port, () => {
   console.log(`Server running at http://localhost:${port}`);
 });
@@ -7041,7 +7101,10 @@ function runAutoBackup() {
 runAutoBackup();
 const backupIntervalId = setInterval(runAutoBackup, 24 * 60 * 60 * 1000);
 
+let shuttingDown = false;
 function gracefulShutdown(signal) {
+  if (shuttingDown) return;
+  shuttingDown = true;
   console.error(`Received ${signal}, shutting down gracefully...`);
   clearInterval(wsHeartbeatTimer);
   clearInterval(schedulerIntervalId);
@@ -7067,3 +7130,12 @@ function gracefulShutdown(signal) {
 
 process.on('SIGTERM', () => gracefulShutdown('SIGTERM'));
 process.on('SIGINT', () => gracefulShutdown('SIGINT'));
+
+process.on('uncaughtException', (err) => {
+  console.error('Uncaught exception, shutting down:', err);
+  gracefulShutdown('uncaughtException');
+});
+process.on('unhandledRejection', (reason) => {
+  console.error('Unhandled rejection:', reason);
+  gracefulShutdown('unhandledRejection');
+});

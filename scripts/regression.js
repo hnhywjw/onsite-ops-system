@@ -397,6 +397,27 @@ async function main() {
   assert(aiFutureTaskExecute.data.task?.status === '失败', '地址不通时手动执行任务未标记失败');
   assert(aiFutureTaskExecute.data.result?.level === '严重', '地址不通时巡检结果未标记严重');
   assert(Array.isArray(aiFutureTaskExecute.data.result?.abnormalItems) && aiFutureTaskExecute.data.result.abnormalItems.some(item => String(item).includes('探测失败')), '地址不通时巡检结果未记录探测失败');
+  const aiCycleTask = await request('/api/ai-inspection/tasks', {
+    method: 'POST',
+    headers: { cookie, 'Content-Type': 'application/json' },
+    body: JSON.stringify({
+      targetId: aiTarget.data.id,
+      templateId: serverTemplate.id,
+      title: 'AI 周期巡检回归任务',
+      executor: 'admin',
+      cycle: 'daily',
+      executedAt: '2099-06-19T14:00',
+      metrics: (serverTemplate.metrics || []).map(metric => ({ ...metric, value: 10 }))
+    })
+  });
+  assert(aiCycleTask.status === 201 && aiCycleTask.data.task?.status === '待执行', '创建周期 AI 巡检任务失败');
+  const aiCycleExecute1 = await request(`/api/ai-inspection/tasks/${aiCycleTask.data.task.id}/execute`, { method: 'POST', headers: { cookie, 'Content-Type': 'application/json' }, body: '{}' });
+  assert(aiCycleExecute1.status === 200 && aiCycleExecute1.data.task?.status === '待执行', '周期巡检失败后未保持待执行');
+  const aiCycleExecute2 = await request(`/api/ai-inspection/tasks/${aiCycleTask.data.task.id}/execute`, { method: 'POST', headers: { cookie, 'Content-Type': 'application/json' }, body: '{}' });
+  assert(aiCycleExecute2.status === 200, '周期巡检第二次执行失败');
+  const aiCycleResults = await request('/api/ai-inspection/results', { headers: { cookie } });
+  const aiCycleResultCount = Array.isArray(aiCycleResults.data.data) ? aiCycleResults.data.data.filter(item => item.taskId === aiCycleTask.data.task.id).length : 0;
+  assert(aiCycleResultCount >= 2, '周期巡检旧结果阻断了新结果生成');
   const backupTarget = await request('/api/ai-inspection/targets', {
     method: 'POST',
     headers: { cookie, 'Content-Type': 'application/json' },
@@ -429,6 +450,8 @@ async function main() {
   assert(aiReportHtml.status === 200, 'AI 巡检 HTML 报告失败');
   const aiReportPptx = await request(`/api/reports/ai-inspection/results/${encodeURIComponent(aiTask.data.result.id)}/pptx`, { headers: { cookie } });
   assert(aiReportPptx.status === 200, 'AI 巡检 PPT 报告失败');
+  const aiCycleTaskDelete = await request(`/api/ai-inspection/tasks/${aiCycleTask.data.task.id}`, { method: 'DELETE', headers: { cookie } });
+  assert(aiCycleTaskDelete.status === 200, '删除周期 AI 巡检任务失败');
   const aiFutureTaskDelete = await request(`/api/ai-inspection/tasks/${aiFutureTask.data.task.id}`, { method: 'DELETE', headers: { cookie } });
   assert(aiFutureTaskDelete.status === 200, '删除待执行 AI 巡检任务失败');
   const aiTaskDelete = await request(`/api/ai-inspection/tasks/${aiTask.data.task.id}`, { method: 'DELETE', headers: { cookie } });
@@ -466,6 +489,19 @@ async function main() {
   assert(sessionAfterRestore.status === 200 && sessionAfterRestore.data.user?.username === 'admin', '恢复原始数据后当前会话未保留');
 
   // L5: Customer role KB permission test
+  // Ensure stale test user is cleaned up before creating
+  const allUsers = await request('/api/users', { headers: { cookie } });
+  const existingCustomerUser = allUsers.data.data.find(u => u.username === 'kb_test_customer');
+  if (existingCustomerUser) {
+    const kbList = await request('/api/kb', { headers: { cookie } });
+    if (kbList.status === 200 && Array.isArray(kbList.data.data)) {
+      const customerKbEntries = kbList.data.data.filter(item => item.createdBy === existingCustomerUser.id);
+      for (const entry of customerKbEntries) {
+        await request(`/api/kb/${entry.id}`, { method: 'DELETE', headers: { cookie } });
+      }
+    }
+    await request(`/api/users/${existingCustomerUser.id}`, { method: 'DELETE', headers: { cookie } });
+  }
   const kbEntriesBefore = await request('/api/kb', { headers: { cookie } });
   assert(kbEntriesBefore.status === 200, '读取知识库列表失败');
   const kbCountBefore = Array.isArray(kbEntriesBefore.data.data) ? kbEntriesBefore.data.data.length : 0;
@@ -473,7 +509,7 @@ async function main() {
   const createCustomer = await request('/api/users', { method: 'POST', headers: { cookie, 'Content-Type': 'application/json' }, body: JSON.stringify(testCustomerUser) });
   assert(createCustomer.status === 201, '创建测试客户失败');
   const customerLogin = await login('kb_test_customer', 'Testpass1!');
-  assert(customerLogin.status === 200, '测试客户登录失败');
+  assert(customerLogin.status === 200 && customerLogin.data.user?.role === 'customer', '测试客户登录失败或角色不正确');
   const customerCookie = customerLogin.cookie;
   const custKbRead = await request('/api/kb', { headers: { cookie: customerCookie } });
   assert(custKbRead.status === 200 && Array.isArray(custKbRead.data.data), '客户角色无法读取知识库');
@@ -536,7 +572,10 @@ async function main() {
   });
   assert(correctPwd.status === 200 && correctPwd.data.token, '正确密码验证未返回 token');
 
-  const docDetail = await request(`/api/documents/${docId1}`, { headers: { cookie } });
+  const docDetailWithoutToken = await request(`/api/documents/${docId1}`, { headers: { cookie } });
+  assert(docDetailWithoutToken.status === 403, '未验证 token 不应读取资料详情');
+
+  const docDetail = await request(`/api/documents/${docId1}?token=${encodeURIComponent(correctPwd.data.token)}`, { headers: { cookie } });
   assert(docDetail.status === 200, '查询资料详情失败');
   assert(!docDetail.data.accessPasswordHash && !docDetail.data.loginPasswordHash, '资料详情暴露了密码哈希');
 

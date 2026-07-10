@@ -26,16 +26,16 @@
 
 ```text
 .
-├── server.js                  # 后端主服务与 API
-├── public/index.html          # 前端单页应用
-├── scripts/                   # lint、typecheck、smoke、regression、e2e
-├── Dockerfile                 # 容器镜像构建
-├── docker-compose.yml         # 应用 + MySQL 编排
-├── DEPLOY.md                  # 安装部署说明
-├── package.json               # 项目脚本与依赖
-├── package-lock.json          # 依赖锁定
-├── pptx-template.json         # PPTX 报告模板
-└── .monkeycode/               # 项目文档、规格与记忆
+├── README.md                    # 项目说明
+├── PRODUCTION_DEPLOY.md         # 生产安装部署说明
+├── .env.production.example      # 生产环境变量模板
+├── Dockerfile                   # 容器镜像构建
+├── docker-compose.prod.yml      # 生产 Docker Compose 编排
+├── package.json                 # 项目脚本与依赖
+├── package-lock.json            # 依赖锁定
+├── server.js                    # 后端主服务与 API
+├── public/index.html            # 前端单页应用
+└── pptx-template.json           # PPTX 报告模板
 ```
 
 ## 本地运行
@@ -47,7 +47,9 @@ npm start
 
 默认访问地址：`http://localhost:3000`
 
-## 常用命令
+## 源码仓库常用校验命令
+
+生产部署包仅包含运行文件，自动化校验脚本位于源码仓库 `scripts/` 目录。
 
 ```bash
 npm run lint
@@ -77,7 +79,7 @@ curl http://localhost:3000/api/ready
 推荐使用 Docker Compose：
 
 ```bash
-docker compose up -d --build
+docker compose --env-file .env.production -f docker-compose.prod.yml up -d --build
 ```
 
 生产环境必须配置强密码和密钥，重点环境变量包括：
@@ -90,7 +92,7 @@ docker compose up -d --build
 - `ENCRYPTION_KEY`
 - `UPGRADE_SIGNING_KEY`
 
-完整部署步骤见 `DEPLOY.md`。
+完整部署步骤见 `PRODUCTION_DEPLOY.md`。
 
 ## 安全说明
 
