@@ -1,10 +1,10 @@
-# 驻场运维管理系统 v1.0.2 生产安装部署说明
+# 驻场运维管理系统 v1.0.3 生产安装部署说明
 
-本文档用于在生产环境部署 `onsite-ops-system-v1.0.2`。
+本文档用于在生产环境部署 `onsite-ops-system-v1.0.3`。
 
 ## 1. 交付物
 
-生产部署包：`onsite-ops-system-v1.0.2-production.tar.gz`
+生产部署包：`onsite-ops-system-v1.0.3-production.tar.gz`
 
 包内核心文件：
 
@@ -50,7 +50,7 @@ pptx-template.json
 ```bash
 mkdir -p /opt/onsite-ops-system
 cd /opt/onsite-ops-system
-tar -xzf onsite-ops-system-v1.0.2-production.tar.gz
+tar -xzf onsite-ops-system-v1.0.3-production.tar.gz
 ```
 
 ### 3.2 准备生产环境变量
@@ -247,7 +247,7 @@ docker compose --env-file .env.production -f docker-compose.prod.yml exec onsite
 
 ```bash
 cd /opt/onsite-ops-system
-tar -xzf onsite-ops-system-v1.0.2-production.tar.gz
+tar -xzf onsite-ops-system-v1.0.3-production.tar.gz
 ```
 
 ### 7.3 重建并重启
@@ -271,7 +271,7 @@ curl http://127.0.0.1:3000/api/ready
 - 管理员账号可登录
 - `/api/health` 返回正常
 - `/api/ready` 返回正常
-- 系统版本显示为 `v1.0.2`
+- 系统版本显示为 `v1.0.3`
 - 项目、资产、日志页面可读取数据
 - 自动化巡检页面可打开
 - 配置备份页面可打开
