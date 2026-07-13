@@ -4500,6 +4500,22 @@ const requestHandler = async (req, res) => {
       return json(res, 200, { user: sanitizeUser(user), systemConfig: user ? db.systemConfig : {}, csrfToken: user ? getSessionCsrfToken(cookies.sessionToken) : '' });
     }
 
+    if (req.method === 'GET' && pathname === '/api/sessions/online') {
+      const user = requireAuth(req, res, db);
+      if (!user) return;
+      const onlineUsers = [];
+      const seenUserIds = new Set();
+      for (const s of (db.sessions || [])) {
+        if (seenUserIds.has(s.userId)) continue;
+        const u = (db.users || []).find(x => x.id === s.userId);
+        if (u && u.status === 'active') {
+          seenUserIds.add(s.userId);
+          onlineUsers.push({ id: u.id, username: u.username, name: u.name, role: u.role });
+        }
+      }
+      return json(res, 200, { count: onlineUsers.length, users: onlineUsers });
+    }
+
     if (req.method === 'GET' && pathname === '/api/projects') {
       const user = requireAuth(req, res, db);
       if (!user) return;

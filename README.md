@@ -105,13 +105,19 @@ docker compose --env-file .env.production -f docker-compose.prod.yml up -d --bui
 
 ## 版本
 
-当前版本：`1.0.2`
+当前版本：`1.0.3`
 
 ### 软件包下载
 
-最新版本：**[v1.0.2 - 安全加固与生产部署就绪](https://github.com/hnhywjw/onsite-ops-system/releases/tag/v1.0.2)**
+最新版本：**[v1.0.3 - 安全加固与在线人数统计](https://github.com/hnhywjw/onsite-ops-system/releases/tag/v1.0.3)**
 
-下载 `onsite-ops-system-v1.0.2-production.tar.gz` 后解压即可部署，SHA256 校验文件随 Release 一同提供。
+下载 `onsite-ops-system-v1.0.3-production.tar.gz` 后解压即可部署，SHA256 校验文件随 Release 一同提供。
+
+### v1.0.3 更新说明
+
+新增功能：
+- 首页仪表板显示当前在线人数，鼠标悬停查看在线用户列表（姓名/用户名/角色）
+- 在线人数按 userId 去重，过滤非活跃和无效用户
 
 ### v1.0.2 版本说明
 

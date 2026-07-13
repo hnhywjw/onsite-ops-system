@@ -1479,6 +1479,11 @@
             <div class="subtitle">以近 30 天为范围，按天展示日志总数、资产总数和累计工时</div>
           </div>
           <div class="toolbar dashboard-actions">
+            <span id="onlineCountDisplay" style="display: flex; align-items: center; gap: 6px; padding: 6px 12px; background: var(--card-bg, #f8fafc); border-radius: 8px; font-size: 13px; color: var(--text-secondary, #64748b); white-space: nowrap; position: relative; cursor: default;">
+              <span style="display: inline-block; width: 8px; height: 8px; border-radius: 50%; background: #22c55e; flex-shrink: 0;"></span>
+              <span id="onlineCountText">加载中...</span>
+              <div id="onlineUsersTooltip" style="display: none; position: absolute; top: 100%; right: 0; margin-top: 6px; background: #1e293b; color: #e2e8f0; padding: 10px 14px; border-radius: 8px; font-size: 12px; white-space: nowrap; z-index: 1000; box-shadow: 0 4px 12px rgba(0,0,0,0.25); min-width: 160px;"></div>
+            </span>
             <select id="dashboardPeriod">
               <option value="week">每周</option>
               <option value="month" selected>每月</option>
@@ -5635,7 +5640,40 @@
       openTabWithSubtab('assetOps', 'incident');
     }
 
+    async function updateOnlineCount() {
+      try {
+        const result = await api('/api/sessions/online');
+        const count = result.count || 0;
+        const users = result.users || [];
+        document.getElementById('onlineCountText').textContent = `当前在线人数：${count}`;
+        const tooltip = document.getElementById('onlineUsersTooltip');
+        if (users.length) {
+          tooltip.innerHTML = users.map(u =>
+            `<div style="display: flex; align-items: center; gap: 6px; padding: 2px 0;">
+              <span>${esc(u.name)}</span>
+              <span style="color: #94a3b8; font-size: 11px;">@${esc(u.username)}</span>
+              <span style="color: #64748b; font-size: 10px; background: #334155; padding: 1px 5px; border-radius: 3px; margin-left: auto;">${esc(u.role)}</span>
+            </div>`
+          ).join('');
+        } else {
+          tooltip.innerHTML = '<div style="color: #94a3b8;">暂无在线用户</div>';
+        }
+      } catch (_) {
+        document.getElementById('onlineCountText').textContent = '在线人数获取失败';
+      }
+    }
+
+    (function initOnlineTooltip() {
+      const display = document.getElementById('onlineCountDisplay');
+      const tooltip = document.getElementById('onlineUsersTooltip');
+      if (display && tooltip) {
+        display.addEventListener('mouseenter', () => { tooltip.style.display = 'block'; });
+        display.addEventListener('mouseleave', () => { tooltip.style.display = 'none'; });
+      }
+    })();
+
     async function refreshDashboard() {
+      updateOnlineCount();
       const period = document.getElementById('dashboardPeriod').value;
       const summary = await api(`/api/reports/summary?period=${period}`);
       const currentPeriodKey = getCurrentPeriodKey(period);
