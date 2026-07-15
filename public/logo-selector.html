@@ -1,0 +1,268 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Logo 选择 - Onsite Ops System</title>
+  <style>
+    :root { --bg: #f3f6fb; --card: #ffffff; --text: #162033; --sub: #5f6b85; --primary: #2563eb; }
+    * { box-sizing: border-box; }
+    body { margin: 0; font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; background: var(--bg); color: var(--text); }
+    .container { max-width: 900px; margin: 40px auto; padding: 0 24px; }
+    h1 { font-size: 22px; margin-bottom: 6px; }
+    .sub { font-size: 14px; color: var(--sub); margin-bottom: 32px; }
+    .grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(300px, 1fr)); gap: 24px; }
+    .card { background: var(--card); border-radius: 16px; padding: 24px; text-align: center; box-shadow: 0 2px 12px rgba(0,0,0,.06); cursor: pointer; transition: box-shadow .2s, transform .2s; border: 2px solid transparent; }
+    .card:hover { box-shadow: 0 4px 20px rgba(0,0,0,.12); transform: translateY(-2px); }
+    .card.selected { border-color: var(--primary); }
+    .card svg { display: block; margin: 0 auto 16px; width: 120px; height: 120px; }
+    .card h3 { margin: 0 0 6px; font-size: 16px; }
+    .card p { margin: 0; font-size: 13px; color: var(--sub); }
+    .btn { display: inline-block; margin-top: 28px; padding: 10px 24px; background: var(--primary); color: #fff; border: 0; border-radius: 8px; font-size: 15px; cursor: pointer; }
+    .btn:hover { opacity: .9; }
+    #selectionMessage { margin-top: 14px; font-size: 14px; color: var(--primary); }
+  </style>
+</head>
+<body>
+  <div class="container">
+    <h1>Logo 图标方案选择</h1>
+    <p class="sub">点击卡片选中一个方案，选定后点击底部按钮确认。</p>
+
+    <div class="grid" id="logoGrid">
+
+      <!-- Option 1: Shield + Server -->
+      <div class="card" data-logo="1" onclick="selectLogo(this, 1)">
+        <svg viewBox="0 0 200 200" xmlns="http://www.w3.org/2000/svg">
+          <defs>
+            <linearGradient id="g1a" x1="0%" y1="0%" x2="0%" y2="100%"><stop offset="0%" stop-color="#60a5fa"/><stop offset="100%" stop-color="#2563eb"/></linearGradient>
+            <linearGradient id="g1b" x1="0%" y1="0%" x2="0%" y2="100%"><stop offset="0%" stop-color="#eff6ff"/><stop offset="100%" stop-color="#93c5fd"/></linearGradient>
+          </defs>
+          <path d="M30 90 L30 140 Q30 165 55 175 L100 190 L145 175 Q170 165 170 140 L170 90" stroke="url(#g1a)" stroke-width="8" stroke-linecap="round" fill="url(#g1b)"/>
+          <rect x="40" y="50" width="120" height="100" rx="12" fill="url(#g1a)"/>
+          <rect x="44" y="52" width="112" height="5" rx="2.5" fill="#fff" opacity="0.22"/>
+          <rect x="55" y="60" width="90" height="8" rx="4" fill="#fff" opacity=".85"/>
+          <circle cx="70" cy="80" r="5" fill="#22c55e"/>
+          <circle cx="70" cy="100" r="5" fill="#22c55e"/>
+          <circle cx="70" cy="120" r="5" fill="#eab308"/>
+          <rect x="85" y="76" width="50" height="6" rx="3" fill="#fff" opacity=".45"/>
+          <rect x="85" y="96" width="50" height="6" rx="3" fill="#fff" opacity=".45"/>
+          <rect x="85" y="116" width="50" height="6" rx="3" fill="#fff" opacity=".45"/>
+        </svg>
+        <h3>方案一：盾型数据中心</h3>
+        <p>盾牌 + 机柜 + 指示灯，强调安全运维</p>
+        <p style="font-size:12px;color:var(--primary);margin-top:4px;">（当前方案）</p>
+      </div>
+
+      <!-- Option 2: Gear + Check -->
+      <div class="card" data-logo="2" onclick="selectLogo(this, 2)">
+        <svg viewBox="0 0 200 200" xmlns="http://www.w3.org/2000/svg">
+          <defs>
+            <linearGradient id="g2" x1="0%" y1="0%" x2="100%" y2="100%"><stop offset="0%" stop-color="#3b82f6"/><stop offset="100%" stop-color="#1d4ed8"/></linearGradient>
+          </defs>
+          <rect width="200" height="200" rx="36" fill="url(#g2)"/>
+          <path d="M100 30 L115 50 L140 45 L145 70 L168 80 L155 105 L172 128 L150 138 L140 160 L115 152 L100 170 L85 152 L60 160 L50 138 L28 128 L45 105 L32 80 L55 70 L60 45 L85 50 Z" fill="none" stroke="#fff" stroke-width="6" stroke-linejoin="round"/>
+          <circle cx="100" cy="100" r="30" fill="none" stroke="#fff" stroke-width="6"/>
+          <path d="M87 102 L97 112 L118 88" fill="none" stroke="#22c55e" stroke-width="8" stroke-linecap="round" stroke-linejoin="round"/>
+        </svg>
+        <h3>方案二：齿轮+对勾</h3>
+        <p>齿轮象征运维操作，对勾代表服务保障</p>
+      </div>
+
+      <!-- Option 3: Monitor + Dashboard -->
+      <div class="card" data-logo="3" onclick="selectLogo(this, 3)">
+        <svg viewBox="0 0 200 200" xmlns="http://www.w3.org/2000/svg">
+          <defs>
+            <linearGradient id="g3a" x1="0%" y1="0%" x2="100%" y2="100%"><stop offset="0%" stop-color="#3b82f6"/><stop offset="100%" stop-color="#2563eb"/></linearGradient>
+            <linearGradient id="g3b" x1="0%" y1="0%" x2="100%" y2="100%"><stop offset="0%" stop-color="#22c55e"/><stop offset="100%" stop-color="#16a34a"/></linearGradient>
+          </defs>
+          <rect width="200" height="200" rx="36" fill="#f8faff"/>
+          <rect x="30" y="35" width="140" height="100" rx="12" fill="#fff" stroke="url(#g3a)" stroke-width="5"/>
+          <rect x="40" y="47" width="50" height="6" rx="3" fill="#dbeafe"/>
+          <rect x="40" y="60" width="90" height="30" rx="6" fill="#eff6ff"/>
+          <line x1="42" y1="78" x2="128" y2="78" stroke="#93c5fd" stroke-width="1"/>
+          <rect x="45" y="67" width="38" height="15" rx="3" fill="url(#g3b)" opacity=".8"/>
+          <rect x="90" y="64" width="35" height="10" rx="2" fill="#22c55e" opacity=".5"/>
+          <rect x="40" y="98" width="30" height="3" rx="1.5" fill="#e2e8f0"/>
+          <rect x="40" y="106" width="45" height="3" rx="1.5" fill="#e2e8f0"/>
+          <rect x="40" y="114" width="25" height="3" rx="1.5" fill="#e2e8f0"/>
+          <rect x="42" y="142" width="16" height="16" rx="4" fill="url(#g3a)"/>
+          <rect x="70" y="142" width="88" height="16" rx="4" fill="#e5e7eb"/>
+        </svg>
+        <h3>方案三：仪表盘</h3>
+        <p>监控大屏 + 数据图表，强调数字化运维</p>
+      </div>
+
+      <!-- Option 4: Interlocking Rings (O O S) -->
+      <div class="card" data-logo="4" onclick="selectLogo(this, 4)">
+        <svg viewBox="0 0 200 200" xmlns="http://www.w3.org/2000/svg">
+          <defs>
+            <linearGradient id="g4a" x1="0%" y1="0%" x2="100%" y2="100%"><stop offset="0%" stop-color="#3b82f6"/><stop offset="100%" stop-color="#1d4ed8"/></linearGradient>
+            <linearGradient id="g4b" x1="0%" y1="0%" x2="100%" y2="100%"><stop offset="0%" stop-color="#22c55e"/><stop offset="100%" stop-color="#16a34a"/></linearGradient>
+            <linearGradient id="g4c" x1="0%" y1="0%" x2="100%" y2="100%"><stop offset="0%" stop-color="#f59e0b"/><stop offset="100%" stop-color="#ea580c"/></linearGradient>
+          </defs>
+          <rect width="200" height="200" rx="36" fill="#0f172a"/>
+          <circle cx="75" cy="80" r="38" fill="none" stroke="url(#g4a)" stroke-width="9"/>
+          <circle cx="125" cy="80" r="38" fill="none" stroke="url(#g4b)" stroke-width="9"/>
+          <circle cx="100" cy="135" r="38" fill="none" stroke="url(#g4c)" stroke-width="9"/>
+        </svg>
+        <h3>方案四：三环互联</h3>
+        <p>蓝/绿/橙三环代表运维三大支柱，深色背景突出品牌</p>
+      </div>
+
+      <!-- Option 5: Building + Shield -->
+      <div class="card" data-logo="5" onclick="selectLogo(this, 5)">
+        <svg viewBox="0 0 200 200" xmlns="http://www.w3.org/2000/svg">
+          <defs>
+            <linearGradient id="g5a" x1="0%" y1="0%" x2="0%" y2="100%"><stop offset="0%" stop-color="#60a5fa"/><stop offset="100%" stop-color="#2563eb"/></linearGradient>
+            <linearGradient id="g5b" x1="0%" y1="0%" x2="0%" y2="100%"><stop offset="0%" stop-color="#22c55e"/><stop offset="100%" stop-color="#16a34a"/></linearGradient>
+          </defs>
+          <rect width="200" height="200" rx="36" fill="#f0f9ff"/>
+          <path d="M60 165 L60 75 L100 45 L140 75 L140 165" fill="none" stroke="url(#g5a)" stroke-width="6" stroke-linejoin="round"/>
+          <line x1="100" y1="45" x2="100" y2="165" stroke="#93c5fd" stroke-width="2"/>
+          <line x1="60" y1="100" x2="140" y2="100" stroke="#93c5fd" stroke-width="2"/>
+          <rect x="68" y="108" width="24" height="20" rx="3" fill="url(#g5b)" opacity=".7"/>
+          <rect x="108" y="108" width="24" height="20" rx="3" fill="url(#g5b)" opacity=".7"/>
+          <rect x="108" y="135" width="24" height="20" rx="3" fill="url(#g5b)" opacity=".5"/>
+          <rect x="68" y="135" width="24" height="20" rx="3" fill="url(#g5b)" opacity=".5"/>
+          <circle cx="100" cy="76" r="8" fill="#22c55e" opacity=".8"/>
+        </svg>
+        <h3>方案五：建筑+网格</h3>
+        <p>建筑轮廓代表驻场，网格窗口代表多项目管理</p>
+      </div>
+
+      <!-- Option 6: Minimal "O" -->
+      <div class="card" data-logo="6" onclick="selectLogo(this, 6)">
+        <svg viewBox="0 0 200 200" xmlns="http://www.w3.org/2000/svg">
+          <defs>
+            <linearGradient id="g6" x1="0%" y1="0%" x2="100%" y2="100%"><stop offset="0%" stop-color="#3b82f6"/><stop offset="100%" stop-color="#1d4ed8"/></linearGradient>
+          </defs>
+          <rect width="200" height="200" rx="36" fill="url(#g6)"/>
+          <text x="100" y="135" text-anchor="middle" font-family="Arial, sans-serif" font-size="120" font-weight="900" fill="#fff">O</text>
+        </svg>
+        <h3>方案六：极简 O 字母</h3>
+        <p>蓝色底 + 白色 O，简洁现代，品牌辨识度高</p>
+      </div>
+
+      <!-- Option 7: OOS Monogram -->
+      <div class="card" data-logo="7" onclick="selectLogo(this, 7)">
+        <svg viewBox="0 0 200 200" xmlns="http://www.w3.org/2000/svg">
+          <defs>
+            <linearGradient id="g7a" x1="0%" y1="0%" x2="100%" y2="100%"><stop offset="0%" stop-color="#3b82f6"/><stop offset="100%" stop-color="#1d4ed8"/></linearGradient>
+            <linearGradient id="g7b" x1="0%" y1="0%" x2="100%" y2="100%"><stop offset="0%" stop-color="#22c55e"/><stop offset="100%" stop-color="#16a34a"/></linearGradient>
+          </defs>
+          <rect width="200" height="200" rx="36" fill="#0f172a"/>
+          <circle cx="55" cy="65" r="38" fill="none" stroke="url(#g7a)" stroke-width="9"/>
+          <circle cx="100" cy="100" r="38" fill="none" stroke="url(#g7b)" stroke-width="9"/>
+          <circle cx="145" cy="135" r="38" fill="none" stroke="#f59e0b" stroke-width="9"/>
+        </svg>
+        <h3>方案七：OOS 三色环</h3>
+        <p>蓝绿橙三环右上斜排列，暗色底代表 O-O-S 三字母</p>
+      </div>
+
+      <!-- Option 8: Hexagon Tech -->
+      <div class="card" data-logo="8" onclick="selectLogo(this, 8)">
+        <svg viewBox="0 0 200 200" xmlns="http://www.w3.org/2000/svg">
+          <defs>
+            <linearGradient id="g8" x1="0%" y1="0%" x2="100%" y2="100%"><stop offset="0%" stop-color="#3b82f6"/><stop offset="100%" stop-color="#1e3a5f"/></linearGradient>
+          </defs>
+          <rect width="200" height="200" rx="36" fill="#fff"/>
+          <polygon points="100,25 165,65 165,135 100,175 35,135 35,65" fill="url(#g8)"/>
+          <polygon points="100,45 150,75 150,125 100,155 50,125 50,75" fill="none" stroke="#60a5fa" stroke-width="2" opacity=".6"/>
+          <text x="100" y="118" text-anchor="middle" font-family="Arial,sans-serif" font-size="38" font-weight="900" fill="#fff">OOS</text>
+        </svg>
+        <h3>方案八：六边形 OOS</h3>
+        <p>暗蓝六边形 + 白色 OOS 文字，科技感品牌标识</p>
+      </div>
+
+      <!-- Option 9: Server + OOS -->
+      <div class="card" data-logo="9" onclick="selectLogo(this, 9)">
+        <svg viewBox="0 0 200 200" xmlns="http://www.w3.org/2000/svg">
+          <defs>
+            <linearGradient id="g9a" x1="0%" y1="0%" x2="0%" y2="100%"><stop offset="0%" stop-color="#60a5fa"/><stop offset="100%" stop-color="#2563eb"/></linearGradient>
+            <linearGradient id="g9b" x1="0%" y1="0%" x2="0%" y2="100%"><stop offset="0%" stop-color="#eff6ff"/><stop offset="100%" stop-color="#dbeafe"/></linearGradient>
+          </defs>
+          <rect width="200" height="200" rx="36" fill="#f8faff"/>
+          <rect x="40" y="30" width="120" height="100" rx="10" fill="#fff" stroke="#3b82f6" stroke-width="3"/>
+          <rect x="55" y="42" width="90" height="24" rx="4" fill="url(#g9a)"/>
+          <circle cx="72" cy="54" r="4" fill="#22c55e"/>
+          <circle cx="88" cy="54" r="4" fill="#22c55e"/>
+          <circle cx="104" cy="54" r="4" fill="#eab308"/>
+          <rect x="55" y="78" width="30" height="5" rx="2.5" fill="#e2e8f0"/>
+          <rect x="90" y="78" width="55" height="5" rx="2.5" fill="#e2e8f0"/>
+          <rect x="55" y="90" width="30" height="5" rx="2.5" fill="#e2e8f0"/>
+          <rect x="90" y="90" width="45" height="5" rx="2.5" fill="#e2e8f0"/>
+          <rect x="55" y="104" width="90" height="20" rx="4" fill="url(#g9b)"/>
+          <text x="100" y="118" text-anchor="middle" font-family="Arial,sans-serif" font-size="11" font-weight="800" fill="#1d4ed8">ON-SITE</text>
+          <text x="100" y="166" text-anchor="middle" font-family="Arial,sans-serif" font-size="22" font-weight="900" fill="#2563eb">OOS</text>
+          <text x="100" y="186" text-anchor="middle" font-family="Arial,sans-serif" font-size="10" font-weight="700" fill="#64748b" letter-spacing="3">SYSTEM</text>
+        </svg>
+        <h3>方案九：亮色面板+品牌文字</h3>
+        <p>白底服务器面板 + 大号 OOS + ON-SITE 标签 + SYSTEM 副标</p>
+      </div>
+
+      <!-- Option 10: Pulse Wave -->
+      <div class="card" data-logo="10" onclick="selectLogo(this, 10)">
+        <svg viewBox="0 0 200 200" xmlns="http://www.w3.org/2000/svg">
+          <defs>
+            <linearGradient id="g10" x1="0%" y1="0%" x2="100%" y2="100%"><stop offset="0%" stop-color="#3b82f6"/><stop offset="100%" stop-color="#1d4ed8"/></linearGradient>
+          </defs>
+          <rect width="200" height="200" rx="36" fill="url(#g10)"/>
+          <path d="M30 110 Q65 110 65 70 Q65 30 80 30 Q95 30 95 80 Q95 130 110 130 Q125 130 125 80 Q125 30 135 30 Q145 30 145 70 Q145 110 170 110" fill="none" stroke="#fff" stroke-width="8" stroke-linecap="round"/>
+          <circle cx="80" cy="30" r="6" fill="#22c55e"/>
+          <circle cx="135" cy="30" r="6" fill="#22c55e"/>
+        </svg>
+        <h3>方案十：脉冲波形</h3>
+        <p>心电图式脉冲 + 绿色节点，代表系统健康实时监控</p>
+      </div>
+
+      <!-- Option 11: Shield + Brand Text -->
+      <div class="card" data-logo="11" onclick="selectLogo(this, 11)">
+        <svg viewBox="0 0 200 200" xmlns="http://www.w3.org/2000/svg">
+          <defs>
+            <linearGradient id="g11a" x1="0%" y1="0%" x2="0%" y2="100%"><stop offset="0%" stop-color="#60a5fa"/><stop offset="100%" stop-color="#2563eb"/></linearGradient>
+            <linearGradient id="g11b" x1="0%" y1="0%" x2="0%" y2="100%"><stop offset="0%" stop-color="#eff6ff"/><stop offset="100%" stop-color="#bfdbfe"/></linearGradient>
+          </defs>
+          <rect width="200" height="200" rx="36" fill="#f8faff"/>
+          <path d="M26 68 L26 118 Q26 146 50 155 L100 171 L150 155 Q174 146 174 118 L174 68" fill="url(#g11b)" stroke="url(#g11a)" stroke-width="6" stroke-linejoin="round"/>
+          <rect x="50" y="48" width="100" height="82" rx="10" fill="#fff" stroke="#3b82f6" stroke-width="2.5"/>
+          <rect x="62" y="58" width="76" height="18" rx="4" fill="url(#g11a)"/>
+          <circle cx="78" cy="67" r="3.5" fill="#22c55e"/>
+          <circle cx="92" cy="67" r="3.5" fill="#22c55e"/>
+          <circle cx="106" cy="67" r="3.5" fill="#eab308"/>
+          <rect x="62" y="84" width="22" height="4" rx="2" fill="#e2e8f0"/>
+          <rect x="88" y="84" width="50" height="4" rx="2" fill="#e2e8f0"/>
+          <rect x="62" y="94" width="22" height="4" rx="2" fill="#e2e8f0"/>
+          <rect x="88" y="94" width="40" height="4" rx="2" fill="#e2e8f0"/>
+          <rect x="62" y="106" width="76" height="14" rx="3" fill="url(#g11b)"/>
+          <text x="100" y="117" text-anchor="middle" font-family="Arial,sans-serif" font-size="8.5" font-weight="800" fill="#1d4ed8">ON-SITE</text>
+          <text x="100" y="158" text-anchor="middle" font-family="Arial,sans-serif" font-size="20" font-weight="900" fill="#2563eb">OOS</text>
+          <text x="100" y="178" text-anchor="middle" font-family="Arial,sans-serif" font-size="9" font-weight="700" fill="#64748b" letter-spacing="3">SYSTEM</text>
+        </svg>
+        <h3>方案十一：盾型面板+品牌全称</h3>
+        <p>方案一盾牌轮廓 + 方案九面板文字，融合 ONSITE-OPS-SYSTEM</p>
+      </div>
+
+    </div>
+
+    <button class="btn" onclick="confirmSelection()">确认选择</button>
+    <div id="selectionMessage"></div>
+  </div>
+
+  <script>
+    let selectedLogo = null;
+    function selectLogo(card, num) {
+      document.querySelectorAll('.card').forEach(c => c.classList.remove('selected'));
+      card.classList.add('selected');
+      selectedLogo = num;
+      document.getElementById('selectionMessage').textContent = `已选中方案 ${num}`;
+    }
+    function confirmSelection() {
+      if (!selectedLogo) {
+        document.getElementById('selectionMessage').textContent = '请先点击一个方案卡片';
+        return;
+      }
+      document.getElementById('selectionMessage').textContent = `方案 ${selectedLogo} 已确认。请告知我编号，我将替换为对应 Logo。`;
+    }
+  </script>
+</body>
+</html>

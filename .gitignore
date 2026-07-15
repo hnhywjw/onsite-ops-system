@@ -156,6 +156,13 @@
 **/.flutter-plugins
 **/.flutter-plugins-dependencies
 
+# Project runtime data
+/data/
+/onsite-ops-system/
+/${HOME}/
+/public/logo-picker.html
+/public/logo-picker-2.html
+
 # Compressed files
 *.zip
 *.rar
