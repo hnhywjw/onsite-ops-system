@@ -1316,7 +1316,7 @@ function executeSSHCheck(host, port, username, password) {
   if (!validateHost(host) || !validatePort(port)) return Promise.resolve({ success: false, stdout: '', stderr: 'Invalid host or port' });
   if (!username || typeof username !== 'string' || !/^[a-zA-Z0-9_.-]+$/.test(username)) return Promise.resolve({ success: false, stdout: '', stderr: 'Invalid username' });
   return new Promise((resolve) => {
-    const passFile = `/tmp/sshpass-${Date.now()}-${Math.random().toString(36).slice(2)}`;
+    const passFile = `/tmp/sshpass-${Date.now()}-${crypto.randomBytes(8).toString('hex')}`;
     fs.writeFileSync(passFile, password || '', { mode: 0o600 });
     const args = [
       '-f', passFile,
@@ -1788,6 +1788,8 @@ function readDbInternalSync() {
   return normalizeDb(raw);
 }
 
+let mysqlResetMutex = Promise.resolve();
+
 async function readDb() {
   try {
     await ensureMySqlReady();
@@ -1814,14 +1816,30 @@ async function readDb() {
     normalized._seq = dbSequence;
     return normalized;
   } catch (error) {
-    mysqlReadyPromise = null;
-    mysqlPool = null;
+    await resetMySqlConnection();
     if (allowFileDbFallback) {
       const fallback = readDbFromFile();
       fallback._seq = dbSequence;
       return fallback;
     }
     throw error;
+  }
+}
+
+async function resetMySqlConnection() {
+  let release;
+  const lock = new Promise(resolve => { release = resolve; });
+  const previous = mysqlResetMutex;
+  mysqlResetMutex = lock;
+  await previous;
+  try {
+    if (mysqlPool) {
+      try { await mysqlPool.end(); } catch (_) {}
+    }
+    mysqlReadyPromise = null;
+    mysqlPool = null;
+  } finally {
+    release();
   }
 }
 
@@ -1876,8 +1894,7 @@ async function writeDb(db, options = {}) {
         connection.release();
       }
     } catch (error) {
-      mysqlReadyPromise = null;
-      mysqlPool = null;
+      await resetMySqlConnection();
       if (allowFileDbFallback) {
         writeDbToFile(normalized);
       } else {
@@ -2037,8 +2054,7 @@ async function getSystemServicesStatus(db) {
       checkedAt
     });
   } catch (error) {
-    mysqlReadyPromise = null;
-    mysqlPool = null;
+    await resetMySqlConnection();
     services.push({
       key: 'mysql',
       name: 'MySQL 数据库',
@@ -2149,22 +2165,31 @@ function parseCookies(req) {
 
 function readBody(req) {
   return new Promise((resolve, reject) => {
+    let settled = false;
     let data = '';
     req.on('data', chunk => {
+      if (settled) return;
       data += chunk;
       if (data.length > 10 * 1024 * 1024) {
+        settled = true;
         reject(new Error('请求体过大'));
         req.destroy();
       }
     });
     req.on('end', () => {
+      if (settled) return;
+      settled = true;
       try {
         resolve(data ? JSON.parse(data) : {});
       } catch (error) {
         reject(error);
       }
     });
-    req.on('error', reject);
+    req.on('error', (err) => {
+      if (settled) return;
+      settled = true;
+      reject(err);
+    });
   });
 }
 
@@ -2517,8 +2542,7 @@ async function getSystemReadinessAsync() {
     await mysqlPool.query('SELECT 1');
     readiness.checks.push({ name: 'mysql', ok: true, detail: `${dbConfig.user}@${dbConfig.host}:${dbConfig.port}/${dbConfig.database}` });
   } catch (error) {
-    mysqlReadyPromise = null;
-    mysqlPool = null;
+    await resetMySqlConnection();
     readiness.ok = false;
     readiness.checks.push({ name: 'mysql', ok: false, detail: error.message });
   }
@@ -2821,7 +2845,7 @@ function executeSSHCommand(host, port, username, password, command) {
   const commandValidation = validateBackupCommand(command);
   if (!commandValidation.ok) return Promise.resolve({ success: false, stdout: '', stderr: commandValidation.message });
   return new Promise((resolve) => {
-    const passFile = `/tmp/sshpass-${Date.now()}-${Math.random().toString(36).slice(2)}`;
+    const passFile = `/tmp/sshpass-${Date.now()}-${crypto.randomBytes(8).toString('hex')}`;
     fs.writeFileSync(passFile, password || '', { mode: 0o600 });
     const args = [
       '-f', passFile,
@@ -6781,8 +6805,8 @@ const requestHandler = async (req, res) => {
       const preservedHttpsConfig = normalizeSystemConfig(db.systemConfig || {});
       const nextDb = buildResetDbForNewEnvironment(user, sessionToken, currentSession);
       nextDb.systemConfig = normalizeSystemConfig({ ...nextDb.systemConfig, httpsLoginEnabled: preservedHttpsConfig.httpsLoginEnabled, httpsPort: preservedHttpsConfig.httpsPort, httpsCertFilename: preservedHttpsConfig.httpsCertFilename, httpsKeyFilename: preservedHttpsConfig.httpsKeyFilename, httpsCertUploadedAt: preservedHttpsConfig.httpsCertUploadedAt, httpsKeyUploadedAt: preservedHttpsConfig.httpsKeyUploadedAt, httpsCertSubject: preservedHttpsConfig.httpsCertSubject, httpsCertIssuer: preservedHttpsConfig.httpsCertIssuer, httpsCertValidFrom: preservedHttpsConfig.httpsCertValidFrom, httpsCertValidTo: preservedHttpsConfig.httpsCertValidTo, httpsCertFingerprint256: preservedHttpsConfig.httpsCertFingerprint256, loginRateLimitMaxAttempts: preservedHttpsConfig.loginRateLimitMaxAttempts, loginRateLimitWindowMinutes: preservedHttpsConfig.loginRateLimitWindowMinutes, loginRateLimitLockMinutes: preservedHttpsConfig.loginRateLimitLockMinutes });
-      await writeDb(nextDb);
       await applyHttpsServerConfig(nextDb.systemConfig || {});
+      await writeDb(nextDb);
       return json(res, 200, { message: '数据库已初始化，仅保留当前管理员账号', backupFilename });
     }
 
@@ -7031,32 +7055,36 @@ wss.on('connection', (ws) => {
 });
 
 const wsHeartbeatTimer = setInterval(() => {
+  const stale = [];
   for (const ws of wsClients) {
     if (ws.isAlive === false) {
       ws.terminate();
-      wsClients.delete(ws);
+      stale.push(ws);
       continue;
     }
     ws.isAlive = false;
     try {
       if (ws.readyState === 1) ws.ping();
     } catch (_) {
-      wsClients.delete(ws);
+      stale.push(ws);
     }
   }
+  for (const ws of stale) wsClients.delete(ws);
 }, webSocketHeartbeatIntervalMs);
 
 if (wsHeartbeatTimer.unref) wsHeartbeatTimer.unref();
 
 function broadcastChange(topic, payload = {}) {
   const message = JSON.stringify({ type: 'data-changed', topic, payload, timestamp: Date.now() });
+  const stale = [];
   for (const ws of wsClients) {
     try {
       if (ws.readyState === 1) ws.send(message);
     } catch (_) {
-      wsClients.delete(ws);
+      stale.push(ws);
     }
   }
+  for (const ws of stale) wsClients.delete(ws);
 }
 
 const port = Number(process.env.PORT || 3000);
@@ -7153,5 +7181,4 @@ process.on('uncaughtException', (err) => {
 });
 process.on('unhandledRejection', (reason) => {
   console.error('Unhandled rejection:', reason);
-  gracefulShutdown('unhandledRejection');
 });
