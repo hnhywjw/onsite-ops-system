@@ -52,7 +52,7 @@ services:
       CONFIG_BACKUP_ALLOWED_COMMANDS: ${CONFIG_BACKUP_ALLOWED_COMMANDS:-show running-config,display current-configuration,show configuration}
       HTTPS_PORT: ${HTTPS_PORT:-3443}
     volumes:
-      - app-data:/app/data
+      - ./data:/app/data
     depends_on:
       mysql:
         condition: service_healthy
@@ -66,4 +66,3 @@ services:
 
 volumes:
   mysql-data:
-  app-data:
