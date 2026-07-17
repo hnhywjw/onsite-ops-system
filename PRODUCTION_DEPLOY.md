@@ -54,6 +54,21 @@ cd /opt/onsite-ops-system
 tar -xzf onsite-ops-system-v1.0.4-production.tar.gz
 ```
 
+### 3.1.1 创建数据目录并授权
+
+容器以 `node` 用户（UID 1000）运行，bind mount 的 `./data` 目录需要预先创建并授权：
+
+```bash
+mkdir -p ./data
+chown 1000:1000 ./data
+```
+
+若已有旧数据目录，也需确保权限一致：
+
+```bash
+chown -R 1000:1000 ./data
+```
+
 ### 3.2 准备生产环境变量
 
 ```bash
