@@ -23,6 +23,7 @@ services:
     pull_policy: never
     ports:
       - "${APP_BIND:-127.0.0.1}:${APP_PORT:-3000}:3000"
+      - "${APP_BIND:-0.0.0.0}:${HTTPS_PORT:-3443}:3443"
     environment:
       PORT: "3000"
       NODE_ENV: production
@@ -49,6 +50,7 @@ services:
       AUDIT_ARCHIVE_RETENTION_DAYS: ${AUDIT_ARCHIVE_RETENTION_DAYS:-180}
       MAINTENANCE_INTERVAL_MS: ${MAINTENANCE_INTERVAL_MS:-60000}
       CONFIG_BACKUP_ALLOWED_COMMANDS: ${CONFIG_BACKUP_ALLOWED_COMMANDS:-show running-config,display current-configuration,show configuration}
+      HTTPS_PORT: ${HTTPS_PORT:-3443}
     volumes:
       - app-data:/app/data
     depends_on:
