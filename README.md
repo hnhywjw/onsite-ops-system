@@ -105,13 +105,21 @@ docker compose --env-file .env.production -f docker-compose.prod.yml up -d --bui
 
 ## 版本
 
-当前版本：`1.0.3`
+当前版本：`1.0.4`
 
 ### 软件包下载
 
-最新版本：**[v1.0.3 - 安全加固与在线人数统计](https://github.com/hnhywjw/onsite-ops-system/releases/tag/v1.0.3)**
+最新版本：**[v1.0.4 - 部署配置优化](https://github.com/hnhywjw/onsite-ops-system/releases/tag/v1.0.4)**
 
-下载 `onsite-ops-system-v1.0.3-production.tar.gz` 后解压即可部署，SHA256 校验文件随 Release 一同提供。
+下载 `onsite-ops-system-v1.0.4-production.tar.gz` 后解压即可部署，SHA256 校验文件随 Release 一同提供。
+
+### v1.0.4 更新说明
+
+部署优化：
+- docker-compose.prod.yml 默认 APP_BIND 改为 0.0.0.0，外部可直接访问
+- 新增 HTTPS 3443 端口映射，支持 HTTPS 登录服务外部访问
+- 数据卷由 Docker 命名卷改为 bind mount (./data:/app/data)，宿主机可直接查看和管理数据
+- 新增 HTTPS_PORT 环境变量支持
 
 ### v1.0.3 更新说明
 

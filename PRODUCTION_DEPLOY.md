@@ -1,10 +1,10 @@
-# 驻场运维管理系统 v1.0.3 生产安装部署说明
+# 驻场运维管理系统 v1.0.4 生产安装部署说明
 
-本文档用于在生产环境部署 `onsite-ops-system-v1.0.3`。
+本文档用于在生产环境部署 `onsite-ops-system-v1.0.4`。
 
 ## 1. 交付物
 
-生产部署包：`onsite-ops-system-v1.0.3-production.tar.gz`
+生产部署包：`onsite-ops-system-v1.0.4-production.tar.gz`
 
 包内核心文件：
 
@@ -41,6 +41,7 @@ pptx-template.json
 | 端口 | 用途 | 暴露建议 |
 | --- | --- | --- |
 | 3000 | 应用 HTTP 服务 | 通过反向代理暴露 |
+| 3443 | HTTPS 登录服务 | 按需暴露，用于 Secure Cookie 登录 |
 | 3306 | MySQL | 仅容器内网络访问 |
 
 ## 3. 推荐部署方式：Docker Compose
@@ -50,7 +51,7 @@ pptx-template.json
 ```bash
 mkdir -p /opt/onsite-ops-system
 cd /opt/onsite-ops-system
-tar -xzf onsite-ops-system-v1.0.3-production.tar.gz
+tar -xzf onsite-ops-system-v1.0.4-production.tar.gz
 ```
 
 ### 3.2 准备生产环境变量
@@ -80,9 +81,7 @@ UPGRADE_SIGNING_KEY=replace-with-at-least-32-chars-random-key
 openssl rand -base64 32
 ```
 
-默认 `APP_BIND=127.0.0.1`，应用只监听宿主机本机地址，生产建议通过反向代理对外提供 HTTPS 服务。需要临时直连访问时，可显式设置 `APP_BIND=0.0.0.0`。
-
-Docker Compose 默认使用 `app-data` 命名卷保存应用运行数据，避免宿主机 `./data` 目录权限导致容器内 `node` 用户无法写入。
+应用默认监听 `0.0.0.0:3000`，可通过 `APP_BIND` 和 `APP_PORT` 环境变量调整。数据目录默认使用 bind mount 映射到宿主机 `./data/` 目录，启动后可直接在宿主机查看备份、证书等运行时文件。
 
 ### 3.3 启动服务
 
@@ -247,7 +246,7 @@ docker compose --env-file .env.production -f docker-compose.prod.yml exec onsite
 
 ```bash
 cd /opt/onsite-ops-system
-tar -xzf onsite-ops-system-v1.0.3-production.tar.gz
+tar -xzf onsite-ops-system-v1.0.4-production.tar.gz
 ```
 
 ### 7.3 重建并重启
@@ -271,7 +270,7 @@ curl http://127.0.0.1:3000/api/ready
 - 管理员账号可登录
 - `/api/health` 返回正常
 - `/api/ready` 返回正常
-- 系统版本显示为 `v1.0.3`
+- 系统版本显示为 `v1.0.4`
 - 项目、资产、日志页面可读取数据
 - 自动化巡检页面可打开
 - 配置备份页面可打开
@@ -294,7 +293,7 @@ curl http://127.0.0.1:3000/api/ready
 
 ### 9.2 `/api/ready` 返回 503
 
-检查 MySQL 连接、`app-data` 命名卷和应用日志。
+检查 MySQL 连接、`./data/` 目录权限和应用日志。
 
 ```bash
 docker compose --env-file .env.production -f docker-compose.prod.yml logs mysql
@@ -313,11 +312,15 @@ X-Forwarded-Proto: https
 
 确认目标命令在 `CONFIG_BACKUP_ALLOWED_COMMANDS` 白名单中。
 
+### 9.5 HTTPS 登录(3443)无法访问
+
+确认防火墙已放行 3443 端口，docker-compose.prod.yml 已映射该端口。
+
 ## 10. 回滚
 
 保留旧版本目录时，可切回旧目录并重启服务。
 
-Docker Compose 部署可使用历史备份恢复 MySQL 数据卷和 `app-data` 应用数据卷，然后重新执行：
+Docker Compose 部署可使用历史备份恢复 MySQL 数据卷和 `./data/` 目录，然后重新执行：
 
 ```bash
 docker compose --env-file .env.production -f docker-compose.prod.yml up -d --build
