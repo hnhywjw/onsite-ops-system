@@ -2373,12 +2373,12 @@
             <div class="card">
               <h3 style="margin-top:0;">软件升级</h3>
               <div class="muted">当前版本：<span id="systemCurrentVersion">-</span></div>
-              <p class="muted">上传离线升级包（.zip），系统将自动校验并应用升级，升级前自动创建备份。</p>
+              <p class="muted">上传升级包（.tar.gz），系统校验后将在下次重启容器时自动应用升级。</p>
               <label style="margin-top:14px;">
-                <input id="systemUpgradeFile" type="file" accept=".zip,application/zip" />
+                <input id="systemUpgradeFile" type="file" accept=".tar.gz,.tgz,application/gzip,application/x-gzip" />
               </label>
               <div class="system-actions">
-                <button class="primary" id="systemUpgradeBtn" type="button">上传并升级</button>
+                <button class="primary" id="systemUpgradeBtn" type="button">上传升级包</button>
               </div>
               <div id="systemUpgradeMessage"></div>
             </div>
@@ -2512,7 +2512,14 @@
                       <option value="false">关闭</option>
                       <option value="true">启用</option>
                     </select>
-                  </label>
+                    </label>
+                    <label>
+                      <span>禁用 HTTP 登录</span>
+                      <select id="httpLoginDisabled">
+                        <option value="false">不禁止（允许 HTTP 登录）</option>
+                        <option value="true">禁止（仅允许 HTTPS 登录）</option>
+                      </select>
+                    </label>
                   <label>
                     <span>HTTPS 监听端口</span>
                     <input id="httpsPort" type="number" min="1" max="65535" step="1" />
@@ -2635,6 +2642,7 @@
       systemConfig: {
         webIdleLogoutMinutes: 30,
         httpsLoginEnabled: false,
+        httpLoginDisabled: false,
         httpsPort: 3443,
         httpsCertFilename: '',
         httpsKeyFilename: '',
@@ -4945,6 +4953,8 @@
       if (!timeoutInput || !httpsEnabledInput || !httpsPortInput || !httpsCertificateStatus) return;
       timeoutInput.value = String(getWebIdleLogoutMinutes());
       httpsEnabledInput.value = state.systemConfig?.httpsLoginEnabled ? 'true' : 'false';
+      const httpLoginDisabledInput = document.getElementById('httpLoginDisabled');
+      if (httpLoginDisabledInput) httpLoginDisabledInput.value = state.systemConfig?.httpLoginDisabled ? 'true' : 'false';
       httpsPortInput.value = String(Number(state.systemConfig?.httpsPort || 3443));
       if (allowRegistrationInput) allowRegistrationInput.value = state.systemConfig?.allowRegistration ? 'true' : 'false';
       if (maxAttemptsInput) maxAttemptsInput.value = String(Number(state.systemConfig?.loginRateLimitMaxAttempts || 5));
@@ -7654,7 +7664,7 @@
       button.textContent = '升级中...';
       try {
         const formData = new FormData();
-        formData.append('file', file);
+        formData.append('package', file);
         const data = await api('/api/system/upgrade', { method: 'POST', body: formData });
         setMessage('systemUpgradeMessage', data.message);
         fileInput.value = '';
@@ -7734,6 +7744,7 @@
       const maxAttemptsInput = document.getElementById('loginRateLimitMaxAttempts');
       const rateWindowInput = document.getElementById('loginRateLimitWindowMinutes');
       const rateLockInput = document.getElementById('loginRateLimitLockMinutes');
+      const httpLoginDisabledInput = document.getElementById('httpLoginDisabled');
       const timeoutValue = Number(timeoutInput.value);
       const httpsPortValue = Number(httpsPortInput.value);
       const maxAttemptsValue = Number(maxAttemptsInput.value);
@@ -7776,6 +7787,7 @@
           body: JSON.stringify({
             webIdleLogoutMinutes: timeoutValue,
             httpsLoginEnabled: httpsEnabledInput.value === 'true',
+            httpLoginDisabled: httpLoginDisabledInput ? httpLoginDisabledInput.value === 'true' : false,
             httpsPort: httpsPortValue,
             allowRegistration: allowRegistrationInput.value === 'true',
             loginRateLimitMaxAttempts: maxAttemptsValue,

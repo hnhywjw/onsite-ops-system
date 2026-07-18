@@ -72,6 +72,19 @@ let httpsServerStatus = {
   checkedAt: now()
 };
 
+let httpsLazyInitDone = false;
+
+async function tryLazyInitHttps(db) {
+  if (httpsLazyInitDone) return;
+  const enabled = !!(db && db.systemConfig && db.systemConfig.httpsLoginEnabled);
+  if (!enabled) { httpsLazyInitDone = true; return; }
+  if (httpsServer) { httpsLazyInitDone = true; return; }
+  httpsLazyInitDone = true;
+  try {
+    await applyHttpsServerConfig(db.systemConfig);
+  } catch (_) { }
+}
+
 fs.mkdirSync(publicDir, { recursive: true });
 fs.mkdirSync(dataDir, { recursive: true });
 fs.mkdirSync(backupDir, { recursive: true });
@@ -698,6 +711,7 @@ function normalizeSystemConfig(rawSystemConfig = {}) {
     httpsCertValidTo: String(rawSystemConfig.httpsCertValidTo || '').trim(),
     httpsCertFingerprint256: String(rawSystemConfig.httpsCertFingerprint256 || '').trim(),
     allowRegistration: rawSystemConfig.allowRegistration === true || rawSystemConfig.allowRegistration === 'true',
+    httpLoginDisabled: rawSystemConfig.httpLoginDisabled === true || rawSystemConfig.httpLoginDisabled === 'true',
     loginRateLimitMaxAttempts: Number(rawSystemConfig.loginRateLimitMaxAttempts) || loginRateLimitMaxAttempts,
     loginRateLimitWindowMinutes: Number(rawSystemConfig.loginRateLimitWindowMinutes) || Math.round(loginRateLimitWindowMs / 60000),
     loginRateLimitLockMinutes: Number(rawSystemConfig.loginRateLimitLockMinutes) || Math.round(loginRateLimitLockMs / 60000),
@@ -4188,6 +4202,15 @@ const requestHandler = async (req, res) => {
     systemTimezoneOffsetMinutes = db.systemConfig?.timezoneOffset ?? 480;
     if (!validateCsrf(req, res, db, pathname)) return;
 
+    tryLazyInitHttps(db);
+
+    if (db.systemConfig?.httpLoginDisabled && !req.socket.encrypted) {
+      const loginPaths = ['/api/login', '/api/register', '/api/forgot-password', '/api/captcha', '/api/auth'];
+      if (loginPaths.some(p => pathname.startsWith(p))) {
+        return json(res, 403, { error: 'HTTP 登录已禁用，请使用 HTTPS 登录' });
+      }
+    }
+
 
     if (req.method === 'GET' && pathname === '/api/captcha') {
       const code = generateCaptchaCode();
@@ -6587,7 +6610,7 @@ const requestHandler = async (req, res) => {
       const user = requireAdmin(req, res, db);
       if (!user) return;
       const body = await readBody(req);
-      const allowedKeys = ['webIdleLogoutMinutes', 'httpsLoginEnabled', 'httpsPort', 'allowRegistration', 'loginRateLimitMaxAttempts', 'loginRateLimitWindowMinutes', 'loginRateLimitLockMinutes', 'timezoneOffset'];
+      const allowedKeys = ['webIdleLogoutMinutes', 'httpsLoginEnabled', 'httpsPort', 'allowRegistration', 'httpLoginDisabled', 'loginRateLimitMaxAttempts', 'loginRateLimitWindowMinutes', 'loginRateLimitLockMinutes', 'timezoneOffset'];
       const safeBody = {};
       for (const key of allowedKeys) {
         if (body[key] !== undefined) safeBody[key] = body[key];
@@ -6997,6 +7020,120 @@ const requestHandler = async (req, res) => {
         'Content-Disposition': `attachment; filename="ai-inspection-report-${resultId}.pptx"`
       }));
       return res.end(content);
+    }
+
+    if (req.method === 'POST' && pathname === '/api/system/upgrade') {
+      const user = requireAdmin(req, res, db);
+      if (!user) return;
+      const contentType = req.headers['content-type'] || '';
+      if (!contentType.includes('multipart/form-data')) {
+        return json(res, 400, { message: '请上传升级包文件（tar.gz 格式）' });
+      }
+      const boundary = contentType.split('boundary=')[1];
+      if (!boundary) return json(res, 400, { message: '无效的上传格式' });
+      const rawBody = await new Promise((resolve, reject) => {
+        const chunks = [];
+        const maxBytes = 100 * 1024 * 1024;
+        let totalLength = 0;
+        req.on('data', chunk => {
+          totalLength += chunk.length;
+          if (totalLength > maxBytes) {
+            reject(new Error('升级包不能超过 100MB'));
+            return;
+          }
+          chunks.push(chunk);
+        });
+        req.on('end', () => resolve(Buffer.concat(chunks)));
+        req.on('error', reject);
+      });
+      const parts = parseMultipart(rawBody, boundary);
+      const pkgPart = parts.find(part => part.name === 'package' && part.filename);
+      if (!pkgPart) return json(res, 400, { message: '请上传升级包文件' });
+
+      const upgradesDir = path.join(dataDir, 'upgrades');
+      const pendingDir = path.join(upgradesDir, 'pending');
+      fs.mkdirSync(pendingDir, { recursive: true });
+
+      function cleanUpgradeDir(dir) {
+        try {
+          const entries = fs.readdirSync(dir);
+          for (const e of entries) {
+            const abs = path.join(dir, e);
+            const st = fs.statSync(abs);
+            if (st.isDirectory()) {
+              const subs = fs.readdirSync(abs);
+              for (const sub of subs) {
+                try { fs.unlinkSync(path.join(abs, sub)); } catch (_) {}
+              }
+              try { fs.rmdirSync(abs); } catch (_) {}
+            } else {
+              try { fs.unlinkSync(abs); } catch (_) {}
+            }
+          }
+        } catch (_) {}
+      }
+
+      const tempArchive = path.join(upgradesDir, 'temp-upgrade.tar.gz');
+      fs.writeFileSync(tempArchive, pkgPart.data);
+
+      try {
+        const { execSync } = require('child_process');
+        execSync(`tar -xzf "${tempArchive}" -C "${pendingDir}"`, { timeout: 30000 });
+      } catch (error) {
+        try { fs.unlinkSync(tempArchive); } catch (_) {}
+        cleanUpgradeDir(pendingDir);
+        return json(res, 400, { message: `升级包解压失败：${error.message}` });
+      } finally {
+        try { fs.unlinkSync(tempArchive); } catch (_) {}
+      }
+
+      if (!fs.existsSync(path.join(pendingDir, 'server.js')) ||
+          !fs.existsSync(path.join(pendingDir, 'package.json')) ||
+          !fs.statSync(path.join(pendingDir, 'public')).isDirectory()) {
+        cleanUpgradeDir(pendingDir);
+        return json(res, 400, { message: '升级包缺少必要文件（server.js / package.json / public/）' });
+      }
+
+      let upgradeVersion = 'unknown';
+      try {
+        const pkgJson = JSON.parse(fs.readFileSync(path.join(pendingDir, 'package.json'), 'utf8'));
+        upgradeVersion = pkgJson.version || 'unknown';
+      } catch (_) {}
+
+      fs.writeFileSync(path.join(upgradesDir, 'UPGRADE_READY'), JSON.stringify({
+        version: upgradeVersion,
+        timestamp: now(),
+        requestedBy: user.username
+      }));
+
+      appendAuditLog(db, user, 'upgrade', 'system', '', `上传升级包 v${upgradeVersion}，将在下次容器重启后生效`);
+      await writeDb(db);
+
+      return json(res, 200, {
+        message: `升级包 v${upgradeVersion} 已就绪，重启容器即可完成升级`,
+        version: upgradeVersion
+      });
+    }
+
+    if (req.method === 'GET' && pathname === '/api/system/upgrade/status') {
+      const user = requireAdmin(req, res, db);
+      if (!user) return;
+      const upgradesDir = path.join(dataDir, 'upgrades');
+      const readyFlag = path.join(upgradesDir, 'UPGRADE_READY');
+      const pendingDir = path.join(upgradesDir, 'pending');
+      const pendingVersion = fs.existsSync(path.join(pendingDir, 'package.json'))
+        ? JSON.parse(fs.readFileSync(path.join(pendingDir, 'package.json'), 'utf8')).version || 'unknown'
+        : null;
+      const ready = fs.existsSync(readyFlag)
+        ? JSON.parse(fs.readFileSync(readyFlag, 'utf8'))
+        : null;
+      const currentVersion = packageInfo.version;
+      return json(res, 200, {
+        currentVersion,
+        pendingVersion,
+        ready,
+        hasPending: fs.existsSync(pendingDir) && fs.readdirSync(pendingDir).length > 0
+      });
     }
 
     return serveStatic(req, res, pathname);
