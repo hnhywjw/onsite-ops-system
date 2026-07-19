@@ -710,9 +710,9 @@ function normalizeSystemConfig(rawSystemConfig = {}) {
     httpsCertFingerprint256: String(rawSystemConfig.httpsCertFingerprint256 || '').trim(),
     allowRegistration: rawSystemConfig.allowRegistration === true || rawSystemConfig.allowRegistration === 'true',
     httpLoginDisabled: rawSystemConfig.httpLoginDisabled === true || rawSystemConfig.httpLoginDisabled === 'true',
-    loginRateLimitMaxAttempts: Number(rawSystemConfig.loginRateLimitMaxAttempts) || loginRateLimitMaxAttempts,
-    loginRateLimitWindowMinutes: Number(rawSystemConfig.loginRateLimitWindowMinutes) || Math.round(loginRateLimitWindowMs / 60000),
-    loginRateLimitLockMinutes: Number(rawSystemConfig.loginRateLimitLockMinutes) || Math.round(loginRateLimitLockMs / 60000),
+    loginRateLimitMaxAttempts: Number.isFinite(Number(rawSystemConfig.loginRateLimitMaxAttempts)) && Number(rawSystemConfig.loginRateLimitMaxAttempts) >= 1 ? Number(rawSystemConfig.loginRateLimitMaxAttempts) : loginRateLimitMaxAttempts,
+    loginRateLimitWindowMinutes: Number.isFinite(Number(rawSystemConfig.loginRateLimitWindowMinutes)) && Number(rawSystemConfig.loginRateLimitWindowMinutes) >= 1 ? Number(rawSystemConfig.loginRateLimitWindowMinutes) : Math.round(loginRateLimitWindowMs / 60000),
+    loginRateLimitLockMinutes: Number.isFinite(Number(rawSystemConfig.loginRateLimitLockMinutes)) && Number(rawSystemConfig.loginRateLimitLockMinutes) >= 1 ? Number(rawSystemConfig.loginRateLimitLockMinutes) : Math.round(loginRateLimitLockMs / 60000),
     timezoneOffset: Number.isFinite(timezoneOffset) ? timezoneOffset : 480
   };
 }
@@ -2077,13 +2077,23 @@ async function getSystemServicesStatus(db) {
   return services;
 }
 
-function buildSecurityHeaders(extraHeaders = {}) {
+function createNonce() {
+  return crypto.randomBytes(16).toString('base64');
+}
+
+function buildNonceHeaderValue(nonce) {
+  const n = nonce || '';
+  return `default-src 'self'; script-src 'self' 'nonce-${n}' 'strict-dynamic'; style-src 'self' 'nonce-${n}'; img-src 'self' data: blob:; connect-src 'self' ws: wss:; font-src 'self' data:; object-src 'none'; base-uri 'self'; frame-ancestors 'none'; form-action 'self'`;
+}
+
+function buildSecurityHeaders(extraHeaders = {}, nonce = '') {
+  const csp = nonce ? buildNonceHeaderValue(nonce) : "default-src 'self'; script-src 'self' 'unsafe-inline'; style-src 'self' 'unsafe-inline'; img-src 'self' data: blob:; connect-src 'self' ws: wss:; font-src 'self' data:; object-src 'none'; base-uri 'self'; frame-ancestors 'none'; form-action 'self'";
   const headers = {
     'X-Content-Type-Options': 'nosniff',
     'X-Frame-Options': 'DENY',
     'Referrer-Policy': 'same-origin',
     'Permissions-Policy': 'camera=(), microphone=(), geolocation=()',
-    'Content-Security-Policy': "default-src 'self'; script-src 'self' 'unsafe-inline'; style-src 'self' 'unsafe-inline'; img-src 'self' data: blob:; connect-src 'self' ws: wss:; font-src 'self' data:; object-src 'none'; base-uri 'self'; frame-ancestors 'none'; form-action 'self'",
+    'Content-Security-Policy': csp,
     ...extraHeaders
   };
   if (isProduction) headers['Strict-Transport-Security'] = 'max-age=31536000; includeSubDomains';
@@ -2481,7 +2491,7 @@ function shouldUseSecureCookies(req, systemConfig = {}) {
   const forwardedProto = String(req.headers['x-forwarded-proto'] || '').trim().toLowerCase();
   if (forwardedProto === 'https' || Boolean(req.socket?.encrypted)) return true;
   const httpsLoginEnabled = normalizeSystemConfig(systemConfig).httpsLoginEnabled;
-  return httpsLoginEnabled && isProduction;
+  return httpsLoginEnabled;
 }
 
 function buildSessionCookie(req, token, systemConfig = {}, maxAgeSeconds = sessionMaxAgeSeconds) {
@@ -4016,7 +4026,18 @@ function serveStatic(req, res, pathname) {
     '.css': 'text/css; charset=utf-8',
     '.json': 'application/json; charset=utf-8'
   };
-  res.writeHead(200, buildSecurityHeaders({ 'Content-Type': types[ext] || 'application/octet-stream' }));
+  const contentType = types[ext] || 'application/octet-stream';
+  const isHtml = ext === '.html' || pathname === '/';
+  if (isHtml) {
+    const nonce = createNonce();
+    let html = fs.readFileSync(normalized, 'utf8');
+    html = html.replace(/<script(?![^>]*\bnonce\b)([^>]*)>/gi, `<script nonce="${nonce}"$1>`);
+    html = html.replace(/<style(?![^>]*\bnonce\b)([^>]*)>/gi, `<style nonce="${nonce}"$1>`);
+    res.writeHead(200, buildSecurityHeaders({ 'Content-Type': contentType }, nonce));
+    res.end(html);
+    return;
+  }
+  res.writeHead(200, buildSecurityHeaders({ 'Content-Type': contentType }));
   fs.createReadStream(normalized).pipe(res);
 }
 
@@ -6797,22 +6818,7 @@ const requestHandler = async (req, res) => {
       fs.mkdirSync(pendingDir, { recursive: true });
 
       function cleanUpgradeDir(dir) {
-        try {
-          const entries = fs.readdirSync(dir);
-          for (const e of entries) {
-            const abs = path.join(dir, e);
-            const st = fs.statSync(abs);
-            if (st.isDirectory()) {
-              const subs = fs.readdirSync(abs);
-              for (const sub of subs) {
-                try { fs.unlinkSync(path.join(abs, sub)); } catch (_) {}
-              }
-              try { fs.rmdirSync(abs); } catch (_) {}
-            } else {
-              try { fs.unlinkSync(abs); } catch (_) {}
-            }
-          }
-        } catch (_) {}
+        try { fs.rmSync(dir, { recursive: true, force: true }); } catch (_) {}
       }
 
       const tempArchive = path.join(upgradesDir, 'temp-upgrade.tar.gz');

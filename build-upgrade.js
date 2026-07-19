@@ -17,7 +17,8 @@ const includeFiles = [
   'Dockerfile',
   'docker-compose.yml',
   'docker-compose.prod.yml',
-  'docker-entrypoint.sh'
+  'docker-entrypoint.sh',
+  'pptx-template.json'
 ];
 
 const includeDirs = [
@@ -49,6 +50,38 @@ if (missing.length > 0) {
 
 const entries = [...includeFiles, ...includeDirs];
 
+const hashLines = [];
+for (const file of includeFiles) {
+  const p = path.join(rootDir, file);
+  if (fs.existsSync(p)) {
+    const hash = crypto.createHash('sha256').update(fs.readFileSync(p)).digest('hex');
+    hashLines.push(`${hash}  ${file}`);
+    console.log(`  SHA256 ${file}: ${hash.substring(0, 16)}...`);
+  }
+}
+for (const dir of includeDirs) {
+  const dirPath = path.join(rootDir, dir);
+  try {
+    const walkDir = (dp, prefix) => {
+      const dirents = fs.readdirSync(dp, { withFileTypes: true });
+      for (const e of dirents) {
+        const rel = prefix ? `${prefix}/${e.name}` : `${dir}/${e.name}`;
+        const abs = path.join(dp, e.name);
+        if (e.isDirectory()) {
+          walkDir(abs, rel);
+        } else {
+          const hash = crypto.createHash('sha256').update(fs.readFileSync(abs)).digest('hex');
+          hashLines.push(`${hash}  ${rel}`);
+        }
+      }
+    };
+    walkDir(dirPath, dir);
+  } catch (_) {}
+}
+const hashesFile = path.join(rootDir, 'SHA256SUMS');
+fs.writeFileSync(hashesFile, hashLines.join('\n') + '\n');
+entries.push('SHA256SUMS');
+
 try {
   execSync(`tar -czf "${outputPath}" ${entries.map(e => `"${e}"`).join(' ')}`, {
     cwd: rootDir,
@@ -64,38 +97,6 @@ const sizeMB = (stats.size / (1024 * 1024)).toFixed(1);
 
 console.log(`Upgrade package created: ${outputName} (${sizeMB} MB)`);
 console.log(`Version: ${version}`);
-console.log('');
-
-const hashesFile = path.join(rootDir, 'SHA256SUMS');
-const hashLines = [];
-for (const file of includeFiles) {
-  const p = path.join(rootDir, file);
-  if (fs.existsSync(p)) {
-    const hash = crypto.createHash('sha256').update(fs.readFileSync(p)).digest('hex');
-    hashLines.push(`${hash}  ${file}`);
-    console.log(`  SHA256 ${file}: ${hash.substring(0, 16)}...`);
-  }
-}
-for (const dir of includeDirs) {
-  const dirPath = path.join(rootDir, dir);
-  try {
-    const walkDir = (dp, prefix) => {
-      const entries = fs.readdirSync(dp, { withFileTypes: true });
-      for (const e of entries) {
-        const rel = prefix ? `${prefix}/${e.name}` : `${dir}/${e.name}`;
-        const abs = path.join(dp, e.name);
-        if (e.isDirectory()) {
-          walkDir(abs, rel);
-        } else {
-          const hash = crypto.createHash('sha256').update(fs.readFileSync(abs)).digest('hex');
-          hashLines.push(`${hash}  ${rel}`);
-        }
-      }
-    };
-    walkDir(dirPath, dir);
-  } catch (_) {}
-}
-fs.writeFileSync(hashesFile, hashLines.join('\n') + '\n');
 console.log(`  SHA256SUMS written (${hashLines.length} files)`);
 console.log('');
 console.log('To apply the upgrade:');

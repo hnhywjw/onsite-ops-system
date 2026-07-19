@@ -29,19 +29,21 @@ if [ -f "$READY_FLAG" ] && [ -d "$PENDING_DIR" ]; then
   copy_file "$PENDING_DIR/package.json" /app/package.json && FILES_COPIED=$((FILES_COPIED + 1))
 
   if [ -d "$PENDING_DIR/public" ]; then
-    if rm -rf /app/public && cp -r "$PENDING_DIR/public" /app/public; then
+    if cp -r "$PENDING_DIR/public" /app/public.new && rm -rf /app/public && mv /app/public.new /app/public; then
       echo "[upgrade] Copied public/"
       FILES_COPIED=$((FILES_COPIED + 1))
     else
       echo "[upgrade] Failed to copy public/" >&2
+      rm -rf /app/public.new 2>/dev/null
     fi
   fi
 
   if [ -d "$PENDING_DIR/scripts" ]; then
-    if rm -rf /app/scripts && cp -r "$PENDING_DIR/scripts" /app/scripts; then
+    if cp -r "$PENDING_DIR/scripts" /app/scripts.new && rm -rf /app/scripts && mv /app/scripts.new /app/scripts; then
       echo "[upgrade] Copied scripts/"
     else
       echo "[upgrade] Failed to copy scripts/" >&2
+      rm -rf /app/scripts.new 2>/dev/null
     fi
   fi
 
@@ -49,6 +51,7 @@ if [ -f "$READY_FLAG" ] && [ -d "$PENDING_DIR" ]; then
   copy_file "$PENDING_DIR/docker-compose.yml" /app/docker-compose.yml
   copy_file "$PENDING_DIR/docker-compose.prod.yml" /app/docker-compose.prod.yml
   copy_file "$PENDING_DIR/pptx-template.json" /app/pptx-template.json
+  copy_file "$PENDING_DIR/docker-entrypoint.sh" /app/docker-entrypoint.sh
 
   if [ -f "$PENDING_DIR/migrate.sh" ]; then
     if [ -f "$HASHES_FILE" ]; then
@@ -67,15 +70,11 @@ if [ -f "$READY_FLAG" ] && [ -d "$PENDING_DIR" ]; then
 
   TIMESTAMP=$(date +%Y%m%d%H%M%S)
   ARCHIVE_DIR="$UPGRADE_DIR/$TIMESTAMP"
-  if [ $FILES_COPIED -gt 0 ]; then
-    mkdir -p "$ARCHIVE_DIR"
-    mv "$PENDING_DIR" "$ARCHIVE_DIR/pending_backup" 2>/dev/null
-    mv "$READY_FLAG" "$ARCHIVE_DIR/UPGRADE_READY" 2>/dev/null
-    NEW_VER=$(node -e "try{const p=require('/app/package.json');console.log(p.version||'')}catch(_){console.log('')}")
-    echo "[upgrade] Upgrade complete. Current version: ${NEW_VER:-N/A}"
-  else
-    echo "[upgrade] No file changes detected, skipping upgrade"
-  fi
+  mkdir -p "$ARCHIVE_DIR"
+  mv "$PENDING_DIR" "$ARCHIVE_DIR/pending_backup" 2>/dev/null
+  mv "$READY_FLAG" "$ARCHIVE_DIR/UPGRADE_READY" 2>/dev/null
+  NEW_VER=$(node -e "try{const p=require('/app/package.json');console.log(p.version||'')}catch(_){console.log('')}")
+  echo "[upgrade] Upgrade complete. Current version: ${NEW_VER:-N/A}"
 fi
 
 exec node /app/server.js
