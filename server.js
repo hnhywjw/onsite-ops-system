@@ -2,7 +2,7 @@ const http = require('http');
 const https = require('https');
 const fs = require('fs');
 const path = require('path');
-const { exec, execFile } = require('child_process');
+const { exec, execFile, execSync } = require('child_process');
 const crypto = require('crypto');
 const tls = require('tls');
 const { URL } = require('url');
@@ -82,7 +82,9 @@ async function tryLazyInitHttps(db) {
   httpsLazyInitDone = true;
   try {
     await applyHttpsServerConfig(db.systemConfig);
-  } catch (_) { }
+  } catch (error) {
+    console.error('Lazy HTTPS init failed:', error.message);
+  }
 }
 
 fs.mkdirSync(publicDir, { recursive: true });
@@ -4207,7 +4209,7 @@ const requestHandler = async (req, res) => {
     if (db.systemConfig?.httpLoginDisabled && !req.socket.encrypted) {
       const loginPaths = ['/api/login', '/api/register', '/api/forgot-password', '/api/captcha', '/api/auth'];
       if (loginPaths.some(p => pathname.startsWith(p))) {
-        return json(res, 403, { error: 'HTTP 登录已禁用，请使用 HTTPS 登录' });
+        return json(res, 403, { message: 'HTTP 登录已禁用，请使用 HTTPS 登录' });
       }
     }
 
@@ -4223,8 +4225,8 @@ const requestHandler = async (req, res) => {
       const body = await readBody(req);
       const username = String(body.username || '').trim();
       if (!verifyCaptchaToken(body.captchaToken, body.captcha)) {
-          return json(res, 401, { message: '验证码错误' });
-        }
+        return json(res, 401, { message: '验证码错误' });
+      }
       const rateLimitState = getLoginRateLimitState(db, req, username);
       if (rateLimitState.blocked) {
         return json(res, 429, { message: loginBlockedMessage(rateLimitState.retryAfterMs) }, rateLimitResponseHeaders(rateLimitState.retryAfterMs));
@@ -6677,99 +6679,6 @@ const requestHandler = async (req, res) => {
       return json(res, 200, { message: 'HTTPS 证书上传成功', systemConfig: db.systemConfig });
     }
 
-    if (req.method === 'POST' && pathname === '/api/system/upgrade') {
-      const user = requireAdmin(req, res, db);
-      if (!user) return;
-      const contentType = req.headers['content-type'] || '';
-      if (!contentType.includes('multipart/form-data')) {
-        return json(res, 400, { message: '请上传升级包文件' });
-      }
-      const boundary = contentType.split('boundary=')[1];
-      if (!boundary) return json(res, 400, { message: '无效的上传格式' });
-      const rawBody = await new Promise((resolve, reject) => {
-        const chunks = [];
-        req.on('data', c => { chunks.push(c); if (Buffer.concat(chunks).length > 50 * 1024 * 1024) reject(new Error('升级包不能超过 50MB')); });
-        req.on('end', () => resolve(Buffer.concat(chunks)));
-        req.on('error', reject);
-      });
-      const parts = parseMultipart(rawBody, boundary);
-      const filePart = parts.find(p => p.filename);
-      if (!filePart || !filePart.filename) return json(res, 400, { message: '未找到升级包文件' });
-      if (!filePart.filename.toLowerCase().endsWith('.zip')) return json(res, 400, { message: '升级包必须是 .zip 文件' });
-      const extractDir = path.join(dataDir, 'upgrade_extracted');
-      try {
-        fs.rmSync(extractDir, { recursive: true, force: true });
-        fs.mkdirSync(extractDir, { recursive: true });
-      } catch (e) { }
-      try {
-        extractZip(filePart.data, extractDir);
-      } catch (e) {
-        try { fs.rmSync(extractDir, { recursive: true, force: true }); } catch (_) { }
-        return json(res, 400, { message: '升级包损坏或格式无效：' + e.message });
-      }
-      const manifestPath = path.join(extractDir, 'manifest.json');
-      if (!fs.existsSync(manifestPath)) return json(res, 400, { message: '升级包缺少 manifest.json' });
-      let manifest;
-      try {
-        manifest = JSON.parse(fs.readFileSync(manifestPath, 'utf8'));
-      } catch (e) {
-        return json(res, 400, { message: 'manifest.json 格式无效' });
-      }
-      try {
-        ensureUpgradePackageVersion(manifest);
-      } catch (error) {
-        return json(res, 400, { message: error.message });
-      }
-      if (!verifyUpgradeManifestSignature(manifest)) {
-        return json(res, 400, { message: '升级包签名校验失败' });
-      }
-      let upgradeFiles;
-      try {
-        upgradeFiles = sanitizeManifestFiles(manifest.files);
-      } catch (error) {
-        return json(res, 400, { message: error.message });
-      }
-      const manifestHashes = normalizeManifestHashes(manifest.sha256 || manifest.hashes);
-      if (!upgradeFiles.length) return json(res, 400, { message: 'manifest.json 未声明任何升级文件' });
-      const missingHashFiles = upgradeFiles.filter(file => !manifestHashes[file]);
-      if (missingHashFiles.length) return json(res, 400, { message: 'manifest.json 缺少文件 SHA256：' + missingHashFiles.join(', ') });
-      let missing;
-      try {
-        missing = validateManifestFiles(root, extractDir, upgradeFiles);
-      } catch (error) {
-        return json(res, 400, { message: `升级包路径非法：${error.message}` });
-      }
-      if (missing.length) return json(res, 400, { message: '升级包缺少声明文件：' + missing.join(', ') });
-      const hashMismatches = verifyManifestFileHashes(extractDir, manifestHashes);
-      if (hashMismatches.length) {
-        return json(res, 400, { message: '升级包 SHA256 校验失败：' + hashMismatches.map(item => item.file).join(', ') });
-      }
-      const backupFilename = `backup-${now().replace(/[:.]/g, '-')}.json`;
-      fs.writeFileSync(path.join(backupDir, backupFilename), JSON.stringify(serializeDbSnapshot(db), null, 2));
-      appendAuditLog(db, user, 'upgrade', 'system', '', `离线升级至 ${manifest.version}`);
-      createNotification(db, user.projectId || '', '系统升级完成', `系统已升级至 ${manifest.version}，已通过 SHA256 校验`, 'info', 'system-upgrade');
-      await writeDb(db);
-      try {
-        writeUpgradeFiles(extractDir, upgradeFiles);
-      } catch (error) {
-        return json(res, 400, { message: `升级文件写入失败：${error.message}` });
-      }
-      let verifiedFiles;
-      try {
-        verifiedFiles = summarizeUpgradeVerification(root, upgradeFiles);
-      } catch (error) {
-        return json(res, 500, { message: error.message });
-      }
-      try { fs.rmSync(extractDir, { recursive: true, force: true }); } catch (_) { }
-      return json(res, 200, {
-        ok: true,
-        version: manifest.version,
-        filesUpdated: verifiedFiles.length,
-        verifiedFiles: verifiedFiles.slice(0, 20),
-        message: `升级完成，已更新至 ${manifest.version}。建议重启服务使升级完全生效。升级前备份：${backupFilename}`
-      });
-    }
-
     if (req.method === 'POST' && pathname === '/api/system/import') {
       const user = requireAdmin(req, res, db);
       if (!user) return;
@@ -6792,6 +6701,7 @@ const requestHandler = async (req, res) => {
       const sessionToken = cookies.sessionToken || '';
       const currentSession = (db.sessions || []).find(item => item.token === sessionToken) || null;
       const nextDb = buildImportedDbPreservingCurrentSession(body, user, sessionToken, currentSession);
+      nextDb.systemConfig = db.systemConfig ? { ...db.systemConfig } : normalizeSystemConfig({});
       const backupFilename = `backup-before-import-${now().replace(/[:.]/g, '-')}.json`;
       fs.writeFileSync(path.join(backupDir, backupFilename), JSON.stringify(serializeDbSnapshot(db), null, 2));
       appendAuditLog(nextDb, user, 'import', 'system', '', `导入系统数据，导入前备份 ${backupFilename}`);
@@ -6827,7 +6737,7 @@ const requestHandler = async (req, res) => {
       fs.writeFileSync(path.join(backupDir, backupFilename), JSON.stringify(serializeDbSnapshot(db), null, 2));
       const preservedHttpsConfig = normalizeSystemConfig(db.systemConfig || {});
       const nextDb = buildResetDbForNewEnvironment(user, sessionToken, currentSession);
-      nextDb.systemConfig = normalizeSystemConfig({ ...nextDb.systemConfig, httpsLoginEnabled: preservedHttpsConfig.httpsLoginEnabled, httpsPort: preservedHttpsConfig.httpsPort, httpsCertFilename: preservedHttpsConfig.httpsCertFilename, httpsKeyFilename: preservedHttpsConfig.httpsKeyFilename, httpsCertUploadedAt: preservedHttpsConfig.httpsCertUploadedAt, httpsKeyUploadedAt: preservedHttpsConfig.httpsKeyUploadedAt, httpsCertSubject: preservedHttpsConfig.httpsCertSubject, httpsCertIssuer: preservedHttpsConfig.httpsCertIssuer, httpsCertValidFrom: preservedHttpsConfig.httpsCertValidFrom, httpsCertValidTo: preservedHttpsConfig.httpsCertValidTo, httpsCertFingerprint256: preservedHttpsConfig.httpsCertFingerprint256, loginRateLimitMaxAttempts: preservedHttpsConfig.loginRateLimitMaxAttempts, loginRateLimitWindowMinutes: preservedHttpsConfig.loginRateLimitWindowMinutes, loginRateLimitLockMinutes: preservedHttpsConfig.loginRateLimitLockMinutes });
+      nextDb.systemConfig = normalizeSystemConfig({ ...nextDb.systemConfig, httpsLoginEnabled: preservedHttpsConfig.httpsLoginEnabled, httpLoginDisabled: preservedHttpsConfig.httpLoginDisabled, httpsPort: preservedHttpsConfig.httpsPort, httpsCertFilename: preservedHttpsConfig.httpsCertFilename, httpsKeyFilename: preservedHttpsConfig.httpsKeyFilename, httpsCertUploadedAt: preservedHttpsConfig.httpsCertUploadedAt, httpsKeyUploadedAt: preservedHttpsConfig.httpsKeyUploadedAt, httpsCertSubject: preservedHttpsConfig.httpsCertSubject, httpsCertIssuer: preservedHttpsConfig.httpsCertIssuer, httpsCertValidFrom: preservedHttpsConfig.httpsCertValidFrom, httpsCertValidTo: preservedHttpsConfig.httpsCertValidTo, httpsCertFingerprint256: preservedHttpsConfig.httpsCertFingerprint256, loginRateLimitMaxAttempts: preservedHttpsConfig.loginRateLimitMaxAttempts, loginRateLimitWindowMinutes: preservedHttpsConfig.loginRateLimitWindowMinutes, loginRateLimitLockMinutes: preservedHttpsConfig.loginRateLimitLockMinutes, allowRegistration: preservedHttpsConfig.allowRegistration, webIdleLogoutMinutes: preservedHttpsConfig.webIdleLogoutMinutes, timezoneOffset: preservedHttpsConfig.timezoneOffset });
       await writeDb(nextDb);
       let httpsMsg = '';
       try {
@@ -7077,7 +6987,14 @@ const requestHandler = async (req, res) => {
       fs.writeFileSync(tempArchive, pkgPart.data);
 
       try {
-        const { execSync } = require('child_process');
+        const fileList = execSync(`tar -tzf "${tempArchive}"`, { timeout: 10000, encoding: 'utf8' }).trim().split('\n').filter(Boolean);
+        for (const entry of fileList) {
+          const normalized = entry.replace(/^\.\//, '').replace(/\/+$/, '');
+          if (normalized.startsWith('/') || normalized.includes('..')) {
+            try { fs.unlinkSync(tempArchive); } catch (_) {}
+            return json(res, 400, { message: `升级包包含非法路径：${entry}` });
+          }
+        }
         execSync(`tar -xzf "${tempArchive}" -C "${pendingDir}"`, { timeout: 30000 });
       } catch (error) {
         try { fs.unlinkSync(tempArchive); } catch (_) {}

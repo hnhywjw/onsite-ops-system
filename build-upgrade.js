@@ -3,6 +3,7 @@
 const { execSync } = require('child_process');
 const fs = require('fs');
 const path = require('path');
+const crypto = require('crypto');
 
 const rootDir = path.resolve(__dirname);
 const pkg = JSON.parse(fs.readFileSync(path.join(rootDir, 'package.json'), 'utf8'));
@@ -31,7 +32,12 @@ for (const file of includeFiles) {
   }
 }
 for (const dir of includeDirs) {
-  if (!fs.statSync(path.join(rootDir, dir)).isDirectory()) {
+  const abs = path.join(rootDir, dir);
+  try {
+    if (!fs.statSync(abs).isDirectory()) {
+      missing.push(dir + '/');
+    }
+  } catch (_) {
     missing.push(dir + '/');
   }
 }
@@ -58,6 +64,39 @@ const sizeMB = (stats.size / (1024 * 1024)).toFixed(1);
 
 console.log(`Upgrade package created: ${outputName} (${sizeMB} MB)`);
 console.log(`Version: ${version}`);
+console.log('');
+
+const hashesFile = path.join(rootDir, 'SHA256SUMS');
+const hashLines = [];
+for (const file of includeFiles) {
+  const p = path.join(rootDir, file);
+  if (fs.existsSync(p)) {
+    const hash = crypto.createHash('sha256').update(fs.readFileSync(p)).digest('hex');
+    hashLines.push(`${hash}  ${file}`);
+    console.log(`  SHA256 ${file}: ${hash.substring(0, 16)}...`);
+  }
+}
+for (const dir of includeDirs) {
+  const dirPath = path.join(rootDir, dir);
+  try {
+    const walkDir = (dp, prefix) => {
+      const entries = fs.readdirSync(dp, { withFileTypes: true });
+      for (const e of entries) {
+        const rel = prefix ? `${prefix}/${e.name}` : `${dir}/${e.name}`;
+        const abs = path.join(dp, e.name);
+        if (e.isDirectory()) {
+          walkDir(abs, rel);
+        } else {
+          const hash = crypto.createHash('sha256').update(fs.readFileSync(abs)).digest('hex');
+          hashLines.push(`${hash}  ${rel}`);
+        }
+      }
+    };
+    walkDir(dirPath, dir);
+  } catch (_) {}
+}
+fs.writeFileSync(hashesFile, hashLines.join('\n') + '\n');
+console.log(`  SHA256SUMS written (${hashLines.length} files)`);
 console.log('');
 console.log('To apply the upgrade:');
 console.log('  1. Upload via System Management -> Software Upgrade in the web UI');

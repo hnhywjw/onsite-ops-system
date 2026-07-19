@@ -3,37 +3,66 @@
 UPGRADE_DIR="/app/data/upgrades"
 PENDING_DIR="$UPGRADE_DIR/pending"
 READY_FLAG="$UPGRADE_DIR/UPGRADE_READY"
+HASHES_FILE="$PENDING_DIR/SHA256SUMS"
 
 if [ -f "$READY_FLAG" ] && [ -d "$PENDING_DIR" ]; then
   echo "[upgrade] Applying upgrade from $PENDING_DIR"
 
   FILES_COPIED=0
-  for src in "$PENDING_DIR/server.js" "$PENDING_DIR/package.json"; do
+
+  copy_file() {
+    local src="$1"
+    local dest="$2"
     if [ -f "$src" ]; then
-      cp "$src" "/app/$src" 2>/dev/null && echo "[upgrade] Copied $(basename "$src")" && FILES_COPIED=$((FILES_COPIED + 1))
+      if cp "$src" "$dest"; then
+        echo "[upgrade] Copied $(basename "$src")"
+        return 0
+      else
+        echo "[upgrade] Failed to copy $(basename "$src")" >&2
+        return 1
+      fi
     fi
-  done
+    return 1
+  }
+
+  copy_file "$PENDING_DIR/server.js" /app/server.js && FILES_COPIED=$((FILES_COPIED + 1))
+  copy_file "$PENDING_DIR/package.json" /app/package.json && FILES_COPIED=$((FILES_COPIED + 1))
 
   if [ -d "$PENDING_DIR/public" ]; then
-    rm -rf /app/public 2>/dev/null
-    cp -r "$PENDING_DIR/public" /app/public 2>/dev/null && echo "[upgrade] Copied public/" && FILES_COPIED=$((FILES_COPIED + 1))
+    if rm -rf /app/public && cp -r "$PENDING_DIR/public" /app/public; then
+      echo "[upgrade] Copied public/"
+      FILES_COPIED=$((FILES_COPIED + 1))
+    else
+      echo "[upgrade] Failed to copy public/" >&2
+    fi
   fi
 
   if [ -d "$PENDING_DIR/scripts" ]; then
-    cp -r "$PENDING_DIR/scripts" /app/scripts 2>/dev/null && echo "[upgrade] Copied scripts/"
+    if rm -rf /app/scripts && cp -r "$PENDING_DIR/scripts" /app/scripts; then
+      echo "[upgrade] Copied scripts/"
+    else
+      echo "[upgrade] Failed to copy scripts/" >&2
+    fi
   fi
 
-  if [ -f "$PENDING_DIR/Dockerfile" ]; then
-    cp "$PENDING_DIR/Dockerfile" /app/Dockerfile 2>/dev/null && echo "[upgrade] Copied Dockerfile"
-  fi
-
-  if [ -f "$PENDING_DIR/docker-compose.prod.yml" ]; then
-    cp "$PENDING_DIR/docker-compose.prod.yml" /app/docker-compose.prod.yml 2>/dev/null && echo "[upgrade] Copied docker-compose.prod.yml"
-  fi
+  copy_file "$PENDING_DIR/Dockerfile" /app/Dockerfile
+  copy_file "$PENDING_DIR/docker-compose.yml" /app/docker-compose.yml
+  copy_file "$PENDING_DIR/docker-compose.prod.yml" /app/docker-compose.prod.yml
+  copy_file "$PENDING_DIR/pptx-template.json" /app/pptx-template.json
 
   if [ -f "$PENDING_DIR/migrate.sh" ]; then
-    echo "[upgrade] Running migration script"
-    sh "$PENDING_DIR/migrate.sh" && echo "[upgrade] Migration completed" || echo "[upgrade] Migration failed"
+    if [ -f "$HASHES_FILE" ]; then
+      EXPECTED=$(grep 'migrate.sh$' "$HASHES_FILE" | awk '{print $1}')
+      ACTUAL=$(sha256sum "$PENDING_DIR/migrate.sh" | awk '{print $1}')
+      if [ -n "$EXPECTED" ] && [ "$EXPECTED" != "$ACTUAL" ]; then
+        echo "[upgrade] migrate.sh SHA256 mismatch, skipping migration" >&2
+      else
+        echo "[upgrade] Running migration script"
+        sh "$PENDING_DIR/migrate.sh" && echo "[upgrade] Migration completed" || echo "[upgrade] Migration failed" >&2
+      fi
+    else
+      echo "[upgrade] No SHA256SUMS found, skipping migration for safety" >&2
+    fi
   fi
 
   TIMESTAMP=$(date +%Y%m%d%H%M%S)
