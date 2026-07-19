@@ -4031,8 +4031,8 @@ function serveStatic(req, res, pathname) {
   if (isHtml) {
     const nonce = createNonce();
     let html = fs.readFileSync(normalized, 'utf8');
-    html = html.replace(/<script(?![^>]*\bnonce\b)([^>]*)>/gi, `<script nonce="${nonce}"$1>`);
-    html = html.replace(/<style(?![^>]*\bnonce\b)([^>]*)>/gi, `<style nonce="${nonce}"$1>`);
+    html = html.replace(/<script(?![^>]*\snonce\s*=)([^>]*)>/gi, `<script nonce="${nonce}"$1>`);
+    html = html.replace(/<style(?![^>]*\snonce\s*=)([^>]*)>/gi, `<style nonce="${nonce}"$1>`);
     res.writeHead(200, buildSecurityHeaders({ 'Content-Type': contentType }, nonce));
     res.end(html);
     return;

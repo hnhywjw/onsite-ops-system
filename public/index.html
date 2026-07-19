@@ -6276,7 +6276,7 @@
     }
 
     function ssoLogin() {
-      fetch('/api/auth/oidc/login', { redirect: 'manual' }).then(res => {
+      fetch('/api/auth/oidc/login', { redirect: 'manual', credentials: 'include' }).then(res => {
         if (res.type === 'opaqueredirect') {
           window.location.href = '/api/auth/oidc/login';
         } else if (res.status === 501 || res.status === 502) {

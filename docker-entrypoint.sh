@@ -71,8 +71,8 @@ if [ -f "$READY_FLAG" ] && [ -d "$PENDING_DIR" ]; then
   TIMESTAMP=$(date +%Y%m%d%H%M%S)
   ARCHIVE_DIR="$UPGRADE_DIR/$TIMESTAMP"
   mkdir -p "$ARCHIVE_DIR"
-  mv "$PENDING_DIR" "$ARCHIVE_DIR/pending_backup" 2>/dev/null
-  mv "$READY_FLAG" "$ARCHIVE_DIR/UPGRADE_READY" 2>/dev/null
+  mv "$PENDING_DIR" "$ARCHIVE_DIR/pending_backup" || echo "[upgrade] Failed to archive pending dir" >&2
+  mv "$READY_FLAG" "$ARCHIVE_DIR/UPGRADE_READY" || echo "[upgrade] Failed to archive ready flag" >&2
   NEW_VER=$(node -e "try{const p=require('/app/package.json');console.log(p.version||'')}catch(_){console.log('')}")
   echo "[upgrade] Upgrade complete. Current version: ${NEW_VER:-N/A}"
 fi
