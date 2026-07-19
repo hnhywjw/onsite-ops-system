@@ -6,7 +6,6 @@ const { exec, execFile, execSync } = require('child_process');
 const crypto = require('crypto');
 const tls = require('tls');
 const { URL } = require('url');
-const zlib = require('zlib');
 const os = require('os');
 const net = require('net');
 const dns = require('dns').promises;
@@ -54,9 +53,6 @@ const loginRateLimitMaxAttempts = parseInt(process.env.LOGIN_RATE_LIMIT_MAX_ATTE
 const webSocketHeartbeatIntervalMs = parseInt(process.env.WS_HEARTBEAT_INTERVAL_MS, 10) || 30000;
 const isProduction = process.env.NODE_ENV === 'production';
 const upgradeSigningKey = process.env.UPGRADE_SIGNING_KEY || '';
-const maxUpgradeZipEntries = parseInt(process.env.UPGRADE_MAX_FILES, 10) || 200;
-const maxUpgradeExtractedBytes = parseInt(process.env.UPGRADE_MAX_EXTRACTED_BYTES, 10) || 100 * 1024 * 1024;
-const maxUpgradeFileBytes = parseInt(process.env.UPGRADE_MAX_FILE_BYTES, 10) || 20 * 1024 * 1024;
 const allowedBackupCommands = (process.env.CONFIG_BACKUP_ALLOWED_COMMANDS || 'show running-config,show startup-config,display current-configuration,cat /etc/os-release')
   .split(',')
   .map(item => item.trim())
@@ -850,35 +846,6 @@ function cleanupLoginAttemptStoreFromDb(db) {
   }
   setLoginRateLimitStateStore(db, store);
   return cleaned;
-}
-
-function computeSha256(buffer) {
-  return crypto.createHash('sha256').update(buffer).digest('hex');
-}
-
-function normalizeManifestHashes(rawHashes = {}) {
-  if (!rawHashes || typeof rawHashes !== 'object') return {};
-  return Object.fromEntries(
-    Object.entries(rawHashes)
-      .map(([key, value]) => [String(key).trim(), String(value || '').trim().toLowerCase()])
-      .filter(([key, value]) => key && /^[a-f0-9]{64}$/.test(value))
-  );
-}
-
-function verifyManifestFileHashes(extractDir, hashes) {
-  const mismatches = [];
-  for (const [file, expected] of Object.entries(hashes)) {
-    const extractedFile = resolveSafeChildPath(extractDir, file);
-    if (!fs.existsSync(extractedFile)) {
-      mismatches.push({ file, reason: 'missing' });
-      continue;
-    }
-    const actual = computeSha256(fs.readFileSync(extractedFile));
-    if (actual !== expected) {
-      mismatches.push({ file, reason: 'sha256', expected, actual });
-    }
-  }
-  return mismatches;
 }
 
 function runMaintenanceTasks(db) {
@@ -2565,91 +2532,6 @@ async function getSystemReadinessAsync() {
   return readiness;
 }
 
-function summarizeUpgradeVerification(rootDir, files) {
-  const verifiedFiles = [];
-  for (const file of files) {
-    const resolved = resolveSafeChildPath(rootDir, file);
-    if (!fs.existsSync(resolved)) {
-      throw new Error(`升级后校验失败，文件不存在: ${file}`);
-    }
-    verifiedFiles.push(file);
-  }
-  return verifiedFiles;
-}
-
-function canonicalizeValue(value) {
-  if (Array.isArray(value)) return value.map(canonicalizeValue);
-  if (value && typeof value === 'object') {
-    return Object.fromEntries(Object.keys(value).sort().map(key => [key, canonicalizeValue(value[key])]));
-  }
-  return value;
-}
-
-function canonicalizeUpgradeManifest(manifest) {
-  const clean = { ...manifest };
-  delete clean.signature;
-  delete clean.hmac;
-  return JSON.stringify(canonicalizeValue(clean));
-}
-
-function verifyUpgradeManifestSignature(manifest) {
-  const signature = String(manifest.signature || manifest.hmac || '').trim().toLowerCase();
-  if (!upgradeSigningKey) return !isProduction;
-  if (!/^[a-f0-9]{64}$/.test(signature)) return false;
-  const expected = crypto.createHmac('sha256', upgradeSigningKey).update(canonicalizeUpgradeManifest(manifest)).digest('hex');
-  return crypto.timingSafeEqual(Buffer.from(signature), Buffer.from(expected));
-}
-
-function validateUpgradeFileEntry(file) {
-  const normalized = String(file || '').replace(/\\/g, '/').trim();
-  if (!normalized || normalized.startsWith('/') || normalized.includes('../') || normalized === '..') {
-    throw new Error(`升级包路径非法: ${file}`);
-  }
-  if (normalized === 'manifest.json' || normalized === 'server.js' || normalized.startsWith('public/') || normalized.startsWith('scripts/') || normalized === 'package.json') {
-    return normalized;
-  }
-  throw new Error(`升级包禁止覆盖未授权路径: ${file}`);
-}
-
-function sanitizeManifestFiles(files) {
-  return (Array.isArray(files) ? files : [])
-    .filter(file => file !== 'data/' && !String(file).startsWith('data/'))
-    .map(validateUpgradeFileEntry)
-    .filter(Boolean);
-}
-
-function validateManifestFiles(rootDir, extractDir, files) {
-  const missing = [];
-  for (const file of files) {
-    const extractedFile = resolveSafeChildPath(extractDir, file);
-    if (!fs.existsSync(extractedFile)) {
-      missing.push(file);
-    }
-    resolveSafeChildPath(rootDir, file);
-  }
-  return missing;
-}
-
-function ensureUpgradePackageVersion(manifest) {
-  if (!manifest.version) {
-    throw new Error('manifest.json 缺少 version 字段');
-  }
-  const hashes = normalizeManifestHashes(manifest.sha256 || manifest.hashes);
-  if (!Object.keys(hashes).length) {
-    throw new Error('manifest.json 缺少 sha256 文件摘要');
-  }
-}
-
-function writeUpgradeFiles(extractDir, files) {
-  for (const file of files) {
-    const src = resolveSafeChildPath(extractDir, file);
-    const dest = resolveSafeChildPath(root, file);
-    const destDir = path.dirname(dest);
-    if (!fs.existsSync(destDir)) fs.mkdirSync(destDir, { recursive: true });
-    fs.copyFileSync(src, dest);
-  }
-}
-
 function getHealthPayload() {
   return {
     ok: true,
@@ -4115,56 +3997,6 @@ function parseMultipart(buffer, boundary) {
   }
   return parts;
 }
-
-function extractZip(zipBuffer, outputDir) {
-  const findEndOfCentralDirectory = (buf) => {
-    for (let i = buf.length - 22; i >= 0; i--) {
-      if (buf.readUInt32LE(i) === 0x06054b50) return i;
-    }
-    throw new Error('ZIP 文件结构无效');
-  };
-  const eocdOffset = findEndOfCentralDirectory(zipBuffer);
-  const totalEntries = zipBuffer.readUInt16LE(eocdOffset + 10);
-  if (totalEntries > maxUpgradeZipEntries) throw new Error(`ZIP 文件数量不能超过 ${maxUpgradeZipEntries}`);
-  const centralDirOffset = zipBuffer.readUInt32LE(eocdOffset + 16);
-  let offset = centralDirOffset;
-  let extractedBytes = 0;
-  for (let i = 0; i < totalEntries; i++) {
-    if (zipBuffer.readUInt32LE(offset) !== 0x02014b50) throw new Error('ZIP 目录项无效');
-    const compressionMethod = zipBuffer.readUInt16LE(offset + 10);
-    const fileNameLength = zipBuffer.readUInt16LE(offset + 28);
-    const extraFieldLength = zipBuffer.readUInt16LE(offset + 30);
-    const commentLength = zipBuffer.readUInt16LE(offset + 32);
-    const localHeaderOffset = zipBuffer.readUInt32LE(offset + 42);
-    const fileName = zipBuffer.slice(offset + 46, offset + 46 + fileNameLength).toString();
-    if (fileName.endsWith('/')) { offset += 46 + fileNameLength + extraFieldLength + commentLength; continue; }
-    validateUpgradeFileEntry(fileName);
-    if (zipBuffer.readUInt32LE(localHeaderOffset) !== 0x04034b50) throw new Error('ZIP 本地文件头无效');
-    const localFileNameLength = zipBuffer.readUInt16LE(localHeaderOffset + 26);
-    const localExtraFieldLength = zipBuffer.readUInt16LE(localHeaderOffset + 28);
-    const dataOffset = localHeaderOffset + 30 + localFileNameLength + localExtraFieldLength;
-    const compressedSize = zipBuffer.readUInt32LE(offset + 20);
-    const uncompressedSize = zipBuffer.readUInt32LE(offset + 24);
-    if (uncompressedSize > maxUpgradeFileBytes) throw new Error(`ZIP 单文件不能超过 ${maxUpgradeFileBytes} 字节`);
-    extractedBytes += uncompressedSize;
-    if (extractedBytes > maxUpgradeExtractedBytes) throw new Error(`ZIP 解压后总大小不能超过 ${maxUpgradeExtractedBytes} 字节`);
-    const rawData = zipBuffer.slice(dataOffset, dataOffset + compressedSize);
-    let data;
-    if (compressionMethod === 0) {
-      data = rawData;
-    } else if (compressionMethod === 8) {
-      data = zlib.inflateRawSync(rawData, { maxOutputLength: maxUpgradeFileBytes });
-    } else {
-      throw new Error(`不支持的 ZIP 压缩方式: ${compressionMethod}`);
-    }
-    if (data.length !== uncompressedSize || data.length > maxUpgradeFileBytes) throw new Error(`ZIP 文件大小校验失败: ${fileName}`);
-    const destPath = resolveSafeChildPath(outputDir, fileName);
-    fs.mkdirSync(path.dirname(destPath), { recursive: true });
-    fs.writeFileSync(destPath, data);
-    offset += 46 + fileNameLength + extraFieldLength + commentLength;
-  }
-}
-
 
 function serveStatic(req, res, pathname) {
   const filePath = pathname === '/' ? path.join(publicDir, 'index.html') : path.join(publicDir, pathname);
@@ -7002,6 +6834,28 @@ const requestHandler = async (req, res) => {
         return json(res, 400, { message: `升级包解压失败：${error.message}` });
       } finally {
         try { fs.unlinkSync(tempArchive); } catch (_) {}
+      }
+
+      {
+        const scanForSymlinks = (dir) => {
+          const symlinks = [];
+          try {
+            for (const entry of fs.readdirSync(dir, { withFileTypes: true })) {
+              const abs = path.join(dir, entry.name);
+              if (entry.isSymbolicLink()) {
+                symlinks.push(abs);
+              } else if (entry.isDirectory()) {
+                symlinks.push(...scanForSymlinks(abs));
+              }
+            }
+          } catch (_) {}
+          return symlinks;
+        };
+        const symlinks = scanForSymlinks(pendingDir);
+        if (symlinks.length > 0) {
+          cleanUpgradeDir(pendingDir);
+          return json(res, 400, { message: '升级包包含符号链接，拒绝解压' });
+        }
       }
 
       if (!fs.existsSync(path.join(pendingDir, 'server.js')) ||
