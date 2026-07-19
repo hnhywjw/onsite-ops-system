@@ -2719,7 +2719,16 @@
         headers: { ...headers, ...(options.headers || {}) }
       });
       const isJson = response.headers.get('content-type')?.includes('application/json');
-      const data = isJson ? await response.json() : await response.text();
+      let data;
+      if (isJson) {
+        try {
+          data = await response.json();
+        } catch (_) {
+          data = { message: '服务器响应异常' };
+        }
+      } else {
+        data = await response.text();
+      }
       if (data && typeof data === 'object' && data.csrfToken) state.csrfToken = data.csrfToken;
       if (!response.ok) {
         const errorMessage = data.message || '请求失败';
