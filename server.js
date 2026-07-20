@@ -2038,13 +2038,23 @@ async function getSystemServicesStatus(db) {
     });
   } catch (error) {
     await resetMySqlConnection();
-    services.push({
-      key: 'mysql',
-      name: 'MySQL 数据库',
-      status: 'stopped',
-      detail: error.message,
-      checkedAt
-    });
+    if (allowFileDbFallback) {
+      services.push({
+        key: 'mysql',
+        name: 'MySQL 数据库',
+        status: 'running',
+        detail: '文件存储模式（内置数据引擎）',
+        checkedAt
+      });
+    } else {
+      services.push({
+        key: 'mysql',
+        name: 'MySQL 数据库',
+        status: 'stopped',
+        detail: error.message,
+        checkedAt
+      });
+    }
   }
   try {
     fs.accessSync(backupDir, fs.constants.R_OK | fs.constants.W_OK);
@@ -2536,8 +2546,12 @@ async function getSystemReadinessAsync() {
     readiness.checks.push({ name: 'mysql', ok: true, detail: `${dbConfig.user}@${dbConfig.host}:${dbConfig.port}/${dbConfig.database}` });
   } catch (error) {
     await resetMySqlConnection();
-    readiness.ok = false;
-    readiness.checks.push({ name: 'mysql', ok: false, detail: error.message });
+    if (allowFileDbFallback) {
+      readiness.checks.push({ name: 'mysql', ok: true, detail: '文件存储模式（内置数据引擎）' });
+    } else {
+      readiness.ok = false;
+      readiness.checks.push({ name: 'mysql', ok: false, detail: error.message });
+    }
   }
   return readiness;
 }
