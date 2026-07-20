@@ -2083,7 +2083,7 @@ function createNonce() {
 
 function buildNonceHeaderValue(nonce) {
   const n = nonce || '';
-  return `default-src 'self'; script-src 'self' 'nonce-${n}' 'strict-dynamic'; style-src 'self' 'nonce-${n}'; img-src 'self' data: blob:; connect-src 'self' ws: wss:; font-src 'self' data:; object-src 'none'; base-uri 'self'; frame-ancestors 'none'; form-action 'self'`;
+  return `default-src 'self'; script-src 'self' 'nonce-${n}' 'strict-dynamic'; style-src 'self' 'unsafe-inline' 'nonce-${n}'; img-src 'self' data: blob:; connect-src 'self' ws: wss:; font-src 'self' data:; object-src 'none'; base-uri 'self'; frame-ancestors 'none'; form-action 'self'`;
 }
 
 function buildSecurityHeaders(extraHeaders = {}, nonce = '') {
