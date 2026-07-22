@@ -67,6 +67,7 @@ for (const dir of includeDirs) {
       for (const e of dirents) {
         const rel = prefix ? `${prefix}/${e.name}` : `${dir}/${e.name}`;
         const abs = path.join(dp, e.name);
+        if (e.name === 'downloads' && prefix === 'public') continue;
         if (e.isDirectory()) {
           walkDir(abs, rel);
         } else {
@@ -83,7 +84,7 @@ fs.writeFileSync(hashesFile, hashLines.join('\n') + '\n');
 entries.push('SHA256SUMS');
 
 try {
-  execSync(`tar -czf "${outputPath}" ${entries.map(e => `"${e}"`).join(' ')}`, {
+  execSync(`tar -czf "${outputPath}" --exclude=public/downloads ${entries.map(e => `"${e}"`).join(' ')}`, {
     cwd: rootDir,
     timeout: 60000
   });
