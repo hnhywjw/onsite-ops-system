@@ -2744,6 +2744,10 @@
       return div.innerHTML;
     }
 
+    function fmt(text) {
+      return esc(text ?? '').replace(/\n/g, '<br>');
+    }
+
     function showGlobalError(message) {
       const toast = document.getElementById('globalErrorToast');
       if (toast) {
@@ -4339,7 +4343,7 @@
           <td style="width:520px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;">${esc(item.solution)}</td>
           <td><div class="toolbar" style="white-space:nowrap;">${kbActions}</div></td>
         </tr>
-        ${expanded ? `<tr><td colspan="6"><div class="card" style="margin:8px 0;"><div class="muted" style="margin-bottom:8px;">问题详情</div><div style="margin-bottom:12px;">${esc(item.problem)}</div><div class="muted" style="margin-bottom:8px;">解决方案</div><div>${esc(item.solution)}</div></div></td></tr>` : ''}`;
+        ${expanded ? `<tr><td colspan="6"><div class="card" style="margin:8px 0;"><div class="muted" style="margin-bottom:8px;">问题详情</div><div style="margin-bottom:12px;">${fmt(item.problem)}</div><div class="muted" style="margin-bottom:8px;">解决方案</div><div>${fmt(item.solution)}</div></div></td></tr>` : ''}`;
       }).join('') || '<tr><td colspan="6">暂无数据</td></tr>';
       document.getElementById('kbPageInfo').textContent = `第 ${state.kbPage} / ${totalPages} 页`;
       document.getElementById('kbPrevBtn').disabled = state.kbPage <= 1;
