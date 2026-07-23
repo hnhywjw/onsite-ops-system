@@ -4736,12 +4736,14 @@ const requestHandler = async (req, res) => {
         const name = (row.name || row['资产名称'] || '').trim();
         if (!name) { results.errors.push(`${rowLabel}: 资产名称为空`); results.skipped++; continue; }
         let projectId = user.projectId;
-        if (user.role === 'admin') {
-          const projectName = (row.projectName || row['关联项目'] || '').trim();
-          if (projectName) {
-            const p = db.projects.find(prj => prj.name === projectName);
-            if (!p) { results.errors.push(`${rowLabel}: 项目"${projectName}"不存在`); results.skipped++; continue; }
+        const projectName = (row.projectName || row['关联项目'] || '').trim();
+        if (user.role === 'admin' && projectName) {
+          const p = db.projects.find(prj => prj.name === projectName);
+          if (p) {
             projectId = p.id;
+          } else {
+            const available = db.projects.map(prj => prj.name).join('、');
+            results.errors.push(`${rowLabel}: 项目"${projectName}"不存在，已归入默认项目。可用项目：${available || '无'}`);
           }
         }
         if (!db.projects.find(prj => prj.id === projectId)) { results.errors.push(`${rowLabel}: 关联项目不存在`); results.skipped++; continue; }
