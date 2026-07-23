@@ -4747,6 +4747,29 @@ const requestHandler = async (req, res) => {
           }
         }
         if (!db.projects.find(prj => prj.id === projectId)) { results.errors.push(`${rowLabel}: 关联项目不存在`); results.skipped++; continue; }
+        const rawDate = row.maintainExpiryDate ?? row['维保到期日'];
+        let maintainExpiryDate = '';
+        if (rawDate != null && rawDate !== '') {
+          if (typeof rawDate === 'number') {
+            const excelEpoch = new Date(1899, 11, 30);
+            const d = new Date(excelEpoch.getTime() + rawDate * 86400000);
+            maintainExpiryDate = d.toISOString().slice(0, 10);
+          } else {
+            const str = String(rawDate).trim();
+            const m = str.match(/^(\d{4})[-/](\d{1,2})[-/](\d{1,2})/);
+            if (m) {
+              maintainExpiryDate = `${m[1]}-${m[2].padStart(2, '0')}-${m[3].padStart(2, '0')}`;
+            } else if (/^\d{1,2}[\/\-]\d{1,2}[\/\-]\d{4}$/.test(str)) {
+              const parts = str.split(/[\/\-]/);
+              maintainExpiryDate = `${parts[2]}-${parts[0].padStart(2, '0')}-${parts[1].padStart(2, '0')}`;
+            } else {
+              results.errors.push(`${rowLabel}: 维保到期日格式无效"${str}"，请使用YYYY-MM-DD格式`);
+            }
+          }
+        }
+        if (rawDate != null && rawDate !== '' && !maintainExpiryDate && !results.errors.slice(-1)[0]?.includes('维保到期日')) {
+          results.errors.push(`${rowLabel}: 维保到期日格式无法识别，请使用YYYY-MM-DD格式`);
+        }
         const item = {
           id: id('asset'),
           projectId,
@@ -4758,7 +4781,7 @@ const requestHandler = async (req, res) => {
           version: row.version || row['版本'] || '',
           serialNumber: row.serialNumber || row['序列号'] || '',
           status: row.status || row['状态'] || '',
-          maintainExpiryDate: row.maintainExpiryDate || row['维保到期日'] || '',
+          maintainExpiryDate,
           installationLocation: row.installationLocation || row['安装位置'] || '',
           notes: row.notes || row['备注'] || '',
           createdBy: user.id,
