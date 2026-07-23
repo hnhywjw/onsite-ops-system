@@ -4273,8 +4273,9 @@
       state.assetPage = Math.min(Math.max(1, state.assetPage || 1), totalPages);
       const start = (state.assetPage - 1) * pageSize;
       const pageItems = sourceAssets.slice(start, start + pageSize);
-      const checked = (state.selectedAssetIds || []).includes(item.id) ? ' checked' : '';
-      document.getElementById('assetTable').innerHTML = pageItems.map(item => `
+      document.getElementById('assetTable').innerHTML = pageItems.map(item => {
+        const checked = (state.selectedAssetIds || []).includes(item.id) ? ' checked' : '';
+        return `
         <tr>
           <td style="text-align:center;"><input type="checkbox" class="asset-checkbox" data-id="${item.id}"${checked} /></td>
           <td>${esc(formatProjectDisplayById(item.projectId))}</td>
@@ -4291,7 +4292,8 @@
           <td style="max-width:100px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;" title="${esc(item.notes || '')}">${esc(item.notes || '')}</td>
           <td><div class="toolbar" style="white-space:nowrap;">${canEditData() ? `<button class="secondary" data-action="edit-asset" data-id="${item.id}" type="button">修改</button><button class="secondary" data-action="delete-asset" data-id="${item.id}" type="button" style="background:#fee2e2;color:#dc2626;border-color:#fecaca;">删除</button>` : ''}</div></td>
         </tr>
-      `).join('') || '<tr><td colspan="14">暂无数据</td></tr>';
+        `;
+      }).join('') || '<tr><td colspan="14">暂无数据</td></tr>';
       document.getElementById('assetSelectAll').checked = pageItems.length > 0 && pageItems.every(item => (state.selectedAssetIds || []).includes(item.id));
       document.getElementById('assetPageInfo').textContent = `第 ${state.assetPage} / ${totalPages} 页`;
       document.getElementById('assetPrevBtn').disabled = state.assetPage <= 1;
