@@ -1891,9 +1891,9 @@
                <label class="full"><span>备注</span><textarea name="notes"></textarea></label>
 
               <div style="display:flex;gap:8px;align-items:center;margin-bottom:12px;">
-                <button class="primary" style="flex:1;" id="assetSubmitBtn" type="submit">保存资产</button>
-                <button class="secondary" style="flex:1;" id="assetImportBtn" type="button" title="从Excel批量导入资产">导入Excel</button>
-                <button class="secondary" style="flex:1;" id="assetTplBtn" type="button" title="下载导入模板">下载模板</button>
+                <button class="primary" id="assetSubmitBtn" type="submit">保存资产</button>
+                <button class="secondary" id="assetImportBtn" type="button" title="从Excel批量导入资产">导入Excel</button>
+                <button class="secondary" id="assetTplBtn" type="button" title="下载导入模板">下载模板</button>
                 <input type="file" id="assetImportFile" accept=".xlsx,.xls" style="display:none;" />
               </div>
             </form>
@@ -1905,7 +1905,7 @@
             <h3 style="margin-top:0;">资产列表</h3>
             <div class="table-wrap">
               <table>
-                <thead><tr><th>名称</th><th>品牌</th><th>型号</th><th>类型</th><th>版本</th><th>序列号</th><th>安装位置</th><th>状态</th><th>维保到期</th><th>项目名称 <span class="sort-arrow" data-sort-target="assetProjectSort" style="cursor:pointer;user-select:none;font-size:15px;">↑↓</span></th><th>操作</th></tr></thead>
+                <thead><tr><th style="width:30px;"><input type="checkbox" id="assetSelectAll" title="全选" /></th><th>项目名称</th><th>资产类型</th><th>资产名称</th><th>品牌</th><th>规格型号</th><th>序列号</th><th>版本</th><th>维保到期日</th><th>安装位置</th><th>状态</th><th>责任人/部门</th><th style="max-width:100px;">备注</th><th>操作</th></tr></thead>
                 <tbody id="assetTable"></tbody>
               </table>
               <div class="pagination-bar">
@@ -1913,6 +1913,7 @@
                 <span id="assetPageInfo">第 1 / 1 页</span>
                 <button class="secondary" id="assetNextBtn" type="button">下一页</button>
                 <button class="secondary" id="assetExportBtn" type="button">导出Excel</button>
+                <button class="secondary" id="assetBatchDeleteBtn" type="button" style="background:#fee2e2;color:#dc2626;border-color:#fecaca;">批量删除</button>
                 <a id="assetExportLink" style="display:none;"></a>
               </div>
             </div>
@@ -2674,6 +2675,7 @@
       kbFilterProjectId: '',
       kbFilterUserId: '',
       assetPage: 1,
+      selectedAssetIds: [],
       projectPage: 1,
       userPage: 1,
       userProjectFilter: '',
@@ -4271,21 +4273,26 @@
       state.assetPage = Math.min(Math.max(1, state.assetPage || 1), totalPages);
       const start = (state.assetPage - 1) * pageSize;
       const pageItems = sourceAssets.slice(start, start + pageSize);
+      const checked = (state.selectedAssetIds || []).includes(item.id) ? ' checked' : '';
       document.getElementById('assetTable').innerHTML = pageItems.map(item => `
         <tr>
+          <td style="text-align:center;"><input type="checkbox" class="asset-checkbox" data-id="${item.id}"${checked} /></td>
+          <td>${esc(formatProjectDisplayById(item.projectId))}</td>
+          <td>${esc(item.type)}</td>
           <td>${esc(item.name)}</td>
           <td>${esc(item.brand || '-')}</td>
           <td>${esc(item.model || '-')}</td>
-          <td>${esc(item.type)}</td>
-          <td>${esc(item.version || '-')}</td>
           <td>${esc(item.serialNumber || '-')}</td>
+          <td>${esc(item.version || '-')}</td>
+          <td>${esc(item.maintainExpiryDate || '-')}</td>
           <td style="max-width:140px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;" title="${esc(item.installationLocation || '')}">${esc(item.installationLocation || '-')}</td>
           <td>${esc(item.status === '运行中' ? '使用中' : (item.status || '-'))}</td>
-          <td>${esc(item.maintainExpiryDate || '-')}</td>
-          <td>${esc(formatProjectDisplayById(item.projectId))}</td>
-          <td><div class="toolbar">${canEditData() ? `<button class="secondary" data-action="edit-asset" data-id="${item.id}" type="button">修改</button><button class="secondary" data-action="delete-asset" data-id="${item.id}" type="button" style="background:#fee2e2;color:#dc2626;border-color:#fecaca;">删除</button>` : ''}</div></td>
+          <td>${esc(item.owner || '-')}</td>
+          <td style="max-width:100px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;" title="${esc(item.notes || '')}">${esc(item.notes || '')}</td>
+          <td><div class="toolbar" style="white-space:nowrap;">${canEditData() ? `<button class="secondary" data-action="edit-asset" data-id="${item.id}" type="button">修改</button><button class="secondary" data-action="delete-asset" data-id="${item.id}" type="button" style="background:#fee2e2;color:#dc2626;border-color:#fecaca;">删除</button>` : ''}</div></td>
         </tr>
-      `).join('') || '<tr><td colspan="10">暂无数据</td></tr>';
+      `).join('') || '<tr><td colspan="14">暂无数据</td></tr>';
+      document.getElementById('assetSelectAll').checked = pageItems.length > 0 && pageItems.every(item => (state.selectedAssetIds || []).includes(item.id));
       document.getElementById('assetPageInfo').textContent = `第 ${state.assetPage} / ${totalPages} 页`;
       document.getElementById('assetPrevBtn').disabled = state.assetPage <= 1;
       document.getElementById('assetNextBtn').disabled = state.assetPage >= totalPages;
@@ -7278,6 +7285,18 @@
     });
 
     document.getElementById('assetTable').addEventListener('click', async event => {
+      const checkbox = event.target.closest('.asset-checkbox');
+      if (checkbox) {
+        const id = checkbox.dataset.id;
+        if (!state.selectedAssetIds) state.selectedAssetIds = [];
+        if (checkbox.checked) {
+          if (!state.selectedAssetIds.includes(id)) state.selectedAssetIds.push(id);
+        } else {
+          state.selectedAssetIds = state.selectedAssetIds.filter(x => x !== id);
+        }
+        document.getElementById('assetSelectAll').checked = document.querySelectorAll('.asset-checkbox:checked').length === document.querySelectorAll('.asset-checkbox').length;
+        return;
+      }
       const button = event.target.closest('button[data-action]');
       if (!button) return;
       try {
@@ -7289,6 +7308,17 @@
         }
       } catch (error) {
         setMessage('assetMessage', error.message, 'error');
+      }
+    });
+
+    document.getElementById('assetSelectAll').addEventListener('change', function() {
+      if (!state.selectedAssetIds) state.selectedAssetIds = [];
+      const checkboxes = document.querySelectorAll('.asset-checkbox');
+      if (this.checked) {
+        checkboxes.forEach(cb => { cb.checked = true; if (!state.selectedAssetIds.includes(cb.dataset.id)) state.selectedAssetIds.push(cb.dataset.id); });
+      } else {
+        checkboxes.forEach(cb => { cb.checked = false; });
+        state.selectedAssetIds = [];
       }
     });
 
@@ -8096,7 +8126,9 @@
       XLSX.writeFile(wb, '资产导入模板.xlsx');
     });
     document.getElementById('assetExportBtn').addEventListener('click', () => {
-      const assets = filterByUserProject(state.assets);
+      const selectedIds = state.selectedAssetIds || [];
+      let assets = filterByUserProject(state.assets);
+      if (selectedIds.length) assets = assets.filter(item => selectedIds.includes(item.id));
       if (!assets.length) { showToast('没有可导出的资产'); return; }
       const rows = assets.map(item => ({
         '关联项目': formatProjectDisplayById(item.projectId) || '',
@@ -8122,6 +8154,23 @@
       XLSX.utils.book_append_sheet(wb, ws, '资产列表');
       XLSX.writeFile(wb, `资产导出_${new Date().toISOString().slice(0,10)}.xlsx`);
       showToast(`已导出 ${assets.length} 条资产`);
+    });
+
+    document.getElementById('assetBatchDeleteBtn').addEventListener('click', async () => {
+      const ids = state.selectedAssetIds || [];
+      if (!ids.length) { showToast('请先勾选要删除的资产'); return; }
+      if (!await showConfirm(`确认删除选中的 ${ids.length} 条资产吗？`)) return;
+      let count = 0;
+      for (const id of ids) {
+        try {
+          await api(`/api/assets/${id}`, { method: 'DELETE' });
+          count++;
+        } catch (e) {}
+      }
+      state.selectedAssetIds = [];
+      setMessage('assetMessage', `已删除 ${count} 条资产`);
+      await loadBaseData();
+      switchSectionSubtab('assets', 'list');
     });
 
     document.getElementById('inspectionPlanForm').addEventListener('submit', async event => {
