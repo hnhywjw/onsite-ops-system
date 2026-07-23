@@ -1860,8 +1860,7 @@
             <h3 id="assetFormTitle" style="margin-top:0;">新增资产</h3>
             <form id="assetForm" class="grid-form">
               <input name="id" type="hidden" />
-              <label>
-                <span>关联项目 <em style="color:#dc2626;font-style:normal;">*</em></span>
+               <label><span>关联项目 <em style="color:#dc2626;font-style:normal;">*</em></span>
                 <select name="projectId" id="assetProjectId" required>
                   <option value="">请选择关联项目</option>
                 </select>
@@ -1883,18 +1882,18 @@
               <label><span>资产名称 <em style="color:#dc2626;font-style:normal;">*</em></span><input name="name" required placeholder="请输入资产名称" /></label>
               <label><span>品牌 <em style="color:#dc2626;font-style:normal;">*</em></span><input name="brand" required placeholder="请输入品牌" /></label>
               <label><span>规格型号 <em style="color:#dc2626;font-style:normal;">*</em></span><input name="model" required placeholder="请输入规格型号" /></label>
-              <label><span>责任人/部门</span><input name="owner" /></label>
-              <label><span>版本</span><input name="version" /></label>
               <label><span>序列号 <em style="color:#dc2626;font-style:normal;">*</em></span><input name="serialNumber" required placeholder="请输入序列号" /></label>
+              <label><span>版本</span><input name="version" /></label>
+              <label><span>维保到期日 <em style="color:#dc2626;font-style:normal;">*</em></span><input name="maintainExpiryDate" type="date" required /></label>
+               <label><span>安装位置</span><input name="installationLocation" placeholder="例：A区机房-03号机柜-2U" /></label>
                <label><span>状态</span><input name="status" placeholder="使用中/停用/维护中" /></label>
-               <label><span>维保到期日 <em style="color:#dc2626;font-style:normal;">*</em></span><input name="maintainExpiryDate" type="date" required /></label>
-               <label class="full"><span>安装位置</span><input name="installationLocation" placeholder="例：A区机房-03号机柜-2U" /></label>
+               <label><span>责任人/部门</span><input name="owner" /></label>
                <label class="full"><span>备注</span><textarea name="notes"></textarea></label>
 
               <div style="display:flex;gap:8px;align-items:center;margin-bottom:12px;">
-                <button class="primary full" id="assetSubmitBtn" type="submit">保存资产</button>
-                <button class="secondary" id="assetImportBtn" type="button" title="从Excel批量导入资产">导入Excel</button>
-                <button class="secondary" id="assetTplBtn" type="button" title="下载导入模板">下载模板</button>
+                <button class="primary" style="flex:1;" id="assetSubmitBtn" type="submit">保存资产</button>
+                <button class="secondary" style="flex:1;" id="assetImportBtn" type="button" title="从Excel批量导入资产">导入Excel</button>
+                <button class="secondary" style="flex:1;" id="assetTplBtn" type="button" title="下载导入模板">下载模板</button>
                 <input type="file" id="assetImportFile" accept=".xlsx,.xls" style="display:none;" />
               </div>
             </form>
@@ -8073,24 +8072,24 @@
     });
     document.getElementById('assetTplBtn').addEventListener('click', () => {
       const rows = [{
+        '关联项目': '（管理员填项目名，非管理员留空即可）',
+        '资产类型': '网络设备',
         '资产名称': '示例：核心交换机',
         '品牌': '示例：华为',
         '规格型号': '示例：S5735-L48P4XE',
-        '资产类型': '网络设备',
-        '版本': 'V200R021C00',
         '序列号': 'SN-2026-001',
-        '状态': '使用中',
-        '责任人/部门': '网络部',
+        '版本': 'V200R021C00',
         '维保到期日': '2027-12-31',
         '安装位置': 'A区机房-03号机柜-4U',
-        '备注': '备注信息',
-        '关联项目': '（管理员填项目名，非管理员留空即可）'
+        '状态': '使用中',
+        '责任人/部门': '网络部',
+        '备注': '备注信息'
       }];
       const ws = XLSX.utils.json_to_sheet(rows);
       ws['!cols'] = [
-        { wch: 22 }, { wch: 14 }, { wch: 22 }, { wch: 10 }, { wch: 14 },
-        { wch: 22 }, { wch: 8 }, { wch: 14 }, { wch: 14 }, { wch: 26 },
-        { wch: 20 }, { wch: 30 }
+        { wch: 30 }, { wch: 10 }, { wch: 22 }, { wch: 14 }, { wch: 22 },
+        { wch: 20 }, { wch: 14 }, { wch: 14 }, { wch: 26 }, { wch: 14 },
+        { wch: 14 }, { wch: 20 }
       ];
       const wb = XLSX.utils.book_new();
       XLSX.utils.book_append_sheet(wb, ws, '资产导入模板');
@@ -8100,24 +8099,24 @@
       const assets = filterByUserProject(state.assets);
       if (!assets.length) { showToast('没有可导出的资产'); return; }
       const rows = assets.map(item => ({
+        '关联项目': formatProjectDisplayById(item.projectId) || '',
+        '资产类型': item.type || '',
         '资产名称': item.name || '',
         '品牌': item.brand || '',
         '规格型号': item.model || '',
-        '资产类型': item.type || '',
-        '版本': item.version || '',
         '序列号': item.serialNumber || '',
-        '状态': item.status || '',
-        '责任人/部门': item.owner || '',
+        '版本': item.version || '',
         '维保到期日': item.maintainExpiryDate || '',
         '安装位置': item.installationLocation || '',
-        '备注': item.notes || '',
-        '关联项目': formatProjectDisplayById(item.projectId) || ''
+        '状态': item.status || '',
+        '责任人/部门': item.owner || '',
+        '备注': item.notes || ''
       }));
       const ws = XLSX.utils.json_to_sheet(rows);
       ws['!cols'] = [
-        { wch: 20 }, { wch: 14 }, { wch: 20 }, { wch: 10 }, { wch: 10 },
-        { wch: 20 }, { wch: 10 }, { wch: 14 }, { wch: 14 }, { wch: 24 },
-        { wch: 20 }, { wch: 18 }
+        { wch: 18 }, { wch: 10 }, { wch: 20 }, { wch: 14 }, { wch: 20 },
+        { wch: 20 }, { wch: 10 }, { wch: 14 }, { wch: 26 }, { wch: 14 },
+        { wch: 14 }, { wch: 20 }
       ];
       const wb = XLSX.utils.book_new();
       XLSX.utils.book_append_sheet(wb, ws, '资产列表');
