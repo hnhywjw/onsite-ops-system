@@ -629,6 +629,7 @@ function seed() {
         version: 'v1.0.0',
         serialNumber: 'FW-2026-001',
         status: '使用中',
+        installationLocation: 'A区机房-01号机柜-4U',
         notes: '默认资产',
         createdAt: now()
       }
@@ -1365,6 +1366,7 @@ function normalizeDb(raw = {}) {
       serialNumber: asset.serialNumber || '',
       status: asset.status === '运行中' ? '使用中' : (asset.status || ''),
       maintainExpiryDate: asset.maintainExpiryDate || '',
+      installationLocation: asset.installationLocation || asset.location || '',
       notes: asset.notes || '',
       createdAt: asset.createdAt || now()
     })),
@@ -2097,7 +2099,7 @@ function buildNonceHeaderValue(nonce) {
 }
 
 function buildSecurityHeaders(extraHeaders = {}, nonce = '') {
-  const csp = nonce ? buildNonceHeaderValue(nonce) : "default-src 'self'; script-src 'self' 'unsafe-inline'; style-src 'self' 'unsafe-inline'; img-src 'self' data: blob:; connect-src 'self' ws: wss:; font-src 'self' data:; object-src 'none'; base-uri 'self'; frame-ancestors 'none'; form-action 'self'";
+  const csp = nonce ? buildNonceHeaderValue(nonce) : "default-src 'self'; script-src 'self' 'unsafe-inline' https://cdn.sheetjs.com; style-src 'self' 'unsafe-inline'; img-src 'self' data: blob:; connect-src 'self' ws: wss:; font-src 'self' data:; object-src 'none'; base-uri 'self'; frame-ancestors 'none'; form-action 'self'";
   const headers = {
     'X-Content-Type-Options': 'nosniff',
     'X-Frame-Options': 'DENY',
@@ -3531,7 +3533,7 @@ function buildDetailedPptxBufferFromReport(report) {
       { label: '日期', width: 1.15, max: 12 }, { label: '事件', width: 2.0, max: 18 }, { label: '资产/位置', width: 1.7, max: 16 }, { label: '结论', width: 2.0, max: 20 }, { label: '工时', width: 0.75, max: 8 }, { label: '处理过程', width: 4.0, max: 40 }
     ]),
     createReportListSlide('资产清单概览', '设备类型、品牌型号、位置、维保与状态', report.assets.map(item => [
-      item.name || '-', item.type || '-', [item.brand, item.model].filter(Boolean).join(' / ') || '-', item.location || '-', item.maintainExpiryDate || '-', item.status || '-'
+      item.name || '-', item.type || '-', [item.brand, item.model].filter(Boolean).join(' / ') || '-', item.installationLocation || item.location || '-', item.maintainExpiryDate || '-', item.status || '-'
     ]), [
       { label: '名称', width: 2.0, max: 18 }, { label: '类型', width: 1.2, max: 10 }, { label: '品牌型号', width: 2.2, max: 22 }, { label: '位置', width: 2.0, max: 18 }, { label: '维保到期', width: 1.3, max: 12 }, { label: '状态', width: 1.2, max: 10 }
     ]),
@@ -3696,7 +3698,7 @@ function buildOperationalReportHtml(db, scope, targetId, period) {
     <tr><th>统计对象</th><td>${escapeHtml(scope === 'user' ? targetUser.name : '项目整体')}</td><th>项目人员</th><td>${escapeHtml((db.users || []).filter(item => item.projectId === project.id).map(item => item.name).join('、') || '-')}</td></tr>
   </tbody></table></div>
   <div class="card"><h2>运维日志明细</h2><table><thead><tr><th>日期</th><th>事件</th><th>人员</th><th>资产/位置</th><th>处理过程</th><th>结论</th><th>工时</th></tr></thead><tbody>${tableRows(logs, 7, item => `<tr><td>${escapeHtml(item.date || '-')}</td><td>${escapeHtml(item.event || '-')}</td><td>${escapeHtml((db.users || []).find(user => user.id === item.userId)?.name || '-')}</td><td>${escapeHtml(item.relatedTarget || item.location || '-')}</td><td>${escapeHtml(item.process || '-')}</td><td>${escapeHtml(item.conclusion || '-')}</td><td>${escapeHtml(item.durationHours || 0)}</td></tr>`)}</tbody></table></div>
-  <div class="card"><h2>资产清单</h2><table><thead><tr><th>名称</th><th>类型</th><th>品牌型号</th><th>位置</th><th>维保到期</th><th>状态</th></tr></thead><tbody>${tableRows(assets, 6, item => `<tr><td>${escapeHtml(item.name || '-')}</td><td>${escapeHtml(item.type || '-')}</td><td>${escapeHtml([item.brand, item.model].filter(Boolean).join(' / ') || '-')}</td><td>${escapeHtml(item.location || '-')}</td><td>${escapeHtml(item.maintainExpiryDate || '-')}</td><td>${escapeHtml(item.status || '-')}</td></tr>`)}</tbody></table></div>
+  <div class="card"><h2>资产清单</h2><table><thead><tr><th>名称</th><th>类型</th><th>品牌型号</th><th>位置</th><th>维保到期</th><th>状态</th></tr></thead><tbody>${tableRows(assets, 6, item => `<tr><td>${escapeHtml(item.name || '-')}</td><td>${escapeHtml(item.type || '-')}</td><td>${escapeHtml([item.brand, item.model].filter(Boolean).join(' / ') || '-')}</td><td>${escapeHtml(item.installationLocation || item.location || '-')}</td><td>${escapeHtml(item.maintainExpiryDate || '-')}</td><td>${escapeHtml(item.status || '-')}</td></tr>`)}</tbody></table></div>
   <div class="card"><h2>巡检计划与执行</h2><table><thead><tr><th>计划</th><th>周期</th><th>下次巡检</th><th>状态</th><th>本周期执行时间</th><th>结果</th><th>异常说明</th><th>整改建议</th></tr></thead><tbody>${tableRows(plans, 8, plan => { const exec = executions.find(item => item.planId === plan.id); return `<tr><td>${escapeHtml(plan.title || '-')}</td><td>${escapeHtml(plan.cycle || '-')}</td><td>${escapeHtml(plan.nextDate || '-')}</td><td>${escapeHtml(plan.status || '-')}</td><td>${escapeHtml(exec?.executedAt || '-')}</td><td>${escapeHtml(exec?.result || '-')}</td><td>${escapeHtml(exec?.issue || '-')}</td><td>${escapeHtml(exec?.suggestion || '-')}</td></tr>`; })}</tbody></table></div>
   <div class="card"><h2>变更与故障</h2><table><thead><tr><th>类型</th><th>标题</th><th>级别/类型</th><th>状态</th><th>时间</th><th>说明</th></tr></thead><tbody>${tableRows([...changes.map(item => ({ kind: '变更', title: item.title, type: item.riskLevel, status: item.status, time: item.createdAt, note: item.content })), ...incidents.map(item => ({ kind: '故障', title: item.title, type: item.faultType || item.severity, status: item.status, time: item.occurredAt || item.createdAt, note: item.resolution }))], 6, item => `<tr><td>${escapeHtml(item.kind)}</td><td>${escapeHtml(item.title || '-')}</td><td>${escapeHtml(item.type || '-')}</td><td>${escapeHtml(item.status || '-')}</td><td>${escapeHtml(item.time || '-')}</td><td>${escapeHtml(item.note || '-')}</td></tr>`)}</tbody></table></div>
   <div class="card"><h2>知识库、文档与备件</h2><table><thead><tr><th>类别</th><th>名称</th><th>关键字段</th><th>状态/数量</th><th>创建时间</th></tr></thead><tbody>${tableRows([...kb.map(item => ({ kind: '知识库', name: item.title, key: item.keywords, status: item.solution, createdAt: item.createdAt })), ...documents.map(item => ({ kind: '资料文档', name: item.title, key: item.type, status: item.attachmentName || '-', createdAt: item.createdAt })), ...spareParts.map(item => ({ kind: '备件', name: item.name, key: item.model || item.spec || '-', status: item.quantity ?? item.stock ?? '-', createdAt: item.createdAt }))], 5, item => `<tr><td>${escapeHtml(item.kind)}</td><td>${escapeHtml(item.name || '-')}</td><td>${escapeHtml(item.key || '-')}</td><td>${escapeHtml(item.status || '-')}</td><td>${escapeHtml(item.createdAt || '-')}</td></tr>`)}</tbody></table></div>
@@ -4710,6 +4712,7 @@ const requestHandler = async (req, res) => {
         serialNumber: body.serialNumber || '',
         status: body.status || '',
         maintainExpiryDate: body.maintainExpiryDate || '',
+        installationLocation: body.installationLocation || '',
         notes: body.notes || '',
         createdBy: user.id,
         createdAt: now()
@@ -4718,6 +4721,53 @@ const requestHandler = async (req, res) => {
       appendAuditLog(db, user, 'create', 'asset', item.id, `创建资产 ${item.name}`, projectId);
       await writeDb(db);
       return json(res, 201, item);
+    }
+
+    if (req.method === 'POST' && pathname === '/api/assets/import') {
+      const user = requireEditor(req, res, db);
+      if (!user) return;
+      const body = await readBody(req);
+      const rows = Array.isArray(body.assets) ? body.assets : [];
+      if (!rows.length) return json(res, 400, { message: '导入数据为空' });
+      const results = { created: 0, skipped: 0, errors: [] };
+      for (let i = 0; i < rows.length; i++) {
+        const row = rows[i];
+        const rowLabel = `第${i + 2}行`;
+        const name = (row.name || row['资产名称'] || '').trim();
+        if (!name) { results.errors.push(`${rowLabel}: 资产名称为空`); results.skipped++; continue; }
+        let projectId = user.projectId;
+        if (user.role === 'admin') {
+          const projectName = (row.projectName || row['关联项目'] || '').trim();
+          if (projectName) {
+            const p = db.projects.find(prj => prj.name === projectName);
+            if (!p) { results.errors.push(`${rowLabel}: 项目"${projectName}"不存在`); results.skipped++; continue; }
+            projectId = p.id;
+          }
+        }
+        if (!db.projects.find(prj => prj.id === projectId)) { results.errors.push(`${rowLabel}: 关联项目不存在`); results.skipped++; continue; }
+        const item = {
+          id: id('asset'),
+          projectId,
+          type: row.type || row['资产类型'] || '',
+          name,
+          brand: row.brand || row['品牌'] || '',
+          model: row.model || row['规格型号'] || '',
+          owner: row.owner || row['责任人'] || row['责任人/部门'] || '',
+          version: row.version || row['版本'] || '',
+          serialNumber: row.serialNumber || row['序列号'] || '',
+          status: row.status || row['状态'] || '',
+          maintainExpiryDate: row.maintainExpiryDate || row['维保到期日'] || '',
+          installationLocation: row.installationLocation || row['安装位置'] || '',
+          notes: row.notes || row['备注'] || '',
+          createdBy: user.id,
+          createdAt: now()
+        };
+        db.assets.push(item);
+        results.created++;
+      }
+      appendAuditLog(db, user, 'import', 'asset', '', `批量导入资产 ${results.created} 条`, user.projectId);
+      await writeDb(db);
+      return json(res, 200, results);
     }
 
     if (req.method === 'PUT' && pathname.startsWith('/api/assets/')) {
@@ -4743,6 +4793,7 @@ const requestHandler = async (req, res) => {
       target.serialNumber = body.serialNumber || '';
       target.status = body.status || '';
       target.maintainExpiryDate = body.maintainExpiryDate || '';
+      target.installationLocation = body.installationLocation !== undefined ? body.installationLocation : target.installationLocation;
       target.notes = body.notes || '';
       appendAuditLog(db, user, 'update', 'asset', target.id, `修改资产 ${target.name}`, projectId);
       await writeDb(db);

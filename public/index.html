@@ -805,6 +805,7 @@
       .section-tabs button { font-size: 13px; padding: 4px 8px; }
     }
   </style>
+  <script src="https://cdn.sheetjs.com/xlsx-0.20.3/package/dist/xlsx.full.min.js"></script>
 </head>
 <body>
   <section id="loginView" class="login-wrap">
@@ -1076,6 +1077,7 @@
         <label>序列号<input id="edAssetSerialNumber" required placeholder="请输入序列号" /></label>
         <label>状态<input id="edAssetStatus" placeholder="使用中/停用/维护中" /></label>
         <label>维保到期日<input id="edAssetMaintainExpiryDate" type="date" required /></label>
+        <label class="full">安装位置<input id="edAssetInstallationLocation" placeholder="例：A区机房-03号机柜-2U" /></label>
         <label class="full">备注<textarea id="edAssetNotes"></textarea></label>
       </div>
       <div id="assetEditMessage" style="margin:8px 0;font-size:13px;"></div>
@@ -1886,9 +1888,15 @@
               <label><span>序列号 <em style="color:#dc2626;font-style:normal;">*</em></span><input name="serialNumber" required placeholder="请输入序列号" /></label>
                <label><span>状态</span><input name="status" placeholder="使用中/停用/维护中" /></label>
                <label><span>维保到期日 <em style="color:#dc2626;font-style:normal;">*</em></span><input name="maintainExpiryDate" type="date" required /></label>
+               <label class="full"><span>安装位置</span><input name="installationLocation" placeholder="例：A区机房-03号机柜-2U" /></label>
                <label class="full"><span>备注</span><textarea name="notes"></textarea></label>
 
-              <button class="primary full" id="assetSubmitBtn" type="submit">保存资产</button>
+              <div style="display:flex;gap:8px;align-items:center;margin-bottom:12px;">
+                <button class="primary full" id="assetSubmitBtn" type="submit">保存资产</button>
+                <button class="secondary" id="assetImportBtn" type="button" title="从Excel批量导入资产">导入Excel</button>
+                <button class="secondary" id="assetTplBtn" type="button" title="下载导入模板">下载模板</button>
+                <input type="file" id="assetImportFile" accept=".xlsx,.xls" style="display:none;" />
+              </div>
             </form>
             <div id="assetMessage"></div>
           </div>
@@ -1898,13 +1906,15 @@
             <h3 style="margin-top:0;">资产列表</h3>
             <div class="table-wrap">
               <table>
-                <thead><tr><th>名称</th><th>品牌</th><th>规格型号</th><th>类型</th><th>版本</th><th>序列号</th><th>状态</th><th>维保到期</th><th>项目名称 <span class="sort-arrow" data-sort-target="assetProjectSort" style="cursor:pointer;user-select:none;font-size:15px;">↑↓</span></th><th>操作</th></tr></thead>
+                <thead><tr><th>名称</th><th>品牌</th><th>型号</th><th>类型</th><th>版本</th><th>序列号</th><th>安装位置</th><th>状态</th><th>维保到期</th><th>项目名称 <span class="sort-arrow" data-sort-target="assetProjectSort" style="cursor:pointer;user-select:none;font-size:15px;">↑↓</span></th><th>操作</th></tr></thead>
                 <tbody id="assetTable"></tbody>
               </table>
               <div class="pagination-bar">
                 <button class="secondary" id="assetPrevBtn" type="button">上一页</button>
                 <span id="assetPageInfo">第 1 / 1 页</span>
                 <button class="secondary" id="assetNextBtn" type="button">下一页</button>
+                <button class="secondary" id="assetExportBtn" type="button">导出Excel</button>
+                <a id="assetExportLink" style="display:none;"></a>
               </div>
             </div>
           </div>
@@ -4270,6 +4280,7 @@
           <td>${esc(item.type)}</td>
           <td>${esc(item.version || '-')}</td>
           <td>${esc(item.serialNumber || '-')}</td>
+          <td style="max-width:140px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;" title="${esc(item.installationLocation || '')}">${esc(item.installationLocation || '-')}</td>
           <td>${esc(item.status === '运行中' ? '使用中' : (item.status || '-'))}</td>
           <td>${esc(item.maintainExpiryDate || '-')}</td>
           <td>${esc(formatProjectDisplayById(item.projectId))}</td>
@@ -5291,6 +5302,7 @@
       document.getElementById('edAssetSerialNumber').value = asset.serialNumber || '';
       document.getElementById('edAssetStatus').value = asset.status || '';
       document.getElementById('edAssetMaintainExpiryDate').value = asset.maintainExpiryDate || '';
+      document.getElementById('edAssetInstallationLocation').value = asset.installationLocation || '';
       document.getElementById('edAssetNotes').value = asset.notes || '';
       fillSelect('edAssetProjectId', state.projects);
       document.getElementById('edAssetProjectId').value = asset.projectId || '';
@@ -6885,6 +6897,7 @@
         serialNumber: document.getElementById('edAssetSerialNumber').value.trim(),
         status: document.getElementById('edAssetStatus').value.trim(),
         maintainExpiryDate: document.getElementById('edAssetMaintainExpiryDate').value,
+        installationLocation: document.getElementById('edAssetInstallationLocation').value.trim(),
         notes: document.getElementById('edAssetNotes').value.trim()
       };
       const msg = document.getElementById('assetEditMessage');
@@ -8032,6 +8045,84 @@
       } catch (error) {
         setMessage('assetMessage', error.message, 'error');
       }
+    });
+
+    document.getElementById('assetImportBtn').addEventListener('click', () => {
+      document.getElementById('assetImportFile').click();
+    });
+    document.getElementById('assetImportFile').addEventListener('change', async (e) => {
+      const file = e.target.files[0];
+      if (!file) return;
+      try {
+        const data = await file.arrayBuffer();
+        const wb = XLSX.read(data, { type: 'array' });
+        const ws = wb.Sheets[wb.SheetNames[0]];
+        const rows = XLSX.utils.sheet_to_json(ws);
+        if (!rows.length) { setMessage('assetMessage', 'Excel文件中没有数据', 'error'); return; }
+        const result = await api('/api/assets/import', { method: 'POST', body: JSON.stringify({ assets: rows }) });
+        let msg = `导入完成：成功 ${result.created} 条`;
+        if (result.skipped) msg += `，跳过 ${result.skipped} 条`;
+        if (result.errors.length) msg += '\n' + result.errors.join('\n');
+        setMessage('assetMessage', msg, result.errors.length ? 'error' : '');
+        await loadBaseData();
+        switchSectionSubtab('assets', 'list');
+      } catch (err) {
+        setMessage('assetMessage', '导入失败：' + err.message, 'error');
+      }
+      e.target.value = '';
+    });
+    document.getElementById('assetTplBtn').addEventListener('click', () => {
+      const rows = [{
+        '资产名称': '示例：核心交换机',
+        '品牌': '示例：华为',
+        '规格型号': '示例：S5735-L48P4XE',
+        '资产类型': '网络设备',
+        '版本': 'V200R021C00',
+        '序列号': 'SN-2026-001',
+        '状态': '使用中',
+        '责任人/部门': '网络部',
+        '维保到期日': '2027-12-31',
+        '安装位置': 'A区机房-03号机柜-4U',
+        '备注': '备注信息',
+        '关联项目': '（管理员可填项目名，非管理员忽略此列）'
+      }];
+      const ws = XLSX.utils.json_to_sheet(rows);
+      ws['!cols'] = [
+        { wch: 22 }, { wch: 14 }, { wch: 22 }, { wch: 10 }, { wch: 14 },
+        { wch: 22 }, { wch: 8 }, { wch: 14 }, { wch: 14 }, { wch: 26 },
+        { wch: 20 }, { wch: 30 }
+      ];
+      const wb = XLSX.utils.book_new();
+      XLSX.utils.book_append_sheet(wb, ws, '资产导入模板');
+      XLSX.writeFile(wb, '资产导入模板.xlsx');
+    });
+    document.getElementById('assetExportBtn').addEventListener('click', () => {
+      const assets = filterByUserProject(state.assets);
+      if (!assets.length) { showToast('没有可导出的资产'); return; }
+      const rows = assets.map(item => ({
+        '资产名称': item.name || '',
+        '品牌': item.brand || '',
+        '规格型号': item.model || '',
+        '资产类型': item.type || '',
+        '版本': item.version || '',
+        '序列号': item.serialNumber || '',
+        '状态': item.status || '',
+        '责任人/部门': item.owner || '',
+        '维保到期日': item.maintainExpiryDate || '',
+        '安装位置': item.installationLocation || '',
+        '备注': item.notes || '',
+        '关联项目': formatProjectDisplayById(item.projectId) || ''
+      }));
+      const ws = XLSX.utils.json_to_sheet(rows);
+      ws['!cols'] = [
+        { wch: 20 }, { wch: 14 }, { wch: 20 }, { wch: 10 }, { wch: 10 },
+        { wch: 20 }, { wch: 10 }, { wch: 14 }, { wch: 14 }, { wch: 24 },
+        { wch: 20 }, { wch: 18 }
+      ];
+      const wb = XLSX.utils.book_new();
+      XLSX.utils.book_append_sheet(wb, ws, '资产列表');
+      XLSX.writeFile(wb, `资产导出_${new Date().toISOString().slice(0,10)}.xlsx`);
+      showToast(`已导出 ${assets.length} 条资产`);
     });
 
     document.getElementById('inspectionPlanForm').addEventListener('submit', async event => {
