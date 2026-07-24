@@ -4620,6 +4620,8 @@
           html += `<text x="${mx}" y="${my + 20}" text-anchor="middle" font-size="10" fill="#dc2626" style="pointer-events:none;font-weight:600;">${esc(revArrow + ' ' + formatTrafficRate(tgtTraffic.rate))}</text>`;
         } else if (rel.sourcePort || rel.targetPort) {
           html += `<text x="${mx}" y="${my + 20}" text-anchor="middle" font-size="10" fill="#9ca3af" style="pointer-events:none;">等待数据...</text>`;
+        } else {
+          html += `<text x="${mx}" y="${my + 20}" text-anchor="middle" font-size="10" fill="#9ca3af" style="pointer-events:none;">等待数据...</text>`;
         }
       });
       svgElt.innerHTML = html;
@@ -4744,6 +4746,7 @@
     function bindTopoNodeEvents() {
       document.querySelectorAll('.topo-node').forEach(node => {
         let startX, startY, moved;
+        let dragInitialOffsets = null;
         node.onmousedown = function (e) {
           if (e.button !== 0) return;
           e.preventDefault();
@@ -4752,9 +4755,22 @@
           startY = e.clientY;
           moved = false;
           const aid = node.dataset.assetId;
-          state.topoDragNode = node;
           const canvas = document.getElementById('topologyCanvas');
           const crect = canvas.getBoundingClientRect();
+          if (state.topoSelectedNodes.has(aid) && state.topoSelectedNodes.size > 1) {
+            dragInitialOffsets = [];
+            state.topoSelectedNodes.forEach(id => {
+              const nd = document.querySelector(`.topo-node[data-asset-id="${id}"]`);
+              if (nd) {
+                const l = parseFloat(nd.style.left || '10%');
+                const t = parseFloat(nd.style.top || '10%');
+                dragInitialOffsets.push({ id, node: nd, left: l, top: t });
+              }
+            });
+          } else {
+            dragInitialOffsets = null;
+          }
+          state.topoDragNode = node;
           const nodeLeftPct = parseFloat(node.style.left || '10%');
           const nodeTopPct = parseFloat(node.style.top || '10%');
           state.topoDragStartCenter = {
@@ -4771,20 +4787,38 @@
             const cr = c.getBoundingClientRect();
             const newLeft = ((ev.clientX - cr.left - state.topoDragStartCenter.x) / cr.width) * 100;
             const newTop = ((ev.clientY - cr.top - state.topoDragStartCenter.y) / cr.height) * 100;
-            state.topoDragNode.style.left = newLeft + '%';
-            state.topoDragNode.style.top = newTop + '%';
+            if (dragInitialOffsets) {
+              const dL = newLeft - nodeLeftPct;
+              const dT = newTop - nodeTopPct;
+              dragInitialOffsets.forEach(item => {
+                item.node.style.left = (item.left + dL) + '%';
+                item.node.style.top = (item.top + dT) + '%';
+              });
+            } else {
+              state.topoDragNode.style.left = newLeft + '%';
+              state.topoDragNode.style.top = newTop + '%';
+            }
           }
           function onUp(ev) {
             document.removeEventListener('mousemove', onMove);
             document.removeEventListener('mouseup', onUp);
             if (moved) {
-              const aId = state.topoDragNode.dataset.assetId;
-              const nd = state.topoDragNode;
-              state.topoNodePositions[aId] = {
-                x: parseFloat(nd.style.left || '10%'),
-                y: parseFloat(nd.style.top || '10%')
-              };
-              nd.style.zIndex = 2;
+              if (dragInitialOffsets) {
+                dragInitialOffsets.forEach(item => {
+                  state.topoNodePositions[item.id] = {
+                    x: parseFloat(item.node.style.left || '10%'),
+                    y: parseFloat(item.node.style.top || '10%')
+                  };
+                });
+              } else {
+                const aId = state.topoDragNode.dataset.assetId;
+                const nd = state.topoDragNode;
+                state.topoNodePositions[aId] = {
+                  x: parseFloat(nd.style.left || '10%'),
+                  y: parseFloat(nd.style.top || '10%')
+                };
+              }
+              state.topoDragNode.style.zIndex = 2;
               state.topoDragNode = null;
               renderTopoLines();
             } else {
