@@ -1668,7 +1668,7 @@ function normalizeDb(raw = {}) {
       expiresAt: item.expiresAt || new Date(currentTime + sessionMaxAgeSeconds * 1000).toISOString()
     })).filter(item => item.token && item.userId && Date.parse(item.expiresAt) > currentTime),
     topologyLayouts: (raw.topologyLayouts && typeof raw.topologyLayouts === 'object' && !Array.isArray(raw.topologyLayouts))
-      ? raw.topologyLayouts
+      ? { positions: (raw.topologyLayouts.positions && typeof raw.topologyLayouts.positions === 'object' && !Array.isArray(raw.topologyLayouts.positions)) ? raw.topologyLayouts.positions : {} }
       : { positions: {} },
     systemConfig: normalizeSystemConfig(raw.systemConfig),
     runtimeState: normalizeRuntimeState(raw.runtimeState)
@@ -4905,8 +4905,14 @@ const requestHandler = async (req, res) => {
       const targetAssetId = body.targetAssetId || '';
       if (!sourceAssetId || !targetAssetId) return json(res, 400, { message: '源资产和目标资产不能为空' });
       if (sourceAssetId === targetAssetId) return json(res, 400, { message: '不能连接自身' });
-      if (!db.assets.find(a => a.id === sourceAssetId)) return json(res, 404, { message: '源资产不存在' });
-      if (!db.assets.find(a => a.id === targetAssetId)) return json(res, 404, { message: '目标资产不存在' });
+      const srcAsset = db.assets.find(a => a.id === sourceAssetId);
+      const tgtAsset = db.assets.find(a => a.id === targetAssetId);
+      if (!srcAsset) return json(res, 404, { message: '源资产不存在' });
+      if (!tgtAsset) return json(res, 404, { message: '目标资产不存在' });
+      if (user.role !== 'admin') {
+        if (srcAsset.projectId !== user.projectId) return json(res, 403, { message: '无权访问源资产' });
+        if (tgtAsset.projectId !== user.projectId) return json(res, 403, { message: '无权访问目标资产' });
+      }
       if (!db.assetRelations) db.assetRelations = [];
       const exists = db.assetRelations.find(r => r.sourceAssetId === sourceAssetId && r.targetAssetId === targetAssetId);
       if (exists) return json(res, 409, { message: '该关系已存在' });
@@ -4930,6 +4936,10 @@ const requestHandler = async (req, res) => {
       if (!user) return;
       const query = Object.fromEntries(reqUrl.searchParams);
       let list = db.assetRelations || [];
+      if (user.role !== 'admin') {
+        const userAssetIds = new Set((db.assets || []).filter(a => a.projectId === user.projectId).map(a => a.id));
+        list = list.filter(r => userAssetIds.has(r.sourceAssetId) && userAssetIds.has(r.targetAssetId));
+      }
       if (query.sourceAssetId) list = list.filter(r => r.sourceAssetId === query.sourceAssetId);
       if (query.targetAssetId) list = list.filter(r => r.targetAssetId === query.targetAssetId);
       return json(res, 200, list);
@@ -4941,7 +4951,11 @@ const requestHandler = async (req, res) => {
       const relId = pathname.split('/')[3];
       const idx = (db.assetRelations || []).findIndex(r => r.id === relId);
       if (idx === -1) return json(res, 404, { message: '关系不存在' });
-      const rel = db.assetRelations[idx];
+      if (user.role !== 'admin') {
+        const rel = db.assetRelations[idx];
+        const srcAsset = (db.assets || []).find(a => a.id === rel.sourceAssetId);
+        if (!srcAsset || srcAsset.projectId !== user.projectId) return json(res, 403, { message: '无权操作此关系' });
+      }
       db.assetRelations.splice(idx, 1);
       await writeDb(db);
       return json(res, 200, { ok: true });
@@ -4953,8 +4967,25 @@ const requestHandler = async (req, res) => {
       const relId = pathname.split('/')[3];
       const idx = (db.assetRelations || []).findIndex(r => r.id === relId);
       if (idx === -1) return json(res, 404, { message: '关系不存在' });
-      const body = await readBody(req);
       const rel = db.assetRelations[idx];
+      if (user.role !== 'admin') {
+        const srcAsset = (db.assets || []).find(a => a.id === rel.sourceAssetId);
+        if (!srcAsset || srcAsset.projectId !== user.projectId) return json(res, 403, { message: '无权操作此关系' });
+      }
+      const body = await readBody(req);
+      if (body.sourceAssetId !== undefined || body.targetAssetId !== undefined) {
+        const newSrc = body.sourceAssetId || rel.sourceAssetId;
+        const newTgt = body.targetAssetId || rel.targetAssetId;
+        if (newSrc === newTgt) return json(res, 400, { message: '不能连接自身' });
+        if (!db.assets.find(a => a.id === newSrc)) return json(res, 404, { message: '源资产不存在' });
+        if (!db.assets.find(a => a.id === newTgt)) return json(res, 404, { message: '目标资产不存在' });
+        if (user.role !== 'admin') {
+          const sa = db.assets.find(a => a.id === newSrc);
+          const ta = db.assets.find(a => a.id === newTgt);
+          if (!sa || sa.projectId !== user.projectId) return json(res, 403, { message: '无权访问源资产' });
+          if (!ta || ta.projectId !== user.projectId) return json(res, 403, { message: '无权访问目标资产' });
+        }
+      }
       if (body.sourcePort !== undefined) rel.sourcePort = body.sourcePort;
       if (body.targetPort !== undefined) rel.targetPort = body.targetPort;
       if (body.relationType !== undefined) rel.relationType = body.relationType;
@@ -4966,7 +4997,7 @@ const requestHandler = async (req, res) => {
     }
 
     if (req.method === 'GET' && pathname === '/api/assets/topology-layout') {
-      const user = requireEditor(req, res, db);
+      const user = requireAuth(req, res, db);
       if (!user) return;
       const layoutData = db.topologyLayouts || { positions: {} };
       const projectId = user.role === 'admin' ? (reqUrl.searchParams.get('projectId') || user.projectId) : user.projectId;
@@ -4998,36 +5029,40 @@ const requestHandler = async (req, res) => {
 
       try {
         const snmp = require('snmp-native');
-        const session = new snmp.Session({
-          host,
-          community: asset.snmpCommunity || 'public',
-          port: parseInt(asset.snmpPort || '161', 10),
-          timeouts: [3000]
-        });
-        const ifList = [];
-        await new Promise((resolve, reject) => {
-          const oid = [1, 3, 6, 1, 2, 1, 2, 2, 1, 2];
-          const timer = setTimeout(() => { reject(new Error('SNMP timeout')); }, 5000);
-          let done = false;
-          function walk(oids, cb) {
-            if (done) return;
-            session.getSubtree({ oid: oids, communities: [asset.snmpCommunity || 'public'] }, (err, varbinds) => {
-              if (err) { done = true; clearTimeout(timer); reject(err); return; }
-              for (const vb of varbinds) {
-                if (vb && vb.value !== undefined && vb.value !== null) {
-                  ifList.push({ index: vb.oid[vb.oid.length - 1], name: String(vb.value) });
+        let session = null;
+        try {
+          session = new snmp.Session({
+            host,
+            community: asset.snmpCommunity || 'public',
+            port: parseInt(asset.snmpPort || '161', 10),
+            timeouts: [3000]
+          });
+          const ifList = [];
+          await new Promise((resolve, reject) => {
+            const oid = [1, 3, 6, 1, 2, 1, 2, 2, 1, 2];
+            const timer = setTimeout(() => { reject(new Error('SNMP timeout')); }, 5000);
+            let done = false;
+            function walk(oids) {
+              if (done) return;
+              session.getSubtree({ oid: oids, communities: [asset.snmpCommunity || 'public'] }, (err, varbinds) => {
+                if (err) { done = true; clearTimeout(timer); reject(err); return; }
+                for (const vb of varbinds) {
+                  if (vb && vb.value !== undefined && vb.value !== null) {
+                    ifList.push({ index: vb.oid[vb.oid.length - 1], name: String(vb.value) });
+                  }
                 }
-              }
-              done = true;
-              clearTimeout(timer);
-              resolve();
-            });
-          }
-          walk(oid);
-        });
-        session.close();
-        ifList.sort((a, b) => a.index - b.index);
-        return json(res, 200, { interfaces: ifList.map(i => i.name) });
+                done = true;
+                clearTimeout(timer);
+                resolve();
+              });
+            }
+            walk(oid);
+          });
+          ifList.sort((a, b) => a.index - b.index);
+          return json(res, 200, { interfaces: ifList.map(i => i.name) });
+        } finally {
+          if (session) try { session.close(); } catch (_) {}
+        }
       } catch (e) {
         return json(res, 200, { interfaces: [], error: e.message });
       }

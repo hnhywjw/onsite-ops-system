@@ -3164,10 +3164,10 @@
               }
             } else if (msg.type === 'traffic_update') {
               if (msg.rates) {
-                Object.assign(state.topoTrafficRates, msg.rates);
+                state.topoTrafficRates = msg.rates;
               }
               if (msg.portStatus) {
-                Object.assign(state.topoPortStatus, msg.portStatus);
+                state.topoPortStatus = msg.portStatus;
               }
               renderTopoLines();
             }
@@ -5162,9 +5162,11 @@
       const tgtPort = document.getElementById('relTargetPort');
       srcPort.value = '';
       tgtPort.value = '';
-      await loadSnmpPorts(rel.sourceAssetId, 'relSourcePort', 'relSourcePortList');
+      await Promise.all([
+        loadSnmpPorts(rel.sourceAssetId, 'relSourcePort', 'relSourcePortList'),
+        loadSnmpPorts(rel.targetAssetId, 'relTargetPort', 'relTargetPortList')
+      ]);
       if (rel.sourcePort) srcPort.value = rel.sourcePort;
-      await loadSnmpPorts(rel.targetAssetId, 'relTargetPort', 'relTargetPortList');
       if (rel.targetPort) tgtPort.value = rel.targetPort;
       document.getElementById('relType').value = rel.relationType || 'connected';
       document.getElementById('relLabel').value = rel.label || '';
