@@ -3169,7 +3169,9 @@
               if (msg.portStatus) {
                 state.topoPortStatus = msg.portStatus;
               }
-              renderTopoLines();
+              if (document.getElementById('topologySvg') && document.getElementById('topologySvg').offsetParent) {
+                renderTopoLines();
+              }
             }
           } catch (_) {}
         };
@@ -4615,7 +4617,13 @@
       state.topoTrafficRates = {};
       state.topoPortStatus = {};
       state.topoDeleteLineId = null;
-      clearTopoDeleteTimer();
+      if (state.topoDeleteTimer) { clearTimeout(state.topoDeleteTimer); state.topoDeleteTimer = null; }
+      state.topoContextRelId = null;
+      state.topoEditRelId = null;
+      if (topoCmenuHideHandler) {
+        document.removeEventListener('click', topoCmenuHideHandler);
+        topoCmenuHideHandler = null;
+      }
       renderAlignBar();
       await loadTopoLayout();
       await fetchTopologyData();
