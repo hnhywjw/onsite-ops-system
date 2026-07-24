@@ -102,7 +102,7 @@ function validateProductionConfiguration() {
   if (!process.env.INITIAL_ADMIN_SECURITY_ANSWER || process.env.INITIAL_ADMIN_SECURITY_ANSWER === 'admin') problems.push('INITIAL_ADMIN_SECURITY_ANSWER 必须设置为生产安全答案');
   if (!process.env.INITIAL_ENGINEER_SECURITY_ANSWER || process.env.INITIAL_ENGINEER_SECURITY_ANSWER === 'blue') problems.push('INITIAL_ENGINEER_SECURITY_ANSWER 必须设置为生产安全答案');
   if (!process.env.ENCRYPTION_KEY || process.env.ENCRYPTION_KEY.length < 32) problems.push('ENCRYPTION_KEY 必须设置且长度不少于 32 位');
-  if (!process.env.DOCUMENT_TOKEN_SECRET || process.env.DOCUMENT_TOKEN_SECRET.length < 32) problems.push('DOCUMENT_TOKEN_SECRET 必须设置且长度不少于 32 位');
+  if (!process.env.DOCUMENT_TOKEN_SECRET || process.env.DOCUMENT_TOKEN_SECRET.length < 32) console.warn('WARNING: DOCUMENT_TOKEN_SECRET 环境变量未设置，文档访问令牌重启后将失效。请在生产环境中设置 DOCUMENT_TOKEN_SECRET。');
   if (!upgradeSigningKey || upgradeSigningKey.length < 32) problems.push('UPGRADE_SIGNING_KEY 必须设置且长度不少于 32 位');
   if (problems.length) {
     throw new Error(`生产配置不安全：${problems.join('；')}`);
