@@ -45,7 +45,7 @@ const dbConfig = {
   password: process.env.MYSQL_PASSWORD || 'onsite_ops_password',
   database: process.env.MYSQL_DATABASE || 'onsite_ops_system'
 };
-const dbCollectionKeys = ['users', 'projects', 'assets', 'assetRelations', 'logs', 'inspectionPlans', 'inspectionExecutions', 'spareParts', 'sparePartMovements', 'changeRecords', 'incidentRecords', 'approvals', 'notifications', 'auditLogs', 'knowledgeBase', 'documents', 'aiInspectionTargets', 'aiInspectionTemplates', 'aiInspectionTasks', 'aiInspectionResults', 'configBackupPlans', 'configBackupRecords', 'sessions', 'systemConfig', 'runtimeState'];
+const dbCollectionKeys = ['users', 'projects', 'assets', 'assetRelations', 'topologyLayouts', 'logs', 'inspectionPlans', 'inspectionExecutions', 'spareParts', 'sparePartMovements', 'changeRecords', 'incidentRecords', 'approvals', 'notifications', 'auditLogs', 'knowledgeBase', 'documents', 'aiInspectionTargets', 'aiInspectionTemplates', 'aiInspectionTasks', 'aiInspectionResults', 'configBackupPlans', 'configBackupRecords', 'sessions', 'systemConfig', 'runtimeState'];
 const allowFileDbFallback = process.env.ALLOW_FILE_DB_FALLBACK === 'true';
 const loginRateLimitWindowMs = parseInt(process.env.LOGIN_RATE_LIMIT_WINDOW_MS, 10) || 10 * 60 * 1000;
 const loginRateLimitLockMs = parseInt(process.env.LOGIN_RATE_LIMIT_LOCK_MS, 10) || 15 * 60 * 1000;
@@ -685,7 +685,8 @@ function seed() {
     configBackupPlans: [],
     configBackupRecords: [],
     documents: [],
-    assetRelations: []
+    assetRelations: [],
+    topologyLayouts: { positions: {} }
   };
 }
 
@@ -4746,6 +4747,8 @@ const requestHandler = async (req, res) => {
         monitorType: body.monitorType || 'ping',
         monitorHost: body.monitorHost || '',
         monitorPort: body.monitorPort || '',
+        snmpCommunity: body.snmpCommunity || 'public',
+        snmpPort: body.snmpPort || '161',
         createdBy: user.id,
         createdAt: now()
       };
@@ -4856,6 +4859,8 @@ const requestHandler = async (req, res) => {
       target.monitorType = body.monitorType || target.monitorType || 'ping';
       target.monitorHost = body.monitorHost !== undefined ? body.monitorHost : target.monitorHost || '';
       target.monitorPort = body.monitorPort !== undefined ? body.monitorPort : target.monitorPort || '';
+      target.snmpCommunity = body.snmpCommunity !== undefined ? body.snmpCommunity : target.snmpCommunity || 'public';
+      target.snmpPort = body.snmpPort !== undefined ? body.snmpPort : target.snmpPort || '161';
       appendAuditLog(db, user, 'update', 'asset', target.id, `修改资产 ${target.name}`, projectId);
       await writeDb(db);
       return json(res, 200, target);
@@ -4933,6 +4938,74 @@ const requestHandler = async (req, res) => {
       db.assetRelations.splice(idx, 1);
       await writeDb(db);
       return json(res, 200, { ok: true });
+    }
+
+    if (req.method === 'GET' && pathname === '/api/assets/topology-layout') {
+      const user = requireEditor(req, res, db);
+      if (!user) return;
+      const layoutData = db.topologyLayouts || { positions: {} };
+      const projectId = user.role === 'admin' ? (reqUrl.searchParams.get('projectId') || user.projectId) : user.projectId;
+      const positions = layoutData.positions[projectId] || {};
+      return json(res, 200, { positions });
+    }
+
+    if (req.method === 'POST' && pathname === '/api/assets/topology-layout') {
+      const user = requireEditor(req, res, db);
+      if (!user) return;
+      const body = await readBody(req);
+      const projectId = user.role === 'admin' ? (body.projectId || user.projectId) : user.projectId;
+      if (!db.topologyLayouts) db.topologyLayouts = { positions: {} };
+      if (!db.topologyLayouts.positions) db.topologyLayouts.positions = {};
+      db.topologyLayouts.positions[projectId] = body.positions || {};
+      await writeDb(db);
+      return json(res, 200, { ok: true });
+    }
+
+    if (req.method === 'GET' && pathname.startsWith('/api/assets/') && pathname.endsWith('/snmp-interfaces')) {
+      const user = requireEditor(req, res, db);
+      if (!user) return;
+      const parts = pathname.split('/');
+      const assetId = parts[3];
+      const asset = db.assets.find(a => a.id === assetId);
+      if (!asset) return json(res, 404, { message: '资产不存在' });
+      const host = asset.monitorHost || asset.installationLocation || '';
+      if (!host) return json(res, 200, { interfaces: [] });
+
+      try {
+        const snmp = require('snmp-native');
+        const session = new snmp.Session({
+          host,
+          community: asset.snmpCommunity || 'public',
+          port: parseInt(asset.snmpPort || '161', 10),
+          timeouts: [3000]
+        });
+        const ifList = [];
+        await new Promise((resolve, reject) => {
+          const oid = [1, 3, 6, 1, 2, 1, 2, 2, 1, 2];
+          const timer = setTimeout(() => { reject(new Error('SNMP timeout')); }, 5000);
+          let done = false;
+          function walk(oids, cb) {
+            if (done) return;
+            session.getSubtree({ oid: oids, communities: [asset.snmpCommunity || 'public'] }, (err, varbinds) => {
+              if (err) { done = true; clearTimeout(timer); reject(err); return; }
+              for (const vb of varbinds) {
+                if (vb && vb.value !== undefined && vb.value !== null) {
+                  ifList.push({ index: vb.oid[vb.oid.length - 1], name: String(vb.value) });
+                }
+              }
+              done = true;
+              clearTimeout(timer);
+              resolve();
+            });
+          }
+          walk(oid);
+        });
+        session.close();
+        ifList.sort((a, b) => a.index - b.index);
+        return json(res, 200, { interfaces: ifList.map(i => i.name) });
+      } catch (e) {
+        return json(res, 200, { interfaces: [], error: e.message });
+      }
     }
 
     if (req.method === 'GET' && pathname === '/api/assets/topology') {
@@ -7429,6 +7502,75 @@ async function runAssetMonitorScheduler() {
 const monitorIntervalMs = 60000;
 setInterval(runAssetMonitorScheduler, monitorIntervalMs);
 setTimeout(() => runAssetMonitorScheduler(), 5000);
+
+const trafficMonitorState = { lastCounters: {}, rates: {} };
+
+function broadcastTrafficUpdate(projectId) {
+  const payload = { type: 'traffic_update', projectId, rates: trafficMonitorState.rates, timestamp: Date.now() };
+  sendToAllWs(JSON.stringify(payload));
+}
+
+async function runTrafficMonitorScheduler() {
+  try {
+    const db = await readDb();
+    const relations = db.assetRelations || [];
+    const assets = db.assets || [];
+    const newRates = {};
+    for (const rel of relations) {
+      if (!rel.sourcePort || !rel.targetPort) continue;
+      const srcAsset = assets.find(a => a.id === rel.sourceAssetId);
+      if (!srcAsset || !srcAsset.monitorHost || !srcAsset.snmpCommunity) continue;
+      const host = srcAsset.monitorHost;
+      const community = srcAsset.snmpCommunity || 'public';
+      const port = parseInt(srcAsset.snmpPort || '161', 10);
+      try {
+        const snmp = require('snmp-native');
+        const session = new snmp.Session({ host, community, port, timeouts: [2000] });
+        const inOid = [1, 3, 6, 1, 2, 1, 31, 1, 1, 1, 6];
+        const outOid = [1, 3, 6, 1, 2, 1, 31, 1, 1, 1, 10];
+        const ifSpeedOid = [1, 3, 6, 1, 2, 1, 31, 1, 1, 1, 15];
+        const results = await new Promise((resolve) => {
+          let values = {};
+          let pending = 3;
+          const checkDone = () => { pending--; if (pending <= 0) resolve(values); };
+          session.get({ oid: [...inOid, 1] }, (err, vbs) => { if (!err && vbs.length) values.inOctets = vbs[0].value; checkDone(); });
+          session.get({ oid: [...outOid, 1] }, (err, vbs) => { if (!err && vbs.length) values.outOctets = vbs[0].value; checkDone(); });
+          session.get({ oid: [...ifSpeedOid, 1] }, (err, vbs) => { if (!err && vbs.length) values.ifSpeed = vbs[0].value; checkDone(); });
+          setTimeout(() => checkDone(), 3000);
+        });
+        session.close();
+        const key = rel.id;
+        const prev = trafficMonitorState.lastCounters[key] || {};
+        const nowTs = Date.now();
+        newRates[rel.sourceAssetId + '_' + rel.sourcePort] = { dir: 'out', rate: 0, timestamp: nowTs };
+        newRates[rel.targetAssetId + '_' + rel.targetPort] = { dir: 'in', rate: 0, timestamp: nowTs };
+        if (results.inOctets !== undefined && prev.inOctets !== undefined) {
+          const dt = (nowTs - prev.ts) / 1000;
+          if (dt > 0) {
+            let inRate = ((results.inOctets - prev.inOctets) * 8) / dt;
+            if (inRate < 0) inRate = 0;
+            newRates[rel.sourceAssetId + '_' + rel.sourcePort].rate = Math.round(inRate);
+            newRates[rel.targetAssetId + '_' + rel.targetPort].rate = Math.round(inRate);
+          }
+        }
+        trafficMonitorState.lastCounters[key] = { inOctets: results.inOctets, outOctets: results.outOctets, ts: nowTs };
+      } catch (_) {}
+    }
+    trafficMonitorState.rates = newRates;
+    const projectIds = [...new Set(relations.map(r => {
+      const a = assets.find(x => x.id === r.sourceAssetId);
+      return a ? a.projectId : null;
+    }).filter(Boolean))];
+    for (const pid of projectIds) {
+      broadcastTrafficUpdate(pid);
+    }
+  } catch (e) {
+    console.warn('Traffic monitor scheduler error:', e.message);
+  }
+}
+
+setInterval(runTrafficMonitorScheduler, 30000);
+setTimeout(() => runTrafficMonitorScheduler(), 15000);
 
 function runAutoBackup() {
   try {

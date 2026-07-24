@@ -805,7 +805,8 @@
       h3 { font-size: 15px; }
       .section-tabs button { font-size: 13px; padding: 4px 8px; }
     }
-    .topo-node.selected { border-color: #3b82f6; box-shadow: 0 0 0 2px rgba(59,130,246,0.3); background:#eff6ff; }
+    .topo-node.selected { border-color: #3b82f6; box-shadow: 0 0 0 3px rgba(59,130,246,0.4), 0 0 12px rgba(59,130,246,0.25); background:#eff6ff; transform:translate(-50%,-50%) scale(1.05); }
+    .topo-node.selected::before { content:'✓'; position:absolute; top:-10px; left:-10px; width:20px; height:20px; border-radius:50%; background:#3b82f6; color:#fff; font-size:11px; font-weight:700; display:flex; align-items:center; justify-content:center; z-index:5; }
     .topo-align-btn { display:inline-flex;align-items:center;justify-content:center;width:28px;height:28px;border:1px solid #d1d5db;border-radius:4px;background:#fff;cursor:pointer;font-size:12px;color:#4b5563; }
     .topo-align-btn:hover { background:#f3f4f6; }
     .topo-node-icon { width:32px;height:32px;margin:0 auto 4px;display:block;flex-shrink:0; }
@@ -1094,6 +1095,8 @@
         </label>
         <label>监控地址/IP<input id="edAssetMonitorHost" placeholder="例：192.168.1.1" /></label>
         <label id="edAssetMonitorPortLabel" style="display:none;">端口号<input id="edAssetMonitorPort" type="number" placeholder="例：80" /></label>
+        <label>SNMP 团体字<input id="edAssetSnmpCommunity" placeholder="默认: public" /></label>
+        <label>SNMP 端口<input id="edAssetSnmpPort" type="number" placeholder="默认: 161" /></label>
       </div>
       <div id="assetEditMessage" style="margin:8px 0;font-size:13px;"></div>
       <div class="btn-row">
@@ -1112,13 +1115,21 @@
             <option value="">-- 请选择 --</option>
           </select>
         </label>
-        <label>源端口 <input id="relSourcePort" placeholder="例：GigabitEthernet0/1" /></label>
+        <label>源端口
+          <select id="relSourcePort" disabled>
+            <option value="">请先选择源资产</option>
+          </select>
+        </label>
         <label>目标资产 <span style="color:#dc2626;">*</span>
           <select id="relTargetAsset" required>
             <option value="">-- 请选择 --</option>
           </select>
         </label>
-        <label>目标端口 <input id="relTargetPort" placeholder="例：GigabitEthernet1/0/1" /></label>
+        <label>目标端口
+          <select id="relTargetPort" disabled>
+            <option value="">请先选择目标资产</option>
+          </select>
+        </label>
         <label>关系类型
           <select id="relType">
             <option value="connected">连接到</option>
@@ -1978,6 +1989,8 @@
                 </label>
                 <label><span>监控地址/IP</span><input name="monitorHost" placeholder="例：192.168.1.1" /></label>
                 <label id="assetMonitorPortLabel" style="display:none;"><span>端口号</span><input name="monitorPort" type="number" placeholder="例：80" /></label>
+                <label><span>SNMP 团体字</span><input name="snmpCommunity" placeholder="默认: public" /></label>
+                <label><span>SNMP 端口</span><input name="snmpPort" type="number" placeholder="默认: 161" /></label>
 
               <div style="display:flex;gap:8px;align-items:center;margin-bottom:12px;">
                 <button class="primary" id="assetSubmitBtn" type="submit" style="font-size:13px;padding:6px 12px;">保存资产</button>
@@ -2024,6 +2037,7 @@
                 </span>
               </div>
               <div>
+                <button class="secondary" id="topoSaveLayoutBtn" type="button" style="font-size:13px;padding:6px 12px;">保存拓扑</button>
                 <button class="secondary" id="topoAddRelBtn" type="button" style="font-size:13px;padding:6px 12px;">添加连接</button>
                 <button class="secondary" id="topoRefreshBtn" type="button" style="font-size:13px;padding:6px 12px;margin-left:4px;">刷新</button>
                 <span id="topoLegend" style="margin-left:8px;font-size:12px;color:#666;">
@@ -3015,6 +3029,11 @@
               if (state.topoMonitorStatus && msg.assetId) {
                 state.topoMonitorStatus[msg.assetId] = { status: msg.monitorStatus, lastCheck: Date.now() };
                 updateTopoStatusDots();
+              }
+            } else if (msg.type === 'traffic_update') {
+              if (msg.rates) {
+                Object.assign(state.topoTrafficRates, msg.rates);
+                renderTopoLines();
               }
             }
           } catch (_) {}
@@ -4389,6 +4408,7 @@
     state.topoDragStartCenter = { x: 0, y: 0 };
     state.topoDeleteLineId = null;
     state.topoSelectedNodes = new Set();
+    state.topoTrafficRates = {};
 
     function getDeviceIcon(asset) {
       const name = (asset.name || '').toLowerCase();
@@ -4426,6 +4446,27 @@
       return '<rect x="9" y="6" width="14" height="12" rx="2" fill="none" stroke="#6b7280" stroke-width="1.5"/><rect x="13" y="10" width="6" height="4" fill="#6b7280"/><rect x="11" y="21" width="10" height="4" rx="1" fill="none" stroke="#6b7280" stroke-width="1"/>';
     }
 
+    async function loadTopoLayout() {
+      try {
+        const data = await api('/api/assets/topology-layout');
+        if (data && data.positions) {
+          Object.assign(state.topoNodePositions, data.positions);
+        }
+      } catch (_) {}
+    }
+
+    async function saveTopoLayout() {
+      try {
+        await api('/api/assets/topology-layout', {
+          method: 'POST',
+          body: JSON.stringify({ positions: state.topoNodePositions })
+        });
+        showToast('拓扑布局已保存', 'success');
+      } catch (e) {
+        showToast(e.message || '保存失败', 'error');
+      }
+    }
+
     function renderTopology() {
       const panel = document.querySelector('.subtab-panel[data-section="assets"][data-subtab="topology"]');
       if (!panel || panel.classList.contains('hidden')) return;
@@ -4435,7 +4476,9 @@
       state.topoSelectedNodes = new Set();
       renderAlignBar();
       renderTopoCanvas();
-      fetchTopologyData();
+      loadTopoLayout().then(() => {
+        fetchTopologyData();
+      });
       fetchMonitorStatus();
       startTopoMonitorPoll();
     }
@@ -4498,6 +4541,13 @@
       updateTopoStatusDots();
     }
 
+    function formatTrafficRate(bps) {
+      if (!bps || bps < 1000) return (bps || 0) + ' bps';
+      if (bps < 1e6) return (bps / 1e3).toFixed(1) + ' Kbps';
+      if (bps < 1e9) return (bps / 1e6).toFixed(1) + ' Mbps';
+      return (bps / 1e9).toFixed(2) + ' Gbps';
+    }
+
     function renderTopoLines() {
       const svgElt = document.getElementById('topologySvg');
       const canvas = document.getElementById('topologyCanvas');
@@ -4519,8 +4569,8 @@
         const my = (y1 + y2) / 2;
         const color = state.topoDeleteLineId === rel.id ? '#dc2626' : '#2563eb';
         const strokeW = state.topoDeleteLineId === rel.id ? 3 : 2;
-        const sourceAsset = state.topoData.assets.find(a => a.id === rel.sourceAssetId);
-        const targetAsset = state.topoData.assets.find(a => a.id === rel.targetAssetId);
+        const trafficKey = rel.sourceAssetId + '_' + (rel.sourcePort || '');
+        const traffic = state.topoTrafficRates[trafficKey];
         html += `<line x1="${x1}" y1="${y1}" x2="${x2}" y2="${y2}" stroke="${color}" stroke-width="${strokeW}" stroke-dasharray="${state.topoDeleteLineId === rel.id ? '6,3' : ''}" data-rel-id="${rel.id}" style="pointer-events:stroke;cursor:pointer;"/>`;
         if (rel.sourcePort) {
           const srcLabelY = y1 < y2 ? y1 + 12 : y1 - 6;
@@ -4532,6 +4582,11 @@
         }
         if (rel.label) {
           html += `<text x="${mx}" y="${my - 6}" text-anchor="middle" font-size="11" fill="#6b7280" style="pointer-events:none;">${esc(rel.label)}</text>`;
+        }
+        if (traffic && traffic.rate > 0) {
+          const dirArrow = traffic.dir === 'out' ? (x1 < x2 ? '→ ' : '← ') : (x1 < x2 ? '← ' : '→ ');
+          const rateText = dirArrow + formatTrafficRate(traffic.rate);
+          html += `<text x="${mx}" y="${my + 14}" text-anchor="middle" font-size="10" fill="#16a34a" style="pointer-events:none;font-weight:600;">${esc(rateText)}</text>`;
         }
       });
       svgElt.innerHTML = html;
@@ -4694,8 +4749,12 @@
       renderTopoLines();
     }
 
+    document.getElementById('topoSaveLayoutBtn').addEventListener('click', () => {
+      saveTopoLayout();
+    });
+
     document.getElementById('topoRefreshBtn').addEventListener('click', () => renderTopology());
-    document.getElementById('topoAddRelBtn').addEventListener('click', () => {
+    document.getElementById('topoAddRelBtn').addEventListener('click', async () => {
       const sourceSelect = document.getElementById('relSourceAsset');
       const targetSelect = document.getElementById('relTargetAsset');
       let assets = state.topoData.assets || [];
@@ -4704,10 +4763,48 @@
         sel.innerHTML = '<option value="">-- 请选择 --</option>' +
           assets.map(a => `<option value="${a.id}">${esc(a.name)} (${esc(a.type || '')})</option>`).join('');
       });
-      document.getElementById('relSourcePort').value = '';
-      document.getElementById('relTargetPort').value = '';
+      const srcPort = document.getElementById('relSourcePort');
+      const tgtPort = document.getElementById('relTargetPort');
+      srcPort.innerHTML = '<option value="">请先选择源资产</option>';
+      tgtPort.innerHTML = '<option value="">请先选择目标资产</option>';
+      srcPort.disabled = true;
+      tgtPort.disabled = true;
       setMessage('relMessage', '', '');
       openModal('assetRelationModal');
+    });
+
+    async function loadSnmpPorts(assetId, targetSelect) {
+      if (!assetId) {
+        targetSelect.innerHTML = '<option value="">请先选择资产</option>';
+        targetSelect.disabled = true;
+        return;
+      }
+      targetSelect.innerHTML = '<option value="">正在通过SNMP获取端口...</option>';
+      targetSelect.disabled = true;
+      try {
+        const data = await api('/api/assets/' + assetId + '/snmp-interfaces');
+        const ports = data.interfaces || [];
+        if (data.error) {
+          targetSelect.innerHTML = '<option value="">SNMP不可用，请手动输入</option>';
+        } else if (!ports.length) {
+          targetSelect.innerHTML = '<option value="">未获取到端口（设备未开启SNMP或不可达）</option>';
+        } else {
+          targetSelect.innerHTML = '<option value="">-- 请选择端口 --</option>' +
+            ports.map(p => `<option value="${esc(p)}">${esc(p)}</option>`).join('');
+        }
+        targetSelect.disabled = false;
+      } catch (_) {
+        targetSelect.innerHTML = '<option value="">SNMP查询失败</option>';
+        targetSelect.disabled = false;
+      }
+    }
+
+    document.getElementById('relSourceAsset').addEventListener('change', function () {
+      loadSnmpPorts(this.value, document.getElementById('relSourcePort'));
+    });
+
+    document.getElementById('relTargetAsset').addEventListener('change', function () {
+      loadSnmpPorts(this.value, document.getElementById('relTargetPort'));
     });
 
     document.getElementById('relSaveBtn').addEventListener('click', async () => {
@@ -4723,8 +4820,8 @@
             targetAssetId,
             relationType: document.getElementById('relType').value,
             label: document.getElementById('relLabel').value.trim(),
-            sourcePort: document.getElementById('relSourcePort').value.trim(),
-            targetPort: document.getElementById('relTargetPort').value.trim()
+            sourcePort: document.getElementById('relSourcePort').value,
+            targetPort: document.getElementById('relTargetPort').value
           })
         });
         closeModal('assetRelationModal');
@@ -5823,6 +5920,8 @@
       document.getElementById('edAssetMonitorType').value = asset.monitorType || 'ping';
       document.getElementById('edAssetMonitorHost').value = asset.monitorHost || '';
       document.getElementById('edAssetMonitorPort').value = asset.monitorPort || '';
+      document.getElementById('edAssetSnmpCommunity').value = asset.snmpCommunity || 'public';
+      document.getElementById('edAssetSnmpPort').value = asset.snmpPort || '161';
       toggleEdMonitorPort();
       fillSelect('edAssetProjectId', state.projects);
       document.getElementById('edAssetProjectId').value = asset.projectId || '';
@@ -7535,7 +7634,9 @@
         monitorEnabled: document.getElementById('edAssetMonitorEnabled').checked,
         monitorType: document.getElementById('edAssetMonitorType').value,
         monitorHost: document.getElementById('edAssetMonitorHost').value.trim(),
-        monitorPort: document.getElementById('edAssetMonitorPort').value.trim()
+        monitorPort: document.getElementById('edAssetMonitorPort').value.trim(),
+        snmpCommunity: document.getElementById('edAssetSnmpCommunity').value.trim(),
+        snmpPort: document.getElementById('edAssetSnmpPort').value.trim()
       };
       const msg = document.getElementById('assetEditMessage');
       if (!data.projectId) { msg.textContent = '请选择关联项目'; msg.className = 'message error'; return; }
@@ -8709,6 +8810,8 @@
       data.monitorType = document.getElementById('assetMonitorType').value;
       data.monitorHost = (document.querySelector('[name="monitorHost"]') || {}).value || '';
       data.monitorPort = (document.querySelector('[name="monitorPort"]') || {}).value || '';
+      data.snmpCommunity = (document.querySelector('[name="snmpCommunity"]') || {}).value || 'public';
+      data.snmpPort = (document.querySelector('[name="snmpPort"]') || {}).value || '161';
       const method = data.id ? 'PUT' : 'POST';
       const path = data.id ? `/api/assets/${data.id}` : '/api/assets';
       try {
