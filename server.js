@@ -102,6 +102,7 @@ function validateProductionConfiguration() {
   if (!process.env.INITIAL_ADMIN_SECURITY_ANSWER || process.env.INITIAL_ADMIN_SECURITY_ANSWER === 'admin') problems.push('INITIAL_ADMIN_SECURITY_ANSWER 必须设置为生产安全答案');
   if (!process.env.INITIAL_ENGINEER_SECURITY_ANSWER || process.env.INITIAL_ENGINEER_SECURITY_ANSWER === 'blue') problems.push('INITIAL_ENGINEER_SECURITY_ANSWER 必须设置为生产安全答案');
   if (!process.env.ENCRYPTION_KEY || process.env.ENCRYPTION_KEY.length < 32) problems.push('ENCRYPTION_KEY 必须设置且长度不少于 32 位');
+  if (!process.env.DOCUMENT_TOKEN_SECRET || process.env.DOCUMENT_TOKEN_SECRET.length < 32) problems.push('DOCUMENT_TOKEN_SECRET 必须设置且长度不少于 32 位');
   if (!upgradeSigningKey || upgradeSigningKey.length < 32) problems.push('UPGRADE_SIGNING_KEY 必须设置且长度不少于 32 位');
   if (problems.length) {
     throw new Error(`生产配置不安全：${problems.join('；')}`);
@@ -1364,7 +1365,7 @@ function normalizeDb(raw = {}) {
       owner: asset.owner || '',
       version: asset.version || '',
       serialNumber: asset.serialNumber || '',
-      status: asset.status === '运行中' ? '使用中' : (asset.status || ''),
+      status: asset.status || '',
       maintainExpiryDate: asset.maintainExpiryDate || '',
       installationLocation: asset.installationLocation || asset.location || '',
       notes: asset.notes || '',
@@ -1513,6 +1514,9 @@ function normalizeDb(raw = {}) {
       keywords: item.keywords || '',
       problem: item.problem || '',
       solution: item.solution || '',
+      content: item.content || '',
+      category: item.category || '',
+      tags: Array.isArray(item.tags) ? item.tags : [],
       createdBy: item.createdBy || '',
       projectId: item.projectId || userProjectMap.get(item.createdBy) || '',
       createdAt: item.createdAt || now()
@@ -1764,13 +1768,23 @@ function readDbFromFile() {
 }
 
 function writeDbToFile(db) {
-  fs.writeFileSync(dbPath, JSON.stringify(normalizeDb(db), null, 2));
+  fs.writeFileSync(dbPath, JSON.stringify(db, null, 2));
+  latestFileDbCache = db;
 }
 
+let latestFileDbCache = null;
+
 function readDbInternalSync() {
-  if (!fs.existsSync(dbPath)) return seed();
+  if (latestFileDbCache) return latestFileDbCache;
+  if (!fs.existsSync(dbPath)) {
+    const s = seed();
+    latestFileDbCache = s;
+    return s;
+  }
   const raw = JSON.parse(fs.readFileSync(dbPath, 'utf8'));
-  return normalizeDb(raw);
+  const normalized = normalizeDb(raw);
+  latestFileDbCache = normalized;
+  return normalized;
 }
 
 let mysqlResetMutex = Promise.resolve();
@@ -4413,8 +4427,10 @@ const requestHandler = async (req, res) => {
       if (!user) return;
       const onlineUsers = [];
       const seenUserIds = new Set();
+      const nowMs = Date.now();
       for (const s of (db.sessions || [])) {
         if (seenUserIds.has(s.userId)) continue;
+        if (s.expiresAt && Date.parse(s.expiresAt) <= nowMs) continue;
         const u = (db.users || []).find(x => x.id === s.userId);
         if (u && u.status === 'active') {
           seenUserIds.add(s.userId);
@@ -4480,7 +4496,7 @@ const requestHandler = async (req, res) => {
       const user = requireAdmin(req, res, db);
       if (!user) return;
       const projectId = pathname.split('/')[3];
-      const projectRelationCollections = ['users','assets','logs','knowledgeBase','documents','inspectionPlans','inspectionExecutions','spareParts','sparePartMovements','changeRecords','incidents','approvals','notifications','aiInspectionTargets','aiInspectionTasks','aiInspectionResults','configBackupPlans','configBackupRecords'];
+      const projectRelationCollections = ['users','assets','logs','knowledgeBase','documents','inspectionPlans','inspectionExecutions','spareParts','sparePartMovements','changeRecords','incidentRecords','approvals','notifications','aiInspectionTargets','aiInspectionTasks','aiInspectionResults','configBackupPlans','configBackupRecords'];
       const relationNames = projectRelationCollections.filter(key => (db[key] || []).some(item => item.projectId === projectId));
       if (relationNames.length) {
         return json(res, 400, { message: `该项目存在关联数据(${relationNames.join(', ')})，请先清理后再删除` });
@@ -4523,9 +4539,6 @@ const requestHandler = async (req, res) => {
       }
       if (!/[a-zA-Z]/.test(body.password) || !/[0-9]/.test(body.password) || !/[^a-zA-Z0-9]/.test(body.password)) {
         return json(res, 400, { message: '密码必须包含字母、数字和特殊字符' });
-      }
-      if (!/[a-zA-Z]/.test(body.password) || !/[0-9]/.test(body.password) || !/[^a-zA-Z0-9]/.test(body.password)) {
-        return json(res, 400, { message: '密码必须包含至少一个字母和一个数字' });
       }
       if (body.projectId && !requireExistingProject(body.projectId, db)) {
         return json(res, 400, { message: '关联项目不存在' });
@@ -4650,11 +4663,11 @@ const requestHandler = async (req, res) => {
       target.startDate = body.startDate || '';
       target.endDate = body.endDate || '';
       if (body.password) {
-        if (String(body.password).length < 6) {
-          return json(res, 400, { message: '密码长度不能少于 6 位' });
+        if (String(body.password).length < 8) {
+          return json(res, 400, { message: '密码长度不能少于 8 位' });
         }
-        if (!/[a-zA-Z]/.test(body.password) || !/[0-9]/.test(body.password)) {
-          return json(res, 400, { message: '密码必须包含至少一个字母和一个数字' });
+        if (!/[a-zA-Z]/.test(body.password) || !/[0-9]/.test(body.password) || !/[^a-zA-Z0-9]/.test(body.password)) {
+          return json(res, 400, { message: '密码必须包含字母、数字和特殊字符' });
         }
         target.passwordHash = hash(body.password);
       }
@@ -4834,12 +4847,12 @@ const requestHandler = async (req, res) => {
       const target = db.assets[index];
       if (!canDeleteOwnedRecord(user, target, target.createdBy || '')) return json(res, 403, { message: '仅支持删除自己创建的资产' });
       const aiTargetRefs = (db.aiInspectionTargets || []).filter(item => item.assetId === assetId);
-      const maintenanceRefs = (db.maintenanceRecords || []).filter(item => item.assetId === assetId);
-      const sparePartRefs = (db.sparePartRecords || []).filter(item => item.assetId === assetId);
+      const sparePartMoveRefs = (db.sparePartMovements || []).filter(item => item.assetId === assetId);
+      const changeRecordRefs = (db.changeRecords || []).filter(item => item.assetId === assetId);
       const warnings = [];
       if (aiTargetRefs.length) warnings.push(`有 ${aiTargetRefs.length} 个巡检对象引用了该资产`);
-      if (maintenanceRefs.length) warnings.push(`有 ${maintenanceRefs.length} 条维保记录引用了该资产`);
-      if (sparePartRefs.length) warnings.push(`有 ${sparePartRefs.length} 条备件记录引用了该资产`);
+      if (sparePartMoveRefs.length) warnings.push(`有 ${sparePartMoveRefs.length} 条备件出入库记录引用了该资产`);
+      if (changeRecordRefs.length) warnings.push(`有 ${changeRecordRefs.length} 条变更记录引用了该资产`);
       if (warnings.length) {
         return json(res, 409, { message: '该资产存在关联数据: ' + warnings.join('; ') + '。请先删除关联数据后再删除资产。' });
       }
