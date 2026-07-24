@@ -805,7 +805,7 @@
       h3 { font-size: 15px; }
       .section-tabs button { font-size: 13px; padding: 4px 8px; }
     }
-    .topo-node.selected { border-color: #3b82f6; box-shadow: 0 0 0 3px rgba(59,130,246,0.4), 0 0 12px rgba(59,130,246,0.25); background:#eff6ff; transform:translate(-50%,-50%) scale(1.05); }
+    .topo-node.selected { border-color: #3b82f6; box-shadow: 0 0 0 3px rgba(59,130,246,0.4), 0 0 12px rgba(59,130,246,0.25); background:#eff6ff; }
     .topo-node.selected::before { content:'✓'; position:absolute; top:-10px; left:-10px; width:20px; height:20px; border-radius:50%; background:#3b82f6; color:#fff; font-size:11px; font-weight:700; display:flex; align-items:center; justify-content:center; z-index:5; }
     .topo-align-btn { display:inline-flex;align-items:center;justify-content:center;width:28px;height:28px;border:1px solid #d1d5db;border-radius:4px;background:#fff;cursor:pointer;font-size:12px;color:#4b5563; }
     .topo-align-btn:hover { background:#f3f4f6; }
@@ -4467,7 +4467,7 @@
       }
     }
 
-    function renderTopology() {
+    async function renderTopology() {
       const panel = document.querySelector('.subtab-panel[data-section="assets"][data-subtab="topology"]');
       if (!panel || panel.classList.contains('hidden')) return;
       state.topoData = { assets: [], relations: [] };
@@ -4476,9 +4476,8 @@
       state.topoSelectedNodes = new Set();
       renderAlignBar();
       renderTopoCanvas();
-      loadTopoLayout().then(() => {
-        fetchTopologyData();
-      });
+      await loadTopoLayout();
+      await fetchTopologyData();
       fetchMonitorStatus();
       startTopoMonitorPoll();
     }
@@ -4587,6 +4586,8 @@
           const dirArrow = traffic.dir === 'out' ? (x1 < x2 ? '→ ' : '← ') : (x1 < x2 ? '← ' : '→ ');
           const rateText = dirArrow + formatTrafficRate(traffic.rate);
           html += `<text x="${mx}" y="${my + 14}" text-anchor="middle" font-size="10" fill="#16a34a" style="pointer-events:none;font-weight:600;">${esc(rateText)}</text>`;
+        } else if (rel.sourcePort || rel.targetPort) {
+          html += `<text x="${mx}" y="${my + 14}" text-anchor="middle" font-size="10" fill="#9ca3af" style="pointer-events:none;">等待数据...</text>`;
         }
       });
       svgElt.innerHTML = html;
@@ -4686,6 +4687,12 @@
       });
     }
 
+    function updateNodeSelectionStyle(node, isSelected) {
+      const baseTransform = 'translate(-50%,-50%)';
+      node.style.transform = isSelected ? `${baseTransform} scale(1.05)` : baseTransform;
+      node.classList.toggle('selected', isSelected);
+    }
+
     function bindTopoNodeEvents() {
       document.querySelectorAll('.topo-node').forEach(node => {
         node.onmousedown = function (e) {
@@ -4695,17 +4702,21 @@
             const aid = node.dataset.assetId;
             if (state.topoSelectedNodes.has(aid)) {
               state.topoSelectedNodes.delete(aid);
+              updateNodeSelectionStyle(node, false);
             } else {
               state.topoSelectedNodes.add(aid);
+              updateNodeSelectionStyle(node, true);
             }
-            node.classList.toggle('selected', state.topoSelectedNodes.has(aid));
             renderAlignBar();
             return;
           }
           e.preventDefault();
           if (state.topoSelectedNodes.size > 0 && !state.topoSelectedNodes.has(node.dataset.assetId)) {
+            state.topoSelectedNodes.forEach(id => {
+              const n = document.querySelector(`.topo-node[data-asset-id="${id}"]`);
+              if (n) updateNodeSelectionStyle(n, false);
+            });
             state.topoSelectedNodes.clear();
-            document.querySelectorAll('.topo-node').forEach(n => n.classList.remove('selected'));
             renderAlignBar();
           }
           state.topoDragNode = node;

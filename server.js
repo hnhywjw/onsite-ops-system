@@ -1823,8 +1823,8 @@ async function readDb() {
       }
     }
     const normalized = normalizeDb(raw);
-    const current = JSON.stringify(Object.fromEntries(dbCollectionKeys.map(key => [key, raw[key] || []])));
-    const next = JSON.stringify(Object.fromEntries(dbCollectionKeys.map(key => [key, normalized[key]])));
+    const current = JSON.stringify(Object.fromEntries(dbCollectionKeys.map(key => [key, raw[key] !== undefined ? raw[key] : (key === 'topologyLayouts' || key === 'systemConfig' || key === 'runtimeState' ? {} : [])])));
+    const next = JSON.stringify(Object.fromEntries(dbCollectionKeys.map(key => [key, normalized[key] !== undefined ? normalized[key] : (key === 'topologyLayouts' || key === 'systemConfig' || key === 'runtimeState' ? {} : [])])));
     if (current !== next) {
       await writeDb(normalized, { silent: true });
     }
