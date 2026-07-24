@@ -4545,9 +4545,8 @@
     state.topoSelectedNodes = new Set();
     state.topoTrafficRates = {};
     state.topoPortStatus = {};
-    state.topoEditRelId = null;
-    state.topoContextRelId = null;
     state.activeAlerts = [];
+    state.topoDeleteTimer = null;
 
     function getDeviceIcon(asset) {
       const name = (asset.name || '').toLowerCase();
@@ -4613,8 +4612,11 @@
       state.topoNodePositions = {};
       state.topoMonitorStatus = {};
       state.topoSelectedNodes = new Set();
+      state.topoTrafficRates = {};
+      state.topoPortStatus = {};
+      state.topoDeleteLineId = null;
+      clearTopoDeleteTimer();
       renderAlignBar();
-      renderTopoCanvas();
       await loadTopoLayout();
       await fetchTopologyData();
       fetchMonitorStatus();
@@ -4692,9 +4694,9 @@
       if (state.topoDeleteLineId === rel.id) return '#dc2626';
       if (!rel.sourcePort && !rel.targetPort) return '#2563eb';
       const ps = state.topoPortStatus[rel.id];
-      if (!ps) return '#2563eb';
-      const srcOk = ps.source === 'up' || ps.source === 'unknown';
-      const tgtOk = ps.target === 'up' || ps.target === 'unknown';
+      if (!ps) return '#9ca3af';
+      const srcOk = ps.source === 'up';
+      const tgtOk = ps.target === 'up';
       return (srcOk && tgtOk) ? '#2563eb' : '#9ca3af';
     }
 
@@ -4767,14 +4769,16 @@
       });
     }
 
+    let topoCmenuHideHandler = null;
     function showLineContextMenu(x, y, relId) {
       const menu = document.getElementById('topoLineContextMenu');
       state.topoContextRelId = relId;
+      if (topoCmenuHideHandler) document.removeEventListener('click', topoCmenuHideHandler);
       menu.style.display = 'block';
       menu.style.left = x + 'px';
       menu.style.top = y + 'px';
-      function hide() { menu.style.display = 'none'; document.removeEventListener('click', hide); }
-      setTimeout(() => document.addEventListener('click', hide), 0);
+      topoCmenuHideHandler = () => { menu.style.display = 'none'; document.removeEventListener('click', topoCmenuHideHandler); topoCmenuHideHandler = null; };
+      setTimeout(() => document.addEventListener('click', topoCmenuHideHandler), 0);
     }
 
     function initLineContextMenu() {
@@ -4787,24 +4791,31 @@
       });
       menu.querySelector('[data-action="delete"]').addEventListener('click', () => {
         menu.style.display = 'none';
-        onTopoLineClick(state.topoContextRelId);
-        onTopoLineClick(state.topoContextRelId);
+        deleteTopoRelation(state.topoContextRelId);
       });
     }
 
     function onTopoLineClick(relId) {
       if (state.topoDeleteLineId === relId) {
+        clearTopoDeleteTimer();
         deleteTopoRelation(relId);
       } else {
+        clearTopoDeleteTimer();
         state.topoDeleteLineId = relId;
         renderTopoLines();
-        setTimeout(() => {
+        state.topoDeleteTimer = setTimeout(() => {
           if (state.topoDeleteLineId === relId) {
-            state.topoDeleteLineId = null;
+    state.topoDeleteLineId = null;
+    state.topoDeleteTimer = null;
             renderTopoLines();
           }
         }, 5000);
       }
+    }
+
+    function clearTopoDeleteTimer() {
+      if (state.topoDeleteTimer) { clearTimeout(state.topoDeleteTimer); state.topoDeleteTimer = null; }
+      if (state.topoDeleteLineId) { state.topoDeleteLineId = null; renderTopoLines(); }
     }
 
     async function deleteTopoRelation(relId) {
