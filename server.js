@@ -4947,6 +4947,24 @@ const requestHandler = async (req, res) => {
       return json(res, 200, { ok: true });
     }
 
+    if (req.method === 'PUT' && pathname.startsWith('/api/asset-relations/')) {
+      const user = requireEditor(req, res, db);
+      if (!user) return;
+      const relId = pathname.split('/')[3];
+      const idx = (db.assetRelations || []).findIndex(r => r.id === relId);
+      if (idx === -1) return json(res, 404, { message: '关系不存在' });
+      const body = await readBody(req);
+      const rel = db.assetRelations[idx];
+      if (body.sourcePort !== undefined) rel.sourcePort = body.sourcePort;
+      if (body.targetPort !== undefined) rel.targetPort = body.targetPort;
+      if (body.relationType !== undefined) rel.relationType = body.relationType;
+      if (body.label !== undefined) rel.label = body.label;
+      if (body.sourceAssetId !== undefined) rel.sourceAssetId = body.sourceAssetId;
+      if (body.targetAssetId !== undefined) rel.targetAssetId = body.targetAssetId;
+      await writeDb(db);
+      return json(res, 200, { ok: true, relation: rel });
+    }
+
     if (req.method === 'GET' && pathname === '/api/assets/topology-layout') {
       const user = requireEditor(req, res, db);
       if (!user) return;
@@ -7510,11 +7528,83 @@ const monitorIntervalMs = 60000;
 setInterval(runAssetMonitorScheduler, monitorIntervalMs);
 setTimeout(() => runAssetMonitorScheduler(), 5000);
 
-const trafficMonitorState = { lastCounters: {}, rates: {} };
+const trafficMonitorState = { lastCounters: {}, rates: {}, portStatus: {} };
+const portStatusCache = {};
 
 function broadcastTrafficUpdate(projectId) {
-  const payload = { type: 'traffic_update', projectId, rates: trafficMonitorState.rates, timestamp: Date.now() };
+  const payload = { type: 'traffic_update', projectId, rates: trafficMonitorState.rates, portStatus: trafficMonitorState.portStatus, timestamp: Date.now() };
   sendToAllWs(JSON.stringify(payload));
+}
+
+async function getAssetSnmpPortMap(asset) {
+  const key = asset.id;
+  const cached = portStatusCache[key];
+  if (cached && (Date.now() - cached.timestamp < 120000)) return cached.map;
+  const host = asset.monitorHost;
+  if (!host) return {};
+  try {
+    const snmp = require('snmp-native');
+    const community = asset.snmpCommunity || 'public';
+    const port = parseInt(asset.snmpPort || '161', 10);
+    const session = new snmp.Session({ host, community, port, timeouts: [3000] });
+    const descrOid = [1, 3, 6, 1, 2, 1, 2, 2, 1, 2];
+    const statusOid = [1, 3, 6, 1, 2, 1, 2, 2, 1, 8];
+    const ifList = [];
+    await new Promise((resolve) => {
+      let pending = 2;
+      const timer = setTimeout(() => { pending = 0; resolve(); }, 6000);
+      const checkDone = () => { pending--; if (pending <= 0) { clearTimeout(timer); resolve(); } };
+      session.getSubtree({ oid: descrOid, communities: [community] }, (err, vbs) => {
+        if (!err && vbs) vbs.forEach(vb => { if (vb && vb.value !== undefined) ifList.push({ index: vb.oid[vb.oid.length - 1], name: String(vb.value) }); });
+        checkDone();
+      });
+      session.getSubtree({ oid: statusOid, communities: [community] }, (err, vbs) => {
+        if (!err && vbs) vbs.forEach(vb => {
+          if (vb && vb.value !== undefined) {
+            const idx = vb.oid[vb.oid.length - 1];
+            const entry = ifList.find(i => i.index === idx);
+            if (entry) entry.status = vb.value === 1 ? 'up' : 'down';
+          }
+        });
+        checkDone();
+      });
+    });
+    session.close();
+    const map = {};
+    ifList.forEach(i => { map[i.name] = i.status || 'unknown'; });
+    portStatusCache[key] = { timestamp: Date.now(), map };
+    return map;
+  } catch (_) { return {}; }
+}
+
+async function updateLinkPortStatuses() {
+  try {
+    const db = await readDb();
+    const relations = db.assetRelations || [];
+    const assets = db.assets || [];
+    const newPortStatus = {};
+    const uniqueAssetIds = new Set();
+    relations.forEach(r => {
+      if (r.sourcePort || r.targetPort) {
+        if (r.sourceAssetId) uniqueAssetIds.add(r.sourceAssetId);
+        if (r.targetAssetId) uniqueAssetIds.add(r.targetAssetId);
+      }
+    });
+    const assetPortMaps = {};
+    for (const aid of uniqueAssetIds) {
+      const asset = assets.find(a => a.id === aid);
+      if (asset) assetPortMaps[aid] = await getAssetSnmpPortMap(asset);
+    }
+    for (const rel of relations) {
+      if (!rel.sourcePort && !rel.targetPort) continue;
+      const srcMap = assetPortMaps[rel.sourceAssetId] || {};
+      const tgtMap = assetPortMaps[rel.targetAssetId] || {};
+      const srcStatus = rel.sourcePort ? (srcMap[rel.sourcePort] || 'unknown') : 'unknown';
+      const tgtStatus = rel.targetPort ? (tgtMap[rel.targetPort] || 'unknown') : 'unknown';
+      newPortStatus[rel.id] = { source: srcStatus, target: tgtStatus };
+    }
+    trafficMonitorState.portStatus = newPortStatus;
+  } catch (_) {}
 }
 
 async function runTrafficMonitorScheduler() {
@@ -7565,6 +7655,7 @@ async function runTrafficMonitorScheduler() {
       } catch (_) {}
     }
     trafficMonitorState.rates = newRates;
+    await updateLinkPortStatuses();
     const projectIds = [...new Set(relations.map(r => {
       const a = assets.find(x => x.id === r.sourceAssetId);
       return a ? a.projectId : null;

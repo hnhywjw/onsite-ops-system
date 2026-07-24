@@ -810,6 +810,7 @@
     .topo-align-btn { display:inline-flex;align-items:center;justify-content:center;width:28px;height:28px;border:1px solid #d1d5db;border-radius:4px;background:#fff;cursor:pointer;font-size:12px;color:#4b5563; }
     .topo-align-btn:hover { background:#f3f4f6; }
     .topo-node-icon { width:32px;height:32px;margin:0 auto 4px;display:block;flex-shrink:0; }
+    .topo-cmenu-item:hover { background:#f0f5ff; }
   </style>
   <script src="https://cdn.sheetjs.com/xlsx-0.20.3/package/dist/xlsx.full.min.js"></script>
 </head>
@@ -2070,7 +2071,11 @@
               <svg id="topologySvg" style="position:absolute;top:0;left:0;width:100%;height:100%;pointer-events:none;"></svg>
               <div id="topoSelectionRect" style="position:absolute;border:1px dashed #3b82f6;background:rgba(59,130,246,0.1);display:none;pointer-events:none;z-index:50;"></div>
             </div>
-            <p style="margin-top:8px;font-size:12px;color:#9ca3af;">单击选择设备 · 按住鼠标左键拖拽空白区域框选多个设备 · 拖拽节点调整布局 · 点击已有连接线可删除关系</p>
+            <p style="margin-top:8px;font-size:12px;color:#9ca3af;">单击选择设备 · 框选多个设备 · 拖拽节点/多选群移 · 单击连线删除 · 右键连线编辑端口</p>
+            <div id="topoLineContextMenu" style="position:fixed;display:none;background:#fff;border:1px solid #d1d5db;border-radius:6px;box-shadow:0 4px 12px rgba(0,0,0,0.15);z-index:999;min-width:140px;overflow:hidden;">
+              <div class="topo-cmenu-item" data-action="edit" style="padding:8px 14px;cursor:pointer;font-size:13px;color:#1f2937;border-bottom:1px solid #f3f4f6;">编辑连接</div>
+              <div class="topo-cmenu-item" data-action="delete" style="padding:8px 14px;cursor:pointer;font-size:13px;color:#dc2626;">删除连接</div>
+            </div>
           </div>
         </div>
       </section>
@@ -3054,8 +3059,11 @@
             } else if (msg.type === 'traffic_update') {
               if (msg.rates) {
                 Object.assign(state.topoTrafficRates, msg.rates);
-                renderTopoLines();
               }
+              if (msg.portStatus) {
+                Object.assign(state.topoPortStatus, msg.portStatus);
+              }
+              renderTopoLines();
             }
           } catch (_) {}
         };
@@ -4430,6 +4438,9 @@
     state.topoDeleteLineId = null;
     state.topoSelectedNodes = new Set();
     state.topoTrafficRates = {};
+    state.topoPortStatus = {};
+    state.topoEditRelId = null;
+    state.topoContextRelId = null;
 
     function getDeviceIcon(asset) {
       const name = (asset.name || '').toLowerCase();
@@ -4558,6 +4569,7 @@
       renderTopoLines();
       bindTopoNodeEvents();
       bindAlignButtons();
+      initLineContextMenu();
       syncSelectedNodeTransforms();
       updateTopoStatusDots();
     }
@@ -4567,6 +4579,16 @@
       if (bps < 1e6) return (bps / 1e3).toFixed(1) + ' Kbps';
       if (bps < 1e9) return (bps / 1e6).toFixed(1) + ' Mbps';
       return (bps / 1e9).toFixed(2) + ' Gbps';
+    }
+
+    function lineColorForRel(rel) {
+      if (state.topoDeleteLineId === rel.id) return '#dc2626';
+      if (!rel.sourcePort && !rel.targetPort) return '#2563eb';
+      const ps = state.topoPortStatus[rel.id];
+      if (!ps) return '#2563eb';
+      const srcOk = ps.source === 'up' || ps.source === 'unknown';
+      const tgtOk = ps.target === 'up' || ps.target === 'unknown';
+      return (srcOk && tgtOk) ? '#2563eb' : '#9ca3af';
     }
 
     function renderTopoLines() {
@@ -4588,20 +4610,21 @@
         const y2 = (p2.y / 100) * h;
         const mx = (x1 + x2) / 2;
         const my = (y1 + y2) / 2;
-        const color = state.topoDeleteLineId === rel.id ? '#dc2626' : '#2563eb';
+        const color = lineColorForRel(rel);
         const strokeW = state.topoDeleteLineId === rel.id ? 3 : 2;
         const srcTrafficKey = rel.sourceAssetId + '_' + (rel.sourcePort || '');
         const tgtTrafficKey = rel.targetAssetId + '_' + (rel.targetPort || '');
         const srcTraffic = state.topoTrafficRates[srcTrafficKey];
         const tgtTraffic = state.topoTrafficRates[tgtTrafficKey];
         html += `<line x1="${x1}" y1="${y1}" x2="${x2}" y2="${y2}" stroke="${color}" stroke-width="${strokeW}" stroke-dasharray="${state.topoDeleteLineId === rel.id ? '6,3' : ''}" data-rel-id="${rel.id}" style="pointer-events:stroke;cursor:pointer;"/>`;
+        const portColor = color === '#9ca3af' ? '#9ca3af' : '#2563eb';
         if (rel.sourcePort) {
           const srcLabelY = y1 < y2 ? y1 + 12 : y1 - 6;
-          html += `<text x="${x1}" y="${srcLabelY}" text-anchor="middle" font-size="9" fill="#2563eb" style="pointer-events:none;font-weight:500;">${esc(rel.sourcePort)}</text>`;
+          html += `<text x="${x1}" y="${srcLabelY}" text-anchor="middle" font-size="9" fill="${portColor}" style="pointer-events:none;font-weight:500;">${esc(rel.sourcePort)}</text>`;
         }
         if (rel.targetPort) {
           const tgtLabelY = y2 < y1 ? y2 + 12 : y2 - 6;
-          html += `<text x="${x2}" y="${tgtLabelY}" text-anchor="middle" font-size="9" fill="#2563eb" style="pointer-events:none;font-weight:500;">${esc(rel.targetPort)}</text>`;
+          html += `<text x="${x2}" y="${tgtLabelY}" text-anchor="middle" font-size="9" fill="${portColor}" style="pointer-events:none;font-weight:500;">${esc(rel.targetPort)}</text>`;
         }
         if (rel.label) {
           html += `<text x="${mx}" y="${my - 10}" text-anchor="middle" font-size="11" fill="#6b7280" style="pointer-events:none;">${esc(rel.label)}</text>`;
@@ -4618,8 +4641,6 @@
         } else if (hasTgt) {
           const revArrow = x1 < x2 ? '←' : '→';
           html += `<text x="${mx}" y="${my + 20}" text-anchor="middle" font-size="10" fill="#dc2626" style="pointer-events:none;font-weight:600;">${esc(revArrow + ' ' + formatTrafficRate(tgtTraffic.rate))}</text>`;
-        } else if (rel.sourcePort || rel.targetPort) {
-          html += `<text x="${mx}" y="${my + 20}" text-anchor="middle" font-size="10" fill="#9ca3af" style="pointer-events:none;">等待数据...</text>`;
         } else {
           html += `<text x="${mx}" y="${my + 20}" text-anchor="middle" font-size="10" fill="#9ca3af" style="pointer-events:none;">等待数据...</text>`;
         }
@@ -4631,6 +4652,36 @@
           const relId = this.dataset.relId;
           onTopoLineClick(relId);
         });
+        line.addEventListener('contextmenu', function (e) {
+          e.preventDefault();
+          e.stopPropagation();
+          showLineContextMenu(e.clientX, e.clientY, this.dataset.relId);
+        });
+      });
+    }
+
+    function showLineContextMenu(x, y, relId) {
+      const menu = document.getElementById('topoLineContextMenu');
+      state.topoContextRelId = relId;
+      menu.style.display = 'block';
+      menu.style.left = x + 'px';
+      menu.style.top = y + 'px';
+      function hide() { menu.style.display = 'none'; document.removeEventListener('click', hide); }
+      setTimeout(() => document.addEventListener('click', hide), 0);
+    }
+
+    function initLineContextMenu() {
+      if (initLineContextMenu._done) return;
+      initLineContextMenu._done = true;
+      const menu = document.getElementById('topoLineContextMenu');
+      menu.querySelector('[data-action="edit"]').addEventListener('click', () => {
+        menu.style.display = 'none';
+        openEditRelationModal(state.topoContextRelId);
+      });
+      menu.querySelector('[data-action="delete"]').addEventListener('click', () => {
+        menu.style.display = 'none';
+        onTopoLineClick(state.topoContextRelId);
+        onTopoLineClick(state.topoContextRelId);
       });
     }
 
@@ -4920,6 +4971,8 @@
 
     document.getElementById('topoRefreshBtn').addEventListener('click', () => renderTopology());
     document.getElementById('topoAddRelBtn').addEventListener('click', async () => {
+      state.topoEditRelId = null;
+      document.querySelector('#assetRelationModal h3').textContent = '添加资产连接关系';
       const sourceSelect = document.getElementById('relSourceAsset');
       const targetSelect = document.getElementById('relTargetAsset');
       let assets = state.topoData.assets || [];
@@ -4964,6 +5017,37 @@
       }
     }
 
+    async function openEditRelationModal(relId) {
+      const rel = state.topoData.relations.find(r => r.id === relId);
+      if (!rel) return;
+      state.topoEditRelId = relId;
+      document.querySelector('#assetRelationModal h3').textContent = '编辑连接关系';
+      let assets = state.topoData.assets || [];
+      if (!assets.length) assets = filterByUserProject(state.assets);
+      const sourceSelect = document.getElementById('relSourceAsset');
+      const targetSelect = document.getElementById('relTargetAsset');
+      [sourceSelect, targetSelect].forEach(sel => {
+        sel.innerHTML = '<option value="">-- 请选择 --</option>' +
+          assets.map(a => `<option value="${a.id}"${a.id === rel.sourceAssetId ? ' selected' : ''}${a.id === rel.targetAssetId && sel === targetSelect ? ' selected' : ''}>${esc(a.name)} (${esc(a.type || '')})</option>`).join('');
+      });
+      sourceSelect.value = rel.sourceAssetId || '';
+      targetSelect.value = rel.targetAssetId || '';
+      const srcPort = document.getElementById('relSourcePort');
+      const tgtPort = document.getElementById('relTargetPort');
+      await loadSnmpPorts(rel.sourceAssetId, srcPort);
+      if (rel.sourcePort && Array.from(srcPort.options).some(o => o.value === rel.sourcePort)) {
+        srcPort.value = rel.sourcePort;
+      }
+      await loadSnmpPorts(rel.targetAssetId, tgtPort);
+      if (rel.targetPort && Array.from(tgtPort.options).some(o => o.value === rel.targetPort)) {
+        tgtPort.value = rel.targetPort;
+      }
+      document.getElementById('relType').value = rel.relationType || 'connected';
+      document.getElementById('relLabel').value = rel.label || '';
+      setMessage('relMessage', '', '');
+      openModal('assetRelationModal');
+    }
+
     document.getElementById('relSourceAsset').addEventListener('change', function () {
       loadSnmpPorts(this.value, document.getElementById('relSourcePort'));
     });
@@ -4975,25 +5059,29 @@
     document.getElementById('relSaveBtn').addEventListener('click', async () => {
       const sourceAssetId = document.getElementById('relSourceAsset').value;
       const targetAssetId = document.getElementById('relTargetAsset').value;
+      const body = {
+        sourceAssetId,
+        targetAssetId,
+        relationType: document.getElementById('relType').value,
+        label: document.getElementById('relLabel').value.trim(),
+        sourcePort: document.getElementById('relSourcePort').value,
+        targetPort: document.getElementById('relTargetPort').value
+      };
       if (!sourceAssetId || !targetAssetId) return setMessage('relMessage', '请选择源资产和目标资产', 'error');
       if (sourceAssetId === targetAssetId) return setMessage('relMessage', '不能连接自身', 'error');
       try {
-        await api('/api/asset-relations', {
-          method: 'POST',
-          body: JSON.stringify({
-            sourceAssetId,
-            targetAssetId,
-            relationType: document.getElementById('relType').value,
-            label: document.getElementById('relLabel').value.trim(),
-            sourcePort: document.getElementById('relSourcePort').value,
-            targetPort: document.getElementById('relTargetPort').value
-          })
-        });
+        if (state.topoEditRelId) {
+          await api('/api/asset-relations/' + state.topoEditRelId, { method: 'PUT', body: JSON.stringify(body) });
+          state.topoEditRelId = null;
+          showToast('连接关系已更新', 'success');
+        } else {
+          await api('/api/asset-relations', { method: 'POST', body: JSON.stringify(body) });
+          showToast('连接关系已创建', 'success');
+        }
         closeModal('assetRelationModal');
-        showToast('连接关系已创建', 'success');
         await fetchTopologyData();
       } catch (e) {
-        setMessage('relMessage', e.message || '创建失败', 'error');
+        setMessage('relMessage', e.message || '保存失败', 'error');
       }
     });
 
