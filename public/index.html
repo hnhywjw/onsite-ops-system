@@ -4590,8 +4590,10 @@
         const my = (y1 + y2) / 2;
         const color = state.topoDeleteLineId === rel.id ? '#dc2626' : '#2563eb';
         const strokeW = state.topoDeleteLineId === rel.id ? 3 : 2;
-        const trafficKey = rel.sourceAssetId + '_' + (rel.sourcePort || '');
-        const traffic = state.topoTrafficRates[trafficKey];
+        const srcTrafficKey = rel.sourceAssetId + '_' + (rel.sourcePort || '');
+        const tgtTrafficKey = rel.targetAssetId + '_' + (rel.targetPort || '');
+        const srcTraffic = state.topoTrafficRates[srcTrafficKey];
+        const tgtTraffic = state.topoTrafficRates[tgtTrafficKey];
         html += `<line x1="${x1}" y1="${y1}" x2="${x2}" y2="${y2}" stroke="${color}" stroke-width="${strokeW}" stroke-dasharray="${state.topoDeleteLineId === rel.id ? '6,3' : ''}" data-rel-id="${rel.id}" style="pointer-events:stroke;cursor:pointer;"/>`;
         if (rel.sourcePort) {
           const srcLabelY = y1 < y2 ? y1 + 12 : y1 - 6;
@@ -4602,14 +4604,22 @@
           html += `<text x="${x2}" y="${tgtLabelY}" text-anchor="middle" font-size="9" fill="#2563eb" style="pointer-events:none;font-weight:500;">${esc(rel.targetPort)}</text>`;
         }
         if (rel.label) {
-          html += `<text x="${mx}" y="${my - 6}" text-anchor="middle" font-size="11" fill="#6b7280" style="pointer-events:none;">${esc(rel.label)}</text>`;
+          html += `<text x="${mx}" y="${my - 10}" text-anchor="middle" font-size="11" fill="#6b7280" style="pointer-events:none;">${esc(rel.label)}</text>`;
         }
-        if (traffic && traffic.rate > 0) {
-          const dirArrow = traffic.dir === 'out' ? (x1 < x2 ? '→ ' : '← ') : (x1 < x2 ? '← ' : '→ ');
-          const rateText = dirArrow + formatTrafficRate(traffic.rate);
-          html += `<text x="${mx}" y="${my + 14}" text-anchor="middle" font-size="10" fill="#16a34a" style="pointer-events:none;font-weight:600;">${esc(rateText)}</text>`;
+        const hasSrc = srcTraffic && srcTraffic.rate > 0;
+        const hasTgt = tgtTraffic && tgtTraffic.rate > 0;
+        const dirArrow = x1 < x2 ? '→' : '←';
+        if (hasSrc && hasTgt) {
+          html += `<text x="${mx}" y="${my + 14}" text-anchor="middle" font-size="10" fill="#16a34a" style="pointer-events:none;font-weight:600;">${esc(dirArrow + ' ' + formatTrafficRate(srcTraffic.rate))}</text>`;
+          const revArrow = x1 < x2 ? '←' : '→';
+          html += `<text x="${mx}" y="${my + 26}" text-anchor="middle" font-size="10" fill="#dc2626" style="pointer-events:none;font-weight:600;">${esc(revArrow + ' ' + formatTrafficRate(tgtTraffic.rate))}</text>`;
+        } else if (hasSrc) {
+          html += `<text x="${mx}" y="${my + 20}" text-anchor="middle" font-size="10" fill="#16a34a" style="pointer-events:none;font-weight:600;">${esc(dirArrow + ' ' + formatTrafficRate(srcTraffic.rate))}</text>`;
+        } else if (hasTgt) {
+          const revArrow = x1 < x2 ? '←' : '→';
+          html += `<text x="${mx}" y="${my + 20}" text-anchor="middle" font-size="10" fill="#dc2626" style="pointer-events:none;font-weight:600;">${esc(revArrow + ' ' + formatTrafficRate(tgtTraffic.rate))}</text>`;
         } else if (rel.sourcePort || rel.targetPort) {
-          html += `<text x="${mx}" y="${my + 14}" text-anchor="middle" font-size="10" fill="#9ca3af" style="pointer-events:none;">等待数据...</text>`;
+          html += `<text x="${mx}" y="${my + 20}" text-anchor="middle" font-size="10" fill="#9ca3af" style="pointer-events:none;">等待数据...</text>`;
         }
       });
       svgElt.innerHTML = html;

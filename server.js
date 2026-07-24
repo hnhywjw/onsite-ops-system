@@ -7524,7 +7524,6 @@ async function runTrafficMonitorScheduler() {
     const assets = db.assets || [];
     const newRates = {};
     for (const rel of relations) {
-      if (!rel.sourcePort || !rel.targetPort) continue;
       const srcAsset = assets.find(a => a.id === rel.sourceAssetId);
       if (!srcAsset || !srcAsset.monitorHost || !srcAsset.snmpCommunity) continue;
       const host = srcAsset.monitorHost;
@@ -7535,29 +7534,31 @@ async function runTrafficMonitorScheduler() {
         const session = new snmp.Session({ host, community, port, timeouts: [2000] });
         const inOid = [1, 3, 6, 1, 2, 1, 31, 1, 1, 1, 6];
         const outOid = [1, 3, 6, 1, 2, 1, 31, 1, 1, 1, 10];
-        const ifSpeedOid = [1, 3, 6, 1, 2, 1, 31, 1, 1, 1, 15];
         const results = await new Promise((resolve) => {
           let values = {};
-          let pending = 3;
+          let pending = 2;
           const checkDone = () => { pending--; if (pending <= 0) resolve(values); };
           session.get({ oid: [...inOid, 1] }, (err, vbs) => { if (!err && vbs.length) values.inOctets = vbs[0].value; checkDone(); });
           session.get({ oid: [...outOid, 1] }, (err, vbs) => { if (!err && vbs.length) values.outOctets = vbs[0].value; checkDone(); });
-          session.get({ oid: [...ifSpeedOid, 1] }, (err, vbs) => { if (!err && vbs.length) values.ifSpeed = vbs[0].value; checkDone(); });
           setTimeout(() => checkDone(), 3000);
         });
         session.close();
         const key = rel.id;
         const prev = trafficMonitorState.lastCounters[key] || {};
         const nowTs = Date.now();
-        newRates[rel.sourceAssetId + '_' + rel.sourcePort] = { dir: 'out', rate: 0, timestamp: nowTs };
-        newRates[rel.targetAssetId + '_' + rel.targetPort] = { dir: 'in', rate: 0, timestamp: nowTs };
-        if (results.inOctets !== undefined && prev.inOctets !== undefined) {
-          const dt = (nowTs - prev.ts) / 1000;
-          if (dt > 0) {
+        newRates[rel.sourceAssetId + '_' + (rel.sourcePort || '')] = { dir: 'out', rate: 0, timestamp: nowTs };
+        newRates[rel.targetAssetId + '_' + (rel.targetPort || '')] = { dir: 'in', rate: 0, timestamp: nowTs };
+        const dt = (nowTs - (prev.ts || nowTs)) / 1000;
+        if (dt > 0) {
+          if (results.inOctets !== undefined && prev.inOctets !== undefined) {
             let inRate = ((results.inOctets - prev.inOctets) * 8) / dt;
             if (inRate < 0) inRate = 0;
-            newRates[rel.sourceAssetId + '_' + rel.sourcePort].rate = Math.round(inRate);
-            newRates[rel.targetAssetId + '_' + rel.targetPort].rate = Math.round(inRate);
+            newRates[rel.targetAssetId + '_' + (rel.targetPort || '')].rate = Math.round(inRate);
+          }
+          if (results.outOctets !== undefined && prev.outOctets !== undefined) {
+            let outRate = ((results.outOctets - prev.outOctets) * 8) / dt;
+            if (outRate < 0) outRate = 0;
+            newRates[rel.sourceAssetId + '_' + (rel.sourcePort || '')].rate = Math.round(outRate);
           }
         }
         trafficMonitorState.lastCounters[key] = { inOctets: results.inOctets, outOctets: results.outOctets, ts: nowTs };
