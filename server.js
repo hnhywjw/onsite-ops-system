@@ -4904,6 +4904,8 @@ const requestHandler = async (req, res) => {
         targetAssetId,
         relationType: body.relationType || 'connected',
         label: body.label || '',
+        sourcePort: body.sourcePort || '',
+        targetPort: body.targetPort || '',
         createdAt: now()
       };
       db.assetRelations.push(rel);
