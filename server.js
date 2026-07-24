@@ -1398,6 +1398,8 @@ function normalizeDb(raw = {}) {
       nextDate: item.nextDate || '',
       owner: item.owner || '',
       status: item.status || '待执行',
+      description: item.description || '',
+      createdBy: item.createdBy || '',
       createdAt: item.createdAt || now()
     })),
     inspectionExecutions: (raw.inspectionExecutions || []).map(item => ({

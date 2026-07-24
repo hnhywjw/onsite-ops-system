@@ -1203,8 +1203,8 @@
         <label>关联项目<select id="edChangeProjectId"></select></label>
         <label>关联资产<select id="edChangeAssetId"></select></label>
         <label>风险等级<select id="edChangeRiskLevel"><option value="低">低</option><option value="中">中</option><option value="高">高</option></select></label>
-        <label>申请人<select id="edChangeCustomerId" required></select></label>
-        <label>审批人<select id="edChangeApproverId" required></select></label>
+        <label>运维审批人<select id="edChangeCustomerId" required></select></label>
+        <label>甲方客户<select id="edChangeApproverId" required></select></label>
         <label class="full">变更内容<textarea id="edChangeContent" required></textarea></label>
       </div>
       <div id="changeRecordEditMessage" style="margin:8px 0;font-size:13px;"></div>
@@ -2029,8 +2029,8 @@
                 <label><span>关联项目</span><select name="projectId" id="changeProjectId"></select></label>
                 <label><span>关联资产</span><select name="assetId" id="changeAssetId"></select></label>
                 <label><span>风险等级</span><select name="riskLevel"><option value="低">低</option><option value="中" selected>中</option><option value="高">高</option></select></label>
-                <label><span>申请人</span><select name="approverId" id="changeCustomerId" required></select></label>
-                <label><span>审批人</span><select name="customerId" id="changeApproverId" required></select></label>
+                <label><span>运维审批人</span><select name="approverId" id="changeCustomerId" required></select></label>
+                <label><span>甲方客户</span><select name="customerId" id="changeApproverId" required></select></label>
                 <label class="full"><span>变更内容</span><textarea name="content" required></textarea></label>
                 <button class="primary full" id="changeRecordSubmitBtn" type="submit">提交变更</button>
               </form>
@@ -2038,7 +2038,7 @@
             </div>
             <div class="card" style="margin-top: 16px;">
               <h3 style="margin-top:0;">变更记录列表</h3>
-              <div class="table-wrap"><table><thead><tr><th>标题</th><th>变更内容</th><th>风险</th><th>申请人</th><th>审批人</th><th>审批状态</th><th>关联资产</th><th>项目</th><th>操作</th></tr></thead><tbody id="changeRecordTable"></tbody></table></div>
+              <div class="table-wrap"><table><thead><tr><th>标题</th><th>变更内容</th><th>风险</th><th>运维审批人</th><th>甲方客户</th><th>审批状态</th><th>关联资产</th><th>项目</th><th>操作</th></tr></thead><tbody id="changeRecordTable"></tbody></table></div>
               <div class="pagination-bar">
                 <button class="secondary" id="changeRecordPrevBtn" type="button">上一页</button>
                 <span id="changeRecordPageInfo">第 1 / 1 页</span>
@@ -7077,8 +7077,8 @@
       const msg = document.getElementById('changeRecordEditMessage');
       if (!data.title) { msg.textContent = '请输入变更标题'; msg.className = 'message error'; return; }
       if (!data.content) { msg.textContent = '请输入变更内容'; msg.className = 'message error'; return; }
-      if (!data.approverId) { msg.textContent = '请选择申请人'; msg.className = 'message error'; return; }
-      if (!data.customerId) { msg.textContent = '请选择审批人'; msg.className = 'message error'; return; }
+      if (!data.approverId) { msg.textContent = '请选择运维审批人'; msg.className = 'message error'; return; }
+      if (!data.customerId) { msg.textContent = '请选择甲方客户'; msg.className = 'message error'; return; }
       try {
         await api(`/api/change-records/${id}`, { method: 'PUT', body: JSON.stringify(data) });
         closeModal('changeRecordEditModal');
@@ -8310,7 +8310,7 @@
       try {
         await api(path, { method, body: JSON.stringify(data) });
         resetKbForm();
-        setMessage('kbMessage', id ? 'Article modifi\u00e9 avec succ\u00e8s' : 'Article enregistr\u00e9 avec succ\u00e8s');
+        setMessage('kbMessage', id ? '知识条目修改成功' : '知识条目创建成功');
         state.kb = (await api('/api/kb')).data;
         renderKb();
         await refreshReports();
