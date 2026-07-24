@@ -4374,7 +4374,17 @@
       today.setHours(0, 0, 0, 0);
       return filterByUserProject(state.assets)
         .filter(item => item.maintainExpiryDate)
-        .map(item => ({ item, diff: Math.ceil((new Date(`${item.maintainExpiryDate}T00:00:00`) - today) / 86400000) }))
+        .map(item => {
+          const diff = Math.ceil((new Date(`${item.maintainExpiryDate}T00:00:00`) - today) / 86400000);
+          let levelClass;
+          if (diff <= 0) levelClass = 'expiry-darkred';
+          else if (diff < 15) levelClass = 'expiry-darkred';
+          else if (diff < 30) levelClass = 'expiry-red';
+          else if (diff < 60) levelClass = 'expiry-orange';
+          else if (diff < 90) levelClass = 'expiry-blue';
+          else levelClass = 'expiry-green';
+          return { item, diff, levelClass };
+        })
         .sort((a, b) => a.diff - b.diff)
         .slice(0, limit);
     }
@@ -5815,10 +5825,10 @@
         </div>
       `).join('') || '<div class="muted">暂无项目数据</div>';
       const maintainReminders = getMaintainReminders(5);
-      document.getElementById('dashboardMaintainReminder').innerHTML = maintainReminders.map(({ item, diff }) => `
+      document.getElementById('dashboardMaintainReminder').innerHTML = maintainReminders.map(({ item, diff, levelClass }) => `
         <div class="project-expiry-item">
           <div>
-            <div>${esc(item.name)}</div>
+            <div class="project-expiry-name ${levelClass}">${esc(item.name)}</div>
             <div class="muted">${esc(formatProjectDisplayById(item.projectId))}</div>
           </div>
           <div class="muted">${diff >= 0 ? `剩余 ${diff} 天` : `已到期 ${Math.abs(diff)} 天`}</div>
