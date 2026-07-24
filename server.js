@@ -2,11 +2,10 @@ const http = require('http');
 const https = require('https');
 const fs = require('fs');
 const path = require('path');
-const { exec, execFile } = require('child_process');
+const { exec, execFile, execSync } = require('child_process');
 const crypto = require('crypto');
 const tls = require('tls');
 const { URL } = require('url');
-const zlib = require('zlib');
 const os = require('os');
 const net = require('net');
 const dns = require('dns').promises;
@@ -46,7 +45,7 @@ const dbConfig = {
   password: process.env.MYSQL_PASSWORD || 'onsite_ops_password',
   database: process.env.MYSQL_DATABASE || 'onsite_ops_system'
 };
-const dbCollectionKeys = ['users', 'projects', 'assets', 'logs', 'inspectionPlans', 'inspectionExecutions', 'spareParts', 'sparePartMovements', 'changeRecords', 'incidentRecords', 'approvals', 'notifications', 'auditLogs', 'knowledgeBase', 'documents', 'aiInspectionTargets', 'aiInspectionTemplates', 'aiInspectionTasks', 'aiInspectionResults', 'configBackupPlans', 'configBackupRecords', 'sessions', 'systemConfig', 'runtimeState'];
+const dbCollectionKeys = ['users', 'projects', 'assets', 'assetRelations', 'logs', 'inspectionPlans', 'inspectionExecutions', 'spareParts', 'sparePartMovements', 'changeRecords', 'incidentRecords', 'approvals', 'notifications', 'auditLogs', 'knowledgeBase', 'documents', 'aiInspectionTargets', 'aiInspectionTemplates', 'aiInspectionTasks', 'aiInspectionResults', 'configBackupPlans', 'configBackupRecords', 'sessions', 'systemConfig', 'runtimeState'];
 const allowFileDbFallback = process.env.ALLOW_FILE_DB_FALLBACK === 'true';
 const loginRateLimitWindowMs = parseInt(process.env.LOGIN_RATE_LIMIT_WINDOW_MS, 10) || 10 * 60 * 1000;
 const loginRateLimitLockMs = parseInt(process.env.LOGIN_RATE_LIMIT_LOCK_MS, 10) || 15 * 60 * 1000;
@@ -54,9 +53,6 @@ const loginRateLimitMaxAttempts = parseInt(process.env.LOGIN_RATE_LIMIT_MAX_ATTE
 const webSocketHeartbeatIntervalMs = parseInt(process.env.WS_HEARTBEAT_INTERVAL_MS, 10) || 30000;
 const isProduction = process.env.NODE_ENV === 'production';
 const upgradeSigningKey = process.env.UPGRADE_SIGNING_KEY || '';
-const maxUpgradeZipEntries = parseInt(process.env.UPGRADE_MAX_FILES, 10) || 200;
-const maxUpgradeExtractedBytes = parseInt(process.env.UPGRADE_MAX_EXTRACTED_BYTES, 10) || 100 * 1024 * 1024;
-const maxUpgradeFileBytes = parseInt(process.env.UPGRADE_MAX_FILE_BYTES, 10) || 20 * 1024 * 1024;
 const allowedBackupCommands = (process.env.CONFIG_BACKUP_ALLOWED_COMMANDS || 'show running-config,show startup-config,display current-configuration,cat /etc/os-release')
   .split(',')
   .map(item => item.trim())
@@ -71,6 +67,21 @@ let httpsServerStatus = {
   port: defaultHttpsPort,
   checkedAt: now()
 };
+
+let httpsLazyInitDone = false;
+
+async function tryLazyInitHttps(db) {
+  if (httpsLazyInitDone) return;
+  const enabled = !!(db && db.systemConfig && db.systemConfig.httpsLoginEnabled);
+  if (!enabled) { httpsLazyInitDone = true; return; }
+  if (httpsServer) { httpsLazyInitDone = true; return; }
+  httpsLazyInitDone = true;
+  try {
+    await applyHttpsServerConfig(db.systemConfig);
+  } catch (error) {
+    console.error('Lazy HTTPS init failed:', error.message);
+  }
+}
 
 fs.mkdirSync(publicDir, { recursive: true });
 fs.mkdirSync(dataDir, { recursive: true });
@@ -91,6 +102,7 @@ function validateProductionConfiguration() {
   if (!process.env.INITIAL_ADMIN_SECURITY_ANSWER || process.env.INITIAL_ADMIN_SECURITY_ANSWER === 'admin') problems.push('INITIAL_ADMIN_SECURITY_ANSWER 必须设置为生产安全答案');
   if (!process.env.INITIAL_ENGINEER_SECURITY_ANSWER || process.env.INITIAL_ENGINEER_SECURITY_ANSWER === 'blue') problems.push('INITIAL_ENGINEER_SECURITY_ANSWER 必须设置为生产安全答案');
   if (!process.env.ENCRYPTION_KEY || process.env.ENCRYPTION_KEY.length < 32) problems.push('ENCRYPTION_KEY 必须设置且长度不少于 32 位');
+  if (!process.env.DOCUMENT_TOKEN_SECRET || process.env.DOCUMENT_TOKEN_SECRET.length < 32) console.warn('WARNING: DOCUMENT_TOKEN_SECRET 环境变量未设置，文档访问令牌重启后将失效。请在生产环境中设置 DOCUMENT_TOKEN_SECRET。');
   if (!upgradeSigningKey || upgradeSigningKey.length < 32) problems.push('UPGRADE_SIGNING_KEY 必须设置且长度不少于 32 位');
   if (problems.length) {
     throw new Error(`生产配置不安全：${problems.join('；')}`);
@@ -497,7 +509,7 @@ const captchaSecret = crypto.randomBytes(32).toString('hex');
 function generateCaptchaCode() {
   let code = '';
   for (let i = 0; i < 4; i++) {
-    code += captchaCharset[Math.floor(Math.random() * captchaCharset.length)];
+    code += captchaCharset[crypto.randomInt(0, captchaCharset.length)];
   }
   return code;
 }
@@ -618,6 +630,7 @@ function seed() {
         version: 'v1.0.0',
         serialNumber: 'FW-2026-001',
         status: '使用中',
+        installationLocation: 'A区机房-01号机柜-4U',
         notes: '默认资产',
         createdAt: now()
       }
@@ -671,7 +684,8 @@ function seed() {
     aiInspectionResults: [],
     configBackupPlans: [],
     configBackupRecords: [],
-    documents: []
+    documents: [],
+    assetRelations: []
   };
 }
 
@@ -698,9 +712,10 @@ function normalizeSystemConfig(rawSystemConfig = {}) {
     httpsCertValidTo: String(rawSystemConfig.httpsCertValidTo || '').trim(),
     httpsCertFingerprint256: String(rawSystemConfig.httpsCertFingerprint256 || '').trim(),
     allowRegistration: rawSystemConfig.allowRegistration === true || rawSystemConfig.allowRegistration === 'true',
-    loginRateLimitMaxAttempts: Number(rawSystemConfig.loginRateLimitMaxAttempts) || loginRateLimitMaxAttempts,
-    loginRateLimitWindowMinutes: Number(rawSystemConfig.loginRateLimitWindowMinutes) || Math.round(loginRateLimitWindowMs / 60000),
-    loginRateLimitLockMinutes: Number(rawSystemConfig.loginRateLimitLockMinutes) || Math.round(loginRateLimitLockMs / 60000),
+    httpLoginDisabled: rawSystemConfig.httpLoginDisabled === true || rawSystemConfig.httpLoginDisabled === 'true',
+    loginRateLimitMaxAttempts: Number.isFinite(Number(rawSystemConfig.loginRateLimitMaxAttempts)) && Number(rawSystemConfig.loginRateLimitMaxAttempts) >= 1 ? Number(rawSystemConfig.loginRateLimitMaxAttempts) : loginRateLimitMaxAttempts,
+    loginRateLimitWindowMinutes: Number.isFinite(Number(rawSystemConfig.loginRateLimitWindowMinutes)) && Number(rawSystemConfig.loginRateLimitWindowMinutes) >= 1 ? Number(rawSystemConfig.loginRateLimitWindowMinutes) : Math.round(loginRateLimitWindowMs / 60000),
+    loginRateLimitLockMinutes: Number.isFinite(Number(rawSystemConfig.loginRateLimitLockMinutes)) && Number(rawSystemConfig.loginRateLimitLockMinutes) >= 1 ? Number(rawSystemConfig.loginRateLimitLockMinutes) : Math.round(loginRateLimitLockMs / 60000),
     timezoneOffset: Number.isFinite(timezoneOffset) ? timezoneOffset : 480
   };
 }
@@ -834,35 +849,6 @@ function cleanupLoginAttemptStoreFromDb(db) {
   }
   setLoginRateLimitStateStore(db, store);
   return cleaned;
-}
-
-function computeSha256(buffer) {
-  return crypto.createHash('sha256').update(buffer).digest('hex');
-}
-
-function normalizeManifestHashes(rawHashes = {}) {
-  if (!rawHashes || typeof rawHashes !== 'object') return {};
-  return Object.fromEntries(
-    Object.entries(rawHashes)
-      .map(([key, value]) => [String(key).trim(), String(value || '').trim().toLowerCase()])
-      .filter(([key, value]) => key && /^[a-f0-9]{64}$/.test(value))
-  );
-}
-
-function verifyManifestFileHashes(extractDir, hashes) {
-  const mismatches = [];
-  for (const [file, expected] of Object.entries(hashes)) {
-    const extractedFile = resolveSafeChildPath(extractDir, file);
-    if (!fs.existsSync(extractedFile)) {
-      mismatches.push({ file, reason: 'missing' });
-      continue;
-    }
-    const actual = computeSha256(fs.readFileSync(extractedFile));
-    if (actual !== expected) {
-      mismatches.push({ file, reason: 'sha256', expected, actual });
-    }
-  }
-  return mismatches;
 }
 
 function runMaintenanceTasks(db) {
@@ -1316,7 +1302,7 @@ function executeSSHCheck(host, port, username, password) {
   if (!validateHost(host) || !validatePort(port)) return Promise.resolve({ success: false, stdout: '', stderr: 'Invalid host or port' });
   if (!username || typeof username !== 'string' || !/^[a-zA-Z0-9_.-]+$/.test(username)) return Promise.resolve({ success: false, stdout: '', stderr: 'Invalid username' });
   return new Promise((resolve) => {
-    const passFile = `/tmp/sshpass-${Date.now()}-${Math.random().toString(36).slice(2)}`;
+    const passFile = `/tmp/sshpass-${Date.now()}-${crypto.randomBytes(8).toString('hex')}`;
     fs.writeFileSync(passFile, password || '', { mode: 0o600 });
     const args = [
       '-f', passFile,
@@ -1380,10 +1366,23 @@ function normalizeDb(raw = {}) {
       owner: asset.owner || '',
       version: asset.version || '',
       serialNumber: asset.serialNumber || '',
-      status: asset.status === '运行中' ? '使用中' : (asset.status || ''),
+      status: asset.status || '',
       maintainExpiryDate: asset.maintainExpiryDate || '',
+      installationLocation: asset.installationLocation || asset.location || '',
       notes: asset.notes || '',
+      monitorEnabled: asset.monitorEnabled === true || asset.monitorEnabled === 'true',
+      monitorType: asset.monitorType || 'ping',
+      monitorHost: asset.monitorHost || '',
+      monitorPort: asset.monitorPort || '',
       createdAt: asset.createdAt || now()
+    })),
+    assetRelations: (raw.assetRelations || []).map(rel => ({
+      id: rel.id || id('rel'),
+      sourceAssetId: rel.sourceAssetId || '',
+      targetAssetId: rel.targetAssetId || '',
+      relationType: rel.relationType || 'connected',
+      label: rel.label || '',
+      createdAt: rel.createdAt || now()
     })),
     logs: (raw.logs || []).map(log => ({
       id: log.id || id('log'),
@@ -1412,6 +1411,8 @@ function normalizeDb(raw = {}) {
       nextDate: item.nextDate || '',
       owner: item.owner || '',
       status: item.status || '待执行',
+      description: item.description || '',
+      createdBy: item.createdBy || '',
       createdAt: item.createdAt || now()
     })),
     inspectionExecutions: (raw.inspectionExecutions || []).map(item => ({
@@ -1528,6 +1529,9 @@ function normalizeDb(raw = {}) {
       keywords: item.keywords || '',
       problem: item.problem || '',
       solution: item.solution || '',
+      content: item.content || '',
+      category: item.category || '',
+      tags: Array.isArray(item.tags) ? item.tags : [],
       createdBy: item.createdBy || '',
       projectId: item.projectId || userProjectMap.get(item.createdBy) || '',
       createdAt: item.createdAt || now()
@@ -1779,14 +1783,26 @@ function readDbFromFile() {
 }
 
 function writeDbToFile(db) {
-  fs.writeFileSync(dbPath, JSON.stringify(normalizeDb(db), null, 2));
+  fs.writeFileSync(dbPath, JSON.stringify(db, null, 2));
+  latestFileDbCache = db;
 }
 
+let latestFileDbCache = null;
+
 function readDbInternalSync() {
-  if (!fs.existsSync(dbPath)) return seed();
+  if (latestFileDbCache) return latestFileDbCache;
+  if (!fs.existsSync(dbPath)) {
+    const s = seed();
+    latestFileDbCache = s;
+    return s;
+  }
   const raw = JSON.parse(fs.readFileSync(dbPath, 'utf8'));
-  return normalizeDb(raw);
+  const normalized = normalizeDb(raw);
+  latestFileDbCache = normalized;
+  return normalized;
 }
+
+let mysqlResetMutex = Promise.resolve();
 
 async function readDb() {
   try {
@@ -1814,14 +1830,30 @@ async function readDb() {
     normalized._seq = dbSequence;
     return normalized;
   } catch (error) {
-    mysqlReadyPromise = null;
-    mysqlPool = null;
+    await resetMySqlConnection();
     if (allowFileDbFallback) {
       const fallback = readDbFromFile();
       fallback._seq = dbSequence;
       return fallback;
     }
     throw error;
+  }
+}
+
+async function resetMySqlConnection() {
+  let release;
+  const lock = new Promise(resolve => { release = resolve; });
+  const previous = mysqlResetMutex;
+  mysqlResetMutex = lock;
+  await previous;
+  try {
+    if (mysqlPool) {
+      try { await mysqlPool.end(); } catch (_) {}
+    }
+    mysqlReadyPromise = null;
+    mysqlPool = null;
+  } finally {
+    release();
   }
 }
 
@@ -1876,8 +1908,7 @@ async function writeDb(db, options = {}) {
         connection.release();
       }
     } catch (error) {
-      mysqlReadyPromise = null;
-      mysqlPool = null;
+      await resetMySqlConnection();
       if (allowFileDbFallback) {
         writeDbToFile(normalized);
       } else {
@@ -2037,15 +2068,24 @@ async function getSystemServicesStatus(db) {
       checkedAt
     });
   } catch (error) {
-    mysqlReadyPromise = null;
-    mysqlPool = null;
-    services.push({
-      key: 'mysql',
-      name: 'MySQL 数据库',
-      status: 'stopped',
-      detail: error.message,
-      checkedAt
-    });
+    await resetMySqlConnection();
+    if (allowFileDbFallback) {
+      services.push({
+        key: 'mysql',
+        name: 'MySQL 数据库',
+        status: 'running',
+        detail: '文件存储模式（内置数据引擎）',
+        checkedAt
+      });
+    } else {
+      services.push({
+        key: 'mysql',
+        name: 'MySQL 数据库',
+        status: 'stopped',
+        detail: error.message,
+        checkedAt
+      });
+    }
   }
   try {
     fs.accessSync(backupDir, fs.constants.R_OK | fs.constants.W_OK);
@@ -2078,13 +2118,23 @@ async function getSystemServicesStatus(db) {
   return services;
 }
 
-function buildSecurityHeaders(extraHeaders = {}) {
+function createNonce() {
+  return crypto.randomBytes(16).toString('base64');
+}
+
+function buildNonceHeaderValue(nonce) {
+  const n = nonce || '';
+  return `default-src 'self'; script-src 'self' 'unsafe-inline' 'nonce-${n}'; style-src 'self' 'unsafe-inline' 'nonce-${n}'; img-src 'self' data: blob:; connect-src 'self' ws: wss:; font-src 'self' data:; object-src 'none'; base-uri 'self'; frame-ancestors 'none'; form-action 'self'`;
+}
+
+function buildSecurityHeaders(extraHeaders = {}, nonce = '') {
+  const csp = nonce ? buildNonceHeaderValue(nonce) : "default-src 'self'; script-src 'self' 'unsafe-inline' https://cdn.sheetjs.com; style-src 'self' 'unsafe-inline'; img-src 'self' data: blob:; connect-src 'self' ws: wss:; font-src 'self' data:; object-src 'none'; base-uri 'self'; frame-ancestors 'none'; form-action 'self'";
   const headers = {
     'X-Content-Type-Options': 'nosniff',
     'X-Frame-Options': 'DENY',
     'Referrer-Policy': 'same-origin',
     'Permissions-Policy': 'camera=(), microphone=(), geolocation=()',
-    'Content-Security-Policy': "default-src 'self'; script-src 'self' 'unsafe-inline'; style-src 'self' 'unsafe-inline'; img-src 'self' data: blob:; connect-src 'self' ws: wss:; font-src 'self' data:; object-src 'none'; base-uri 'self'; frame-ancestors 'none'; form-action 'self'",
+    'Content-Security-Policy': csp,
     ...extraHeaders
   };
   if (isProduction) headers['Strict-Transport-Security'] = 'max-age=31536000; includeSubDomains';
@@ -2149,22 +2199,31 @@ function parseCookies(req) {
 
 function readBody(req) {
   return new Promise((resolve, reject) => {
+    let settled = false;
     let data = '';
     req.on('data', chunk => {
+      if (settled) return;
       data += chunk;
       if (data.length > 10 * 1024 * 1024) {
+        settled = true;
         reject(new Error('请求体过大'));
         req.destroy();
       }
     });
     req.on('end', () => {
+      if (settled) return;
+      settled = true;
       try {
         resolve(data ? JSON.parse(data) : {});
       } catch (error) {
         reject(error);
       }
     });
-    req.on('error', reject);
+    req.on('error', (err) => {
+      if (settled) return;
+      settled = true;
+      reject(err);
+    });
   });
 }
 
@@ -2473,7 +2532,7 @@ function shouldUseSecureCookies(req, systemConfig = {}) {
   const forwardedProto = String(req.headers['x-forwarded-proto'] || '').trim().toLowerCase();
   if (forwardedProto === 'https' || Boolean(req.socket?.encrypted)) return true;
   const httpsLoginEnabled = normalizeSystemConfig(systemConfig).httpsLoginEnabled;
-  return httpsLoginEnabled && isProduction;
+  return httpsLoginEnabled;
 }
 
 function buildSessionCookie(req, token, systemConfig = {}, maxAgeSeconds = sessionMaxAgeSeconds) {
@@ -2517,97 +2576,15 @@ async function getSystemReadinessAsync() {
     await mysqlPool.query('SELECT 1');
     readiness.checks.push({ name: 'mysql', ok: true, detail: `${dbConfig.user}@${dbConfig.host}:${dbConfig.port}/${dbConfig.database}` });
   } catch (error) {
-    mysqlReadyPromise = null;
-    mysqlPool = null;
-    readiness.ok = false;
-    readiness.checks.push({ name: 'mysql', ok: false, detail: error.message });
+    await resetMySqlConnection();
+    if (allowFileDbFallback) {
+      readiness.checks.push({ name: 'mysql', ok: true, detail: '文件存储模式（内置数据引擎）' });
+    } else {
+      readiness.ok = false;
+      readiness.checks.push({ name: 'mysql', ok: false, detail: error.message });
+    }
   }
   return readiness;
-}
-
-function summarizeUpgradeVerification(rootDir, files) {
-  const verifiedFiles = [];
-  for (const file of files) {
-    const resolved = resolveSafeChildPath(rootDir, file);
-    if (!fs.existsSync(resolved)) {
-      throw new Error(`升级后校验失败，文件不存在: ${file}`);
-    }
-    verifiedFiles.push(file);
-  }
-  return verifiedFiles;
-}
-
-function canonicalizeValue(value) {
-  if (Array.isArray(value)) return value.map(canonicalizeValue);
-  if (value && typeof value === 'object') {
-    return Object.fromEntries(Object.keys(value).sort().map(key => [key, canonicalizeValue(value[key])]));
-  }
-  return value;
-}
-
-function canonicalizeUpgradeManifest(manifest) {
-  const clean = { ...manifest };
-  delete clean.signature;
-  delete clean.hmac;
-  return JSON.stringify(canonicalizeValue(clean));
-}
-
-function verifyUpgradeManifestSignature(manifest) {
-  const signature = String(manifest.signature || manifest.hmac || '').trim().toLowerCase();
-  if (!upgradeSigningKey) return !isProduction;
-  if (!/^[a-f0-9]{64}$/.test(signature)) return false;
-  const expected = crypto.createHmac('sha256', upgradeSigningKey).update(canonicalizeUpgradeManifest(manifest)).digest('hex');
-  return crypto.timingSafeEqual(Buffer.from(signature), Buffer.from(expected));
-}
-
-function validateUpgradeFileEntry(file) {
-  const normalized = String(file || '').replace(/\\/g, '/').trim();
-  if (!normalized || normalized.startsWith('/') || normalized.includes('../') || normalized === '..') {
-    throw new Error(`升级包路径非法: ${file}`);
-  }
-  if (normalized === 'manifest.json' || normalized === 'server.js' || normalized.startsWith('public/') || normalized.startsWith('scripts/') || normalized === 'package.json') {
-    return normalized;
-  }
-  throw new Error(`升级包禁止覆盖未授权路径: ${file}`);
-}
-
-function sanitizeManifestFiles(files) {
-  return (Array.isArray(files) ? files : [])
-    .filter(file => file !== 'data/' && !String(file).startsWith('data/'))
-    .map(validateUpgradeFileEntry)
-    .filter(Boolean);
-}
-
-function validateManifestFiles(rootDir, extractDir, files) {
-  const missing = [];
-  for (const file of files) {
-    const extractedFile = resolveSafeChildPath(extractDir, file);
-    if (!fs.existsSync(extractedFile)) {
-      missing.push(file);
-    }
-    resolveSafeChildPath(rootDir, file);
-  }
-  return missing;
-}
-
-function ensureUpgradePackageVersion(manifest) {
-  if (!manifest.version) {
-    throw new Error('manifest.json 缺少 version 字段');
-  }
-  const hashes = normalizeManifestHashes(manifest.sha256 || manifest.hashes);
-  if (!Object.keys(hashes).length) {
-    throw new Error('manifest.json 缺少 sha256 文件摘要');
-  }
-}
-
-function writeUpgradeFiles(extractDir, files) {
-  for (const file of files) {
-    const src = resolveSafeChildPath(extractDir, file);
-    const dest = resolveSafeChildPath(root, file);
-    const destDir = path.dirname(dest);
-    if (!fs.existsSync(destDir)) fs.mkdirSync(destDir, { recursive: true });
-    fs.copyFileSync(src, dest);
-  }
 }
 
 function getHealthPayload() {
@@ -2821,7 +2798,7 @@ function executeSSHCommand(host, port, username, password, command) {
   const commandValidation = validateBackupCommand(command);
   if (!commandValidation.ok) return Promise.resolve({ success: false, stdout: '', stderr: commandValidation.message });
   return new Promise((resolve) => {
-    const passFile = `/tmp/sshpass-${Date.now()}-${Math.random().toString(36).slice(2)}`;
+    const passFile = `/tmp/sshpass-${Date.now()}-${crypto.randomBytes(8).toString('hex')}`;
     fs.writeFileSync(passFile, password || '', { mode: 0o600 });
     const args = [
       '-f', passFile,
@@ -3585,7 +3562,7 @@ function buildDetailedPptxBufferFromReport(report) {
       { label: '日期', width: 1.15, max: 12 }, { label: '事件', width: 2.0, max: 18 }, { label: '资产/位置', width: 1.7, max: 16 }, { label: '结论', width: 2.0, max: 20 }, { label: '工时', width: 0.75, max: 8 }, { label: '处理过程', width: 4.0, max: 40 }
     ]),
     createReportListSlide('资产清单概览', '设备类型、品牌型号、位置、维保与状态', report.assets.map(item => [
-      item.name || '-', item.type || '-', [item.brand, item.model].filter(Boolean).join(' / ') || '-', item.location || '-', item.maintainExpiryDate || '-', item.status || '-'
+      item.name || '-', item.type || '-', [item.brand, item.model].filter(Boolean).join(' / ') || '-', item.installationLocation || item.location || '-', item.maintainExpiryDate || '-', item.status || '-'
     ]), [
       { label: '名称', width: 2.0, max: 18 }, { label: '类型', width: 1.2, max: 10 }, { label: '品牌型号', width: 2.2, max: 22 }, { label: '位置', width: 2.0, max: 18 }, { label: '维保到期', width: 1.3, max: 12 }, { label: '状态', width: 1.2, max: 10 }
     ]),
@@ -3750,7 +3727,7 @@ function buildOperationalReportHtml(db, scope, targetId, period) {
     <tr><th>统计对象</th><td>${escapeHtml(scope === 'user' ? targetUser.name : '项目整体')}</td><th>项目人员</th><td>${escapeHtml((db.users || []).filter(item => item.projectId === project.id).map(item => item.name).join('、') || '-')}</td></tr>
   </tbody></table></div>
   <div class="card"><h2>运维日志明细</h2><table><thead><tr><th>日期</th><th>事件</th><th>人员</th><th>资产/位置</th><th>处理过程</th><th>结论</th><th>工时</th></tr></thead><tbody>${tableRows(logs, 7, item => `<tr><td>${escapeHtml(item.date || '-')}</td><td>${escapeHtml(item.event || '-')}</td><td>${escapeHtml((db.users || []).find(user => user.id === item.userId)?.name || '-')}</td><td>${escapeHtml(item.relatedTarget || item.location || '-')}</td><td>${escapeHtml(item.process || '-')}</td><td>${escapeHtml(item.conclusion || '-')}</td><td>${escapeHtml(item.durationHours || 0)}</td></tr>`)}</tbody></table></div>
-  <div class="card"><h2>资产清单</h2><table><thead><tr><th>名称</th><th>类型</th><th>品牌型号</th><th>位置</th><th>维保到期</th><th>状态</th></tr></thead><tbody>${tableRows(assets, 6, item => `<tr><td>${escapeHtml(item.name || '-')}</td><td>${escapeHtml(item.type || '-')}</td><td>${escapeHtml([item.brand, item.model].filter(Boolean).join(' / ') || '-')}</td><td>${escapeHtml(item.location || '-')}</td><td>${escapeHtml(item.maintainExpiryDate || '-')}</td><td>${escapeHtml(item.status || '-')}</td></tr>`)}</tbody></table></div>
+  <div class="card"><h2>资产清单</h2><table><thead><tr><th>名称</th><th>类型</th><th>品牌型号</th><th>位置</th><th>维保到期</th><th>状态</th></tr></thead><tbody>${tableRows(assets, 6, item => `<tr><td>${escapeHtml(item.name || '-')}</td><td>${escapeHtml(item.type || '-')}</td><td>${escapeHtml([item.brand, item.model].filter(Boolean).join(' / ') || '-')}</td><td>${escapeHtml(item.installationLocation || item.location || '-')}</td><td>${escapeHtml(item.maintainExpiryDate || '-')}</td><td>${escapeHtml(item.status || '-')}</td></tr>`)}</tbody></table></div>
   <div class="card"><h2>巡检计划与执行</h2><table><thead><tr><th>计划</th><th>周期</th><th>下次巡检</th><th>状态</th><th>本周期执行时间</th><th>结果</th><th>异常说明</th><th>整改建议</th></tr></thead><tbody>${tableRows(plans, 8, plan => { const exec = executions.find(item => item.planId === plan.id); return `<tr><td>${escapeHtml(plan.title || '-')}</td><td>${escapeHtml(plan.cycle || '-')}</td><td>${escapeHtml(plan.nextDate || '-')}</td><td>${escapeHtml(plan.status || '-')}</td><td>${escapeHtml(exec?.executedAt || '-')}</td><td>${escapeHtml(exec?.result || '-')}</td><td>${escapeHtml(exec?.issue || '-')}</td><td>${escapeHtml(exec?.suggestion || '-')}</td></tr>`; })}</tbody></table></div>
   <div class="card"><h2>变更与故障</h2><table><thead><tr><th>类型</th><th>标题</th><th>级别/类型</th><th>状态</th><th>时间</th><th>说明</th></tr></thead><tbody>${tableRows([...changes.map(item => ({ kind: '变更', title: item.title, type: item.riskLevel, status: item.status, time: item.createdAt, note: item.content })), ...incidents.map(item => ({ kind: '故障', title: item.title, type: item.faultType || item.severity, status: item.status, time: item.occurredAt || item.createdAt, note: item.resolution }))], 6, item => `<tr><td>${escapeHtml(item.kind)}</td><td>${escapeHtml(item.title || '-')}</td><td>${escapeHtml(item.type || '-')}</td><td>${escapeHtml(item.status || '-')}</td><td>${escapeHtml(item.time || '-')}</td><td>${escapeHtml(item.note || '-')}</td></tr>`)}</tbody></table></div>
   <div class="card"><h2>知识库、文档与备件</h2><table><thead><tr><th>类别</th><th>名称</th><th>关键字段</th><th>状态/数量</th><th>创建时间</th></tr></thead><tbody>${tableRows([...kb.map(item => ({ kind: '知识库', name: item.title, key: item.keywords, status: item.solution, createdAt: item.createdAt })), ...documents.map(item => ({ kind: '资料文档', name: item.title, key: item.type, status: item.attachmentName || '-', createdAt: item.createdAt })), ...spareParts.map(item => ({ kind: '备件', name: item.name, key: item.model || item.spec || '-', status: item.quantity ?? item.stock ?? '-', createdAt: item.createdAt }))], 5, item => `<tr><td>${escapeHtml(item.kind)}</td><td>${escapeHtml(item.name || '-')}</td><td>${escapeHtml(item.key || '-')}</td><td>${escapeHtml(item.status || '-')}</td><td>${escapeHtml(item.createdAt || '-')}</td></tr>`)}</tbody></table></div>
@@ -4076,56 +4053,6 @@ function parseMultipart(buffer, boundary) {
   return parts;
 }
 
-function extractZip(zipBuffer, outputDir) {
-  const findEndOfCentralDirectory = (buf) => {
-    for (let i = buf.length - 22; i >= 0; i--) {
-      if (buf.readUInt32LE(i) === 0x06054b50) return i;
-    }
-    throw new Error('ZIP 文件结构无效');
-  };
-  const eocdOffset = findEndOfCentralDirectory(zipBuffer);
-  const totalEntries = zipBuffer.readUInt16LE(eocdOffset + 10);
-  if (totalEntries > maxUpgradeZipEntries) throw new Error(`ZIP 文件数量不能超过 ${maxUpgradeZipEntries}`);
-  const centralDirOffset = zipBuffer.readUInt32LE(eocdOffset + 16);
-  let offset = centralDirOffset;
-  let extractedBytes = 0;
-  for (let i = 0; i < totalEntries; i++) {
-    if (zipBuffer.readUInt32LE(offset) !== 0x02014b50) throw new Error('ZIP 目录项无效');
-    const compressionMethod = zipBuffer.readUInt16LE(offset + 10);
-    const fileNameLength = zipBuffer.readUInt16LE(offset + 28);
-    const extraFieldLength = zipBuffer.readUInt16LE(offset + 30);
-    const commentLength = zipBuffer.readUInt16LE(offset + 32);
-    const localHeaderOffset = zipBuffer.readUInt32LE(offset + 42);
-    const fileName = zipBuffer.slice(offset + 46, offset + 46 + fileNameLength).toString();
-    if (fileName.endsWith('/')) { offset += 46 + fileNameLength + extraFieldLength + commentLength; continue; }
-    validateUpgradeFileEntry(fileName);
-    if (zipBuffer.readUInt32LE(localHeaderOffset) !== 0x04034b50) throw new Error('ZIP 本地文件头无效');
-    const localFileNameLength = zipBuffer.readUInt16LE(localHeaderOffset + 26);
-    const localExtraFieldLength = zipBuffer.readUInt16LE(localHeaderOffset + 28);
-    const dataOffset = localHeaderOffset + 30 + localFileNameLength + localExtraFieldLength;
-    const compressedSize = zipBuffer.readUInt32LE(offset + 20);
-    const uncompressedSize = zipBuffer.readUInt32LE(offset + 24);
-    if (uncompressedSize > maxUpgradeFileBytes) throw new Error(`ZIP 单文件不能超过 ${maxUpgradeFileBytes} 字节`);
-    extractedBytes += uncompressedSize;
-    if (extractedBytes > maxUpgradeExtractedBytes) throw new Error(`ZIP 解压后总大小不能超过 ${maxUpgradeExtractedBytes} 字节`);
-    const rawData = zipBuffer.slice(dataOffset, dataOffset + compressedSize);
-    let data;
-    if (compressionMethod === 0) {
-      data = rawData;
-    } else if (compressionMethod === 8) {
-      data = zlib.inflateRawSync(rawData, { maxOutputLength: maxUpgradeFileBytes });
-    } else {
-      throw new Error(`不支持的 ZIP 压缩方式: ${compressionMethod}`);
-    }
-    if (data.length !== uncompressedSize || data.length > maxUpgradeFileBytes) throw new Error(`ZIP 文件大小校验失败: ${fileName}`);
-    const destPath = resolveSafeChildPath(outputDir, fileName);
-    fs.mkdirSync(path.dirname(destPath), { recursive: true });
-    fs.writeFileSync(destPath, data);
-    offset += 46 + fileNameLength + extraFieldLength + commentLength;
-  }
-}
-
-
 function serveStatic(req, res, pathname) {
   const filePath = pathname === '/' ? path.join(publicDir, 'index.html') : path.join(publicDir, pathname);
   const normalized = path.resolve(filePath);
@@ -4144,7 +4071,8 @@ function serveStatic(req, res, pathname) {
     '.css': 'text/css; charset=utf-8',
     '.json': 'application/json; charset=utf-8'
   };
-  res.writeHead(200, buildSecurityHeaders({ 'Content-Type': types[ext] || 'application/octet-stream' }));
+  const contentType = types[ext] || 'application/octet-stream';
+  res.writeHead(200, buildSecurityHeaders({ 'Content-Type': contentType }));
   fs.createReadStream(normalized).pipe(res);
 }
 
@@ -4164,6 +4092,15 @@ const requestHandler = async (req, res) => {
     systemTimezoneOffsetMinutes = db.systemConfig?.timezoneOffset ?? 480;
     if (!validateCsrf(req, res, db, pathname)) return;
 
+    tryLazyInitHttps(db);
+
+    if (db.systemConfig?.httpLoginDisabled && !req.socket.encrypted) {
+      const loginPaths = ['/api/login', '/api/register', '/api/forgot-password', '/api/captcha', '/api/auth'];
+      if (loginPaths.some(p => pathname.startsWith(p))) {
+        return json(res, 403, { message: 'HTTP 登录已禁用，请使用 HTTPS 登录' });
+      }
+    }
+
 
     if (req.method === 'GET' && pathname === '/api/captcha') {
       const code = generateCaptchaCode();
@@ -4176,8 +4113,8 @@ const requestHandler = async (req, res) => {
       const body = await readBody(req);
       const username = String(body.username || '').trim();
       if (!verifyCaptchaToken(body.captchaToken, body.captcha)) {
-          return json(res, 401, { message: '验证码错误' });
-        }
+        return json(res, 401, { message: '验证码错误' });
+      }
       const rateLimitState = getLoginRateLimitState(db, req, username);
       if (rateLimitState.blocked) {
         return json(res, 429, { message: loginBlockedMessage(rateLimitState.retryAfterMs) }, rateLimitResponseHeaders(rateLimitState.retryAfterMs));
@@ -4505,8 +4442,10 @@ const requestHandler = async (req, res) => {
       if (!user) return;
       const onlineUsers = [];
       const seenUserIds = new Set();
+      const nowMs = Date.now();
       for (const s of (db.sessions || [])) {
         if (seenUserIds.has(s.userId)) continue;
+        if (s.expiresAt && Date.parse(s.expiresAt) <= nowMs) continue;
         const u = (db.users || []).find(x => x.id === s.userId);
         if (u && u.status === 'active') {
           seenUserIds.add(s.userId);
@@ -4572,7 +4511,7 @@ const requestHandler = async (req, res) => {
       const user = requireAdmin(req, res, db);
       if (!user) return;
       const projectId = pathname.split('/')[3];
-      const projectRelationCollections = ['users','assets','logs','knowledgeBase','documents','inspectionPlans','inspectionExecutions','spareParts','sparePartMovements','changeRecords','incidents','approvals','notifications','aiInspectionTargets','aiInspectionTasks','aiInspectionResults','configBackupPlans','configBackupRecords'];
+      const projectRelationCollections = ['users','assets','logs','knowledgeBase','documents','inspectionPlans','inspectionExecutions','spareParts','sparePartMovements','changeRecords','incidentRecords','approvals','notifications','aiInspectionTargets','aiInspectionTasks','aiInspectionResults','configBackupPlans','configBackupRecords'];
       const relationNames = projectRelationCollections.filter(key => (db[key] || []).some(item => item.projectId === projectId));
       if (relationNames.length) {
         return json(res, 400, { message: `该项目存在关联数据(${relationNames.join(', ')})，请先清理后再删除` });
@@ -4615,9 +4554,6 @@ const requestHandler = async (req, res) => {
       }
       if (!/[a-zA-Z]/.test(body.password) || !/[0-9]/.test(body.password) || !/[^a-zA-Z0-9]/.test(body.password)) {
         return json(res, 400, { message: '密码必须包含字母、数字和特殊字符' });
-      }
-      if (!/[a-zA-Z]/.test(body.password) || !/[0-9]/.test(body.password) || !/[^a-zA-Z0-9]/.test(body.password)) {
-        return json(res, 400, { message: '密码必须包含至少一个字母和一个数字' });
       }
       if (body.projectId && !requireExistingProject(body.projectId, db)) {
         return json(res, 400, { message: '关联项目不存在' });
@@ -4742,11 +4678,11 @@ const requestHandler = async (req, res) => {
       target.startDate = body.startDate || '';
       target.endDate = body.endDate || '';
       if (body.password) {
-        if (String(body.password).length < 6) {
-          return json(res, 400, { message: '密码长度不能少于 6 位' });
+        if (String(body.password).length < 8) {
+          return json(res, 400, { message: '密码长度不能少于 8 位' });
         }
-        if (!/[a-zA-Z]/.test(body.password) || !/[0-9]/.test(body.password)) {
-          return json(res, 400, { message: '密码必须包含至少一个字母和一个数字' });
+        if (!/[a-zA-Z]/.test(body.password) || !/[0-9]/.test(body.password) || !/[^a-zA-Z0-9]/.test(body.password)) {
+          return json(res, 400, { message: '密码必须包含字母、数字和特殊字符' });
         }
         target.passwordHash = hash(body.password);
       }
@@ -4804,7 +4740,12 @@ const requestHandler = async (req, res) => {
         serialNumber: body.serialNumber || '',
         status: body.status || '',
         maintainExpiryDate: body.maintainExpiryDate || '',
+        installationLocation: body.installationLocation || '',
         notes: body.notes || '',
+        monitorEnabled: body.monitorEnabled === true || body.monitorEnabled === 'true',
+        monitorType: body.monitorType || 'ping',
+        monitorHost: body.monitorHost || '',
+        monitorPort: body.monitorPort || '',
         createdBy: user.id,
         createdAt: now()
       };
@@ -4812,6 +4753,78 @@ const requestHandler = async (req, res) => {
       appendAuditLog(db, user, 'create', 'asset', item.id, `创建资产 ${item.name}`, projectId);
       await writeDb(db);
       return json(res, 201, item);
+    }
+
+    if (req.method === 'POST' && pathname === '/api/assets/import') {
+      const user = requireEditor(req, res, db);
+      if (!user) return;
+      const body = await readBody(req);
+      const rows = Array.isArray(body.assets) ? body.assets : [];
+      if (!rows.length) return json(res, 400, { message: '导入数据为空' });
+      const results = { created: 0, skipped: 0, errors: [] };
+      for (let i = 0; i < rows.length; i++) {
+        const row = rows[i];
+        const rowLabel = `第${i + 2}行`;
+        const name = (row.name || row['资产名称'] || '').trim();
+        if (!name) { results.errors.push(`${rowLabel}: 资产名称为空`); results.skipped++; continue; }
+        let projectId = user.projectId;
+        const projectName = (row.projectName || row['关联项目'] || '').trim();
+        if (user.role === 'admin' && projectName) {
+          const p = db.projects.find(prj => prj.name === projectName);
+          if (p) {
+            projectId = p.id;
+          } else {
+            const available = db.projects.map(prj => prj.name).join('、');
+            results.errors.push(`${rowLabel}: 项目"${projectName}"不存在，已归入默认项目。可用项目：${available || '无'}`);
+          }
+        }
+        if (!db.projects.find(prj => prj.id === projectId)) { results.errors.push(`${rowLabel}: 关联项目不存在`); results.skipped++; continue; }
+        const rawDate = row.maintainExpiryDate ?? row['维保到期日'];
+        let maintainExpiryDate = '';
+        if (rawDate != null && rawDate !== '') {
+          if (typeof rawDate === 'number') {
+            const excelEpoch = new Date(1899, 11, 30);
+            const d = new Date(excelEpoch.getTime() + rawDate * 86400000);
+            maintainExpiryDate = d.toISOString().slice(0, 10);
+          } else {
+            const str = String(rawDate).trim();
+            const m = str.match(/^(\d{4})[-/](\d{1,2})[-/](\d{1,2})/);
+            if (m) {
+              maintainExpiryDate = `${m[1]}-${m[2].padStart(2, '0')}-${m[3].padStart(2, '0')}`;
+            } else if (/^\d{1,2}[\/\-]\d{1,2}[\/\-]\d{4}$/.test(str)) {
+              const parts = str.split(/[\/\-]/);
+              maintainExpiryDate = `${parts[2]}-${parts[0].padStart(2, '0')}-${parts[1].padStart(2, '0')}`;
+            } else {
+              results.errors.push(`${rowLabel}: 维保到期日格式无效"${str}"，请使用YYYY-MM-DD格式`);
+            }
+          }
+        }
+        if (rawDate != null && rawDate !== '' && !maintainExpiryDate && !results.errors.slice(-1)[0]?.includes('维保到期日')) {
+          results.errors.push(`${rowLabel}: 维保到期日格式无法识别，请使用YYYY-MM-DD格式`);
+        }
+        const item = {
+          id: id('asset'),
+          projectId,
+          type: row.type || row['资产类型'] || '',
+          name,
+          brand: row.brand || row['品牌'] || '',
+          model: row.model || row['规格型号'] || '',
+          owner: row.owner || row['责任人'] || row['责任人/部门'] || '',
+          version: row.version || row['版本'] || '',
+          serialNumber: row.serialNumber || row['序列号'] || '',
+          status: row.status || row['状态'] || '',
+          maintainExpiryDate,
+          installationLocation: row.installationLocation || row['安装位置'] || '',
+          notes: row.notes || row['备注'] || '',
+          createdBy: user.id,
+          createdAt: now()
+        };
+        db.assets.push(item);
+        results.created++;
+      }
+      appendAuditLog(db, user, 'import', 'asset', '', `批量导入资产 ${results.created} 条`, user.projectId);
+      await writeDb(db);
+      return json(res, 200, results);
     }
 
     if (req.method === 'PUT' && pathname.startsWith('/api/assets/')) {
@@ -4837,7 +4850,12 @@ const requestHandler = async (req, res) => {
       target.serialNumber = body.serialNumber || '';
       target.status = body.status || '';
       target.maintainExpiryDate = body.maintainExpiryDate || '';
+      target.installationLocation = body.installationLocation !== undefined ? body.installationLocation : target.installationLocation;
       target.notes = body.notes || '';
+      target.monitorEnabled = body.monitorEnabled === true || body.monitorEnabled === 'true';
+      target.monitorType = body.monitorType || target.monitorType || 'ping';
+      target.monitorHost = body.monitorHost !== undefined ? body.monitorHost : target.monitorHost || '';
+      target.monitorPort = body.monitorPort !== undefined ? body.monitorPort : target.monitorPort || '';
       appendAuditLog(db, user, 'update', 'asset', target.id, `修改资产 ${target.name}`, projectId);
       await writeDb(db);
       return json(res, 200, target);
@@ -4852,12 +4870,12 @@ const requestHandler = async (req, res) => {
       const target = db.assets[index];
       if (!canDeleteOwnedRecord(user, target, target.createdBy || '')) return json(res, 403, { message: '仅支持删除自己创建的资产' });
       const aiTargetRefs = (db.aiInspectionTargets || []).filter(item => item.assetId === assetId);
-      const maintenanceRefs = (db.maintenanceRecords || []).filter(item => item.assetId === assetId);
-      const sparePartRefs = (db.sparePartRecords || []).filter(item => item.assetId === assetId);
+      const sparePartMoveRefs = (db.sparePartMovements || []).filter(item => item.assetId === assetId);
+      const changeRecordRefs = (db.changeRecords || []).filter(item => item.assetId === assetId);
       const warnings = [];
       if (aiTargetRefs.length) warnings.push(`有 ${aiTargetRefs.length} 个巡检对象引用了该资产`);
-      if (maintenanceRefs.length) warnings.push(`有 ${maintenanceRefs.length} 条维保记录引用了该资产`);
-      if (sparePartRefs.length) warnings.push(`有 ${sparePartRefs.length} 条备件记录引用了该资产`);
+      if (sparePartMoveRefs.length) warnings.push(`有 ${sparePartMoveRefs.length} 条备件出入库记录引用了该资产`);
+      if (changeRecordRefs.length) warnings.push(`有 ${changeRecordRefs.length} 条变更记录引用了该资产`);
       if (warnings.length) {
         return json(res, 409, { message: '该资产存在关联数据: ' + warnings.join('; ') + '。请先删除关联数据后再删除资产。' });
       }
@@ -4865,6 +4883,82 @@ const requestHandler = async (req, res) => {
       appendAuditLog(db, user, 'delete', 'asset', assetId, `删除资产 ${target.name}`, target.projectId);
       await writeDb(db);
       return json(res, 200, { ok: true });
+    }
+
+    if (req.method === 'POST' && pathname === '/api/asset-relations') {
+      const user = requireEditor(req, res, db);
+      if (!user) return;
+      const body = await readBody(req);
+      const sourceAssetId = body.sourceAssetId || '';
+      const targetAssetId = body.targetAssetId || '';
+      if (!sourceAssetId || !targetAssetId) return json(res, 400, { message: '源资产和目标资产不能为空' });
+      if (sourceAssetId === targetAssetId) return json(res, 400, { message: '不能连接自身' });
+      if (!db.assets.find(a => a.id === sourceAssetId)) return json(res, 404, { message: '源资产不存在' });
+      if (!db.assets.find(a => a.id === targetAssetId)) return json(res, 404, { message: '目标资产不存在' });
+      if (!db.assetRelations) db.assetRelations = [];
+      const exists = db.assetRelations.find(r => r.sourceAssetId === sourceAssetId && r.targetAssetId === targetAssetId);
+      if (exists) return json(res, 409, { message: '该关系已存在' });
+      const rel = {
+        id: id('rel'),
+        sourceAssetId,
+        targetAssetId,
+        relationType: body.relationType || 'connected',
+        label: body.label || '',
+        createdAt: now()
+      };
+      db.assetRelations.push(rel);
+      await writeDb(db);
+      return json(res, 201, rel);
+    }
+
+    if (req.method === 'GET' && pathname === '/api/asset-relations') {
+      const user = requireAuth(req, res, db);
+      if (!user) return;
+      const query = Object.fromEntries(reqUrl.searchParams);
+      let list = db.assetRelations || [];
+      if (query.sourceAssetId) list = list.filter(r => r.sourceAssetId === query.sourceAssetId);
+      if (query.targetAssetId) list = list.filter(r => r.targetAssetId === query.targetAssetId);
+      return json(res, 200, list);
+    }
+
+    if (req.method === 'DELETE' && pathname.startsWith('/api/asset-relations/')) {
+      const user = requireEditor(req, res, db);
+      if (!user) return;
+      const relId = pathname.split('/')[3];
+      const idx = (db.assetRelations || []).findIndex(r => r.id === relId);
+      if (idx === -1) return json(res, 404, { message: '关系不存在' });
+      const rel = db.assetRelations[idx];
+      db.assetRelations.splice(idx, 1);
+      await writeDb(db);
+      return json(res, 200, { ok: true });
+    }
+
+    if (req.method === 'GET' && pathname === '/api/assets/topology') {
+      const user = requireAuth(req, res, db);
+      if (!user) return;
+      const query = Object.fromEntries(reqUrl.searchParams);
+      let assets = db.assets || [];
+      if (query.projectId) assets = assets.filter(a => a.projectId === query.projectId);
+      if (user.role !== 'admin') assets = assets.filter(a => a.projectId === user.projectId);
+      const assetIds = new Set(assets.map(a => a.id));
+      const relations = (db.assetRelations || []).filter(r => assetIds.has(r.sourceAssetId) && assetIds.has(r.targetAssetId));
+      return json(res, 200, { assets, relations });
+    }
+
+    if (req.method === 'GET' && pathname === '/api/assets/monitor-status') {
+      const user = requireAuth(req, res, db);
+      if (!user) return;
+      const query = Object.fromEntries(reqUrl.searchParams);
+      let assets = db.assets || [];
+      if (query.projectId) assets = assets.filter(a => a.projectId === query.projectId);
+      if (user.role !== 'admin') assets = assets.filter(a => a.projectId === user.projectId);
+      const statuses = {};
+      for (const asset of assets) {
+        if (asset.monitorEnabled) {
+          statuses[asset.id] = getMonitorStatus(asset.id) || { status: 'unknown', lastCheck: null };
+        }
+      }
+      return json(res, 200, statuses);
     }
 
     if (req.method === 'GET' && pathname === '/api/logs') {
@@ -6424,6 +6518,45 @@ const requestHandler = async (req, res) => {
       return res.end(record.content);
     }
 
+    if (req.method === 'GET' && pathname === '/api/ai-inspection/config-backup/records/diff') {
+      const user = requireAuth(req, res, db);
+      if (!user) return;
+      const id1 = reqUrl.searchParams.get('id1') || '';
+      const id2 = reqUrl.searchParams.get('id2') || '';
+      if (!id1 || !id2) return json(res, 400, { message: '请提供两个备份记录ID' });
+      const record1 = (db.configBackupRecords || []).find(item => item.id === id1);
+      const record2 = (db.configBackupRecords || []).find(item => item.id === id2);
+      if (!record1 || !record2) return json(res, 404, { message: '备份记录不存在' });
+      if (!canViewProject(user, record1.projectId) || !canViewProject(user, record2.projectId)) return json(res, 403, { message: '无权查看' });
+      const lines1 = (record1.content || '').split('\n');
+      const lines2 = (record2.content || '').split('\n');
+      const maxLen = Math.max(lines1.length, lines2.length);
+      const diffLines = [];
+      for (let i = 0; i < maxLen; i++) {
+        const l1 = i < lines1.length ? lines1[i] : null;
+        const l2 = i < lines2.length ? lines2[i] : null;
+        if (l1 === l2) {
+          diffLines.push({ type: 'same', line: i + 1, a: l1, b: l2 });
+        } else if (l1 === null) {
+          diffLines.push({ type: 'added', line: i + 1, a: null, b: l2 });
+        } else if (l2 === null) {
+          diffLines.push({ type: 'removed', line: i + 1, a: l1, b: null });
+        } else {
+          diffLines.push({ type: 'changed', line: i + 1, a: l1, b: l2 });
+        }
+      }
+      const added = diffLines.filter(d => d.type === 'added').length;
+      const removed = diffLines.filter(d => d.type === 'removed').length;
+      const changed = diffLines.filter(d => d.type === 'changed').length;
+      const hasDrift = added > 0 || removed > 0 || changed > 0;
+      return json(res, 200, {
+        added, removed, changed, hasDrift,
+        record1: { id: record1.id, filename: record1.filename, createdAt: record1.createdAt },
+        record2: { id: record2.id, filename: record2.filename, createdAt: record2.createdAt },
+        diff: diffLines
+      });
+    }
+
     if (req.method === 'DELETE' && pathname.startsWith('/api/ai-inspection/config-backup/records/')) {
       const user = requireEditor(req, res, db);
       if (!user) return;
@@ -6563,7 +6696,7 @@ const requestHandler = async (req, res) => {
       const user = requireAdmin(req, res, db);
       if (!user) return;
       const body = await readBody(req);
-      const allowedKeys = ['webIdleLogoutMinutes', 'httpsLoginEnabled', 'httpsPort', 'allowRegistration', 'loginRateLimitMaxAttempts', 'loginRateLimitWindowMinutes', 'loginRateLimitLockMinutes', 'timezoneOffset'];
+      const allowedKeys = ['webIdleLogoutMinutes', 'httpsLoginEnabled', 'httpsPort', 'allowRegistration', 'httpLoginDisabled', 'loginRateLimitMaxAttempts', 'loginRateLimitWindowMinutes', 'loginRateLimitLockMinutes', 'timezoneOffset'];
       const safeBody = {};
       for (const key of allowedKeys) {
         if (body[key] !== undefined) safeBody[key] = body[key];
@@ -6630,99 +6763,6 @@ const requestHandler = async (req, res) => {
       return json(res, 200, { message: 'HTTPS 证书上传成功', systemConfig: db.systemConfig });
     }
 
-    if (req.method === 'POST' && pathname === '/api/system/upgrade') {
-      const user = requireAdmin(req, res, db);
-      if (!user) return;
-      const contentType = req.headers['content-type'] || '';
-      if (!contentType.includes('multipart/form-data')) {
-        return json(res, 400, { message: '请上传升级包文件' });
-      }
-      const boundary = contentType.split('boundary=')[1];
-      if (!boundary) return json(res, 400, { message: '无效的上传格式' });
-      const rawBody = await new Promise((resolve, reject) => {
-        const chunks = [];
-        req.on('data', c => { chunks.push(c); if (Buffer.concat(chunks).length > 50 * 1024 * 1024) reject(new Error('升级包不能超过 50MB')); });
-        req.on('end', () => resolve(Buffer.concat(chunks)));
-        req.on('error', reject);
-      });
-      const parts = parseMultipart(rawBody, boundary);
-      const filePart = parts.find(p => p.filename);
-      if (!filePart || !filePart.filename) return json(res, 400, { message: '未找到升级包文件' });
-      if (!filePart.filename.toLowerCase().endsWith('.zip')) return json(res, 400, { message: '升级包必须是 .zip 文件' });
-      const extractDir = path.join(dataDir, 'upgrade_extracted');
-      try {
-        fs.rmSync(extractDir, { recursive: true, force: true });
-        fs.mkdirSync(extractDir, { recursive: true });
-      } catch (e) { }
-      try {
-        extractZip(filePart.data, extractDir);
-      } catch (e) {
-        try { fs.rmSync(extractDir, { recursive: true, force: true }); } catch (_) { }
-        return json(res, 400, { message: '升级包损坏或格式无效：' + e.message });
-      }
-      const manifestPath = path.join(extractDir, 'manifest.json');
-      if (!fs.existsSync(manifestPath)) return json(res, 400, { message: '升级包缺少 manifest.json' });
-      let manifest;
-      try {
-        manifest = JSON.parse(fs.readFileSync(manifestPath, 'utf8'));
-      } catch (e) {
-        return json(res, 400, { message: 'manifest.json 格式无效' });
-      }
-      try {
-        ensureUpgradePackageVersion(manifest);
-      } catch (error) {
-        return json(res, 400, { message: error.message });
-      }
-      if (!verifyUpgradeManifestSignature(manifest)) {
-        return json(res, 400, { message: '升级包签名校验失败' });
-      }
-      let upgradeFiles;
-      try {
-        upgradeFiles = sanitizeManifestFiles(manifest.files);
-      } catch (error) {
-        return json(res, 400, { message: error.message });
-      }
-      const manifestHashes = normalizeManifestHashes(manifest.sha256 || manifest.hashes);
-      if (!upgradeFiles.length) return json(res, 400, { message: 'manifest.json 未声明任何升级文件' });
-      const missingHashFiles = upgradeFiles.filter(file => !manifestHashes[file]);
-      if (missingHashFiles.length) return json(res, 400, { message: 'manifest.json 缺少文件 SHA256：' + missingHashFiles.join(', ') });
-      let missing;
-      try {
-        missing = validateManifestFiles(root, extractDir, upgradeFiles);
-      } catch (error) {
-        return json(res, 400, { message: `升级包路径非法：${error.message}` });
-      }
-      if (missing.length) return json(res, 400, { message: '升级包缺少声明文件：' + missing.join(', ') });
-      const hashMismatches = verifyManifestFileHashes(extractDir, manifestHashes);
-      if (hashMismatches.length) {
-        return json(res, 400, { message: '升级包 SHA256 校验失败：' + hashMismatches.map(item => item.file).join(', ') });
-      }
-      const backupFilename = `backup-${now().replace(/[:.]/g, '-')}.json`;
-      fs.writeFileSync(path.join(backupDir, backupFilename), JSON.stringify(serializeDbSnapshot(db), null, 2));
-      appendAuditLog(db, user, 'upgrade', 'system', '', `离线升级至 ${manifest.version}`);
-      createNotification(db, user.projectId || '', '系统升级完成', `系统已升级至 ${manifest.version}，已通过 SHA256 校验`, 'info', 'system-upgrade');
-      await writeDb(db);
-      try {
-        writeUpgradeFiles(extractDir, upgradeFiles);
-      } catch (error) {
-        return json(res, 400, { message: `升级文件写入失败：${error.message}` });
-      }
-      let verifiedFiles;
-      try {
-        verifiedFiles = summarizeUpgradeVerification(root, upgradeFiles);
-      } catch (error) {
-        return json(res, 500, { message: error.message });
-      }
-      try { fs.rmSync(extractDir, { recursive: true, force: true }); } catch (_) { }
-      return json(res, 200, {
-        ok: true,
-        version: manifest.version,
-        filesUpdated: verifiedFiles.length,
-        verifiedFiles: verifiedFiles.slice(0, 20),
-        message: `升级完成，已更新至 ${manifest.version}。建议重启服务使升级完全生效。升级前备份：${backupFilename}`
-      });
-    }
-
     if (req.method === 'POST' && pathname === '/api/system/import') {
       const user = requireAdmin(req, res, db);
       if (!user) return;
@@ -6745,6 +6785,7 @@ const requestHandler = async (req, res) => {
       const sessionToken = cookies.sessionToken || '';
       const currentSession = (db.sessions || []).find(item => item.token === sessionToken) || null;
       const nextDb = buildImportedDbPreservingCurrentSession(body, user, sessionToken, currentSession);
+      nextDb.systemConfig = db.systemConfig ? { ...db.systemConfig } : normalizeSystemConfig({});
       const backupFilename = `backup-before-import-${now().replace(/[:.]/g, '-')}.json`;
       fs.writeFileSync(path.join(backupDir, backupFilename), JSON.stringify(serializeDbSnapshot(db), null, 2));
       appendAuditLog(nextDb, user, 'import', 'system', '', `导入系统数据，导入前备份 ${backupFilename}`);
@@ -6780,10 +6821,15 @@ const requestHandler = async (req, res) => {
       fs.writeFileSync(path.join(backupDir, backupFilename), JSON.stringify(serializeDbSnapshot(db), null, 2));
       const preservedHttpsConfig = normalizeSystemConfig(db.systemConfig || {});
       const nextDb = buildResetDbForNewEnvironment(user, sessionToken, currentSession);
-      nextDb.systemConfig = normalizeSystemConfig({ ...nextDb.systemConfig, httpsLoginEnabled: preservedHttpsConfig.httpsLoginEnabled, httpsPort: preservedHttpsConfig.httpsPort, httpsCertFilename: preservedHttpsConfig.httpsCertFilename, httpsKeyFilename: preservedHttpsConfig.httpsKeyFilename, httpsCertUploadedAt: preservedHttpsConfig.httpsCertUploadedAt, httpsKeyUploadedAt: preservedHttpsConfig.httpsKeyUploadedAt, httpsCertSubject: preservedHttpsConfig.httpsCertSubject, httpsCertIssuer: preservedHttpsConfig.httpsCertIssuer, httpsCertValidFrom: preservedHttpsConfig.httpsCertValidFrom, httpsCertValidTo: preservedHttpsConfig.httpsCertValidTo, httpsCertFingerprint256: preservedHttpsConfig.httpsCertFingerprint256, loginRateLimitMaxAttempts: preservedHttpsConfig.loginRateLimitMaxAttempts, loginRateLimitWindowMinutes: preservedHttpsConfig.loginRateLimitWindowMinutes, loginRateLimitLockMinutes: preservedHttpsConfig.loginRateLimitLockMinutes });
+      nextDb.systemConfig = normalizeSystemConfig({ ...nextDb.systemConfig, httpsLoginEnabled: preservedHttpsConfig.httpsLoginEnabled, httpLoginDisabled: preservedHttpsConfig.httpLoginDisabled, httpsPort: preservedHttpsConfig.httpsPort, httpsCertFilename: preservedHttpsConfig.httpsCertFilename, httpsKeyFilename: preservedHttpsConfig.httpsKeyFilename, httpsCertUploadedAt: preservedHttpsConfig.httpsCertUploadedAt, httpsKeyUploadedAt: preservedHttpsConfig.httpsKeyUploadedAt, httpsCertSubject: preservedHttpsConfig.httpsCertSubject, httpsCertIssuer: preservedHttpsConfig.httpsCertIssuer, httpsCertValidFrom: preservedHttpsConfig.httpsCertValidFrom, httpsCertValidTo: preservedHttpsConfig.httpsCertValidTo, httpsCertFingerprint256: preservedHttpsConfig.httpsCertFingerprint256, loginRateLimitMaxAttempts: preservedHttpsConfig.loginRateLimitMaxAttempts, loginRateLimitWindowMinutes: preservedHttpsConfig.loginRateLimitWindowMinutes, loginRateLimitLockMinutes: preservedHttpsConfig.loginRateLimitLockMinutes, allowRegistration: preservedHttpsConfig.allowRegistration, webIdleLogoutMinutes: preservedHttpsConfig.webIdleLogoutMinutes, timezoneOffset: preservedHttpsConfig.timezoneOffset });
       await writeDb(nextDb);
-      await applyHttpsServerConfig(nextDb.systemConfig || {});
-      return json(res, 200, { message: '数据库已初始化，仅保留当前管理员账号', backupFilename });
+      let httpsMsg = '';
+      try {
+        await applyHttpsServerConfig(nextDb.systemConfig || {});
+      } catch (e) {
+        httpsMsg = `，HTTPS 配置应用失败：${e.message}`;
+      }
+      return json(res, 200, { message: `数据库已初始化，仅保留当前管理员账号${httpsMsg}`, backupFilename });
     }
 
     if (req.method === 'GET' && pathname === '/api/system/export') {
@@ -6970,6 +7016,174 @@ const requestHandler = async (req, res) => {
       return res.end(content);
     }
 
+    if (req.method === 'POST' && pathname === '/api/system/upgrade') {
+      const user = requireAdmin(req, res, db);
+      if (!user) return;
+      const contentType = req.headers['content-type'] || '';
+      if (!contentType.includes('multipart/form-data')) {
+        return json(res, 400, { message: '请上传升级包文件（tar.gz 格式）' });
+      }
+      const boundary = contentType.split('boundary=')[1];
+      if (!boundary) return json(res, 400, { message: '无效的上传格式' });
+      const rawBody = await new Promise((resolve, reject) => {
+        const chunks = [];
+        const maxBytes = 100 * 1024 * 1024;
+        let totalLength = 0;
+        req.on('data', chunk => {
+          totalLength += chunk.length;
+          if (totalLength > maxBytes) {
+            reject(new Error('升级包不能超过 100MB'));
+            return;
+          }
+          chunks.push(chunk);
+        });
+        req.on('end', () => resolve(Buffer.concat(chunks)));
+        req.on('error', reject);
+      });
+      const parts = parseMultipart(rawBody, boundary);
+      const pkgPart = parts.find(part => part.name === 'package' && part.filename);
+      if (!pkgPart) return json(res, 400, { message: '请上传升级包文件' });
+
+      const upgradesDir = path.join(dataDir, 'upgrades');
+      const pendingDir = path.join(upgradesDir, 'pending');
+      fs.mkdirSync(pendingDir, { recursive: true });
+
+      function cleanUpgradeDir(dir) {
+        try { fs.rmSync(dir, { recursive: true, force: true }); } catch (_) {}
+      }
+
+      const tempArchive = path.join(upgradesDir, 'temp-upgrade.tar.gz');
+      fs.writeFileSync(tempArchive, pkgPart.data);
+
+      try {
+        const fileList = execSync(`tar -tzf "${tempArchive}"`, { timeout: 10000, encoding: 'utf8' }).trim().split('\n').filter(Boolean);
+        for (const entry of fileList) {
+          const normalized = entry.replace(/^\.\//, '').replace(/\/+$/, '');
+          if (normalized.startsWith('/') || normalized.includes('..')) {
+            try { fs.unlinkSync(tempArchive); } catch (_) {}
+            return json(res, 400, { message: `升级包包含非法路径：${entry}` });
+          }
+        }
+        execSync(`tar -xzf "${tempArchive}" -C "${pendingDir}"`, { timeout: 30000 });
+      } catch (error) {
+        try { fs.unlinkSync(tempArchive); } catch (_) {}
+        cleanUpgradeDir(pendingDir);
+        return json(res, 400, { message: `升级包解压失败：${error.message}` });
+      } finally {
+        try { fs.unlinkSync(tempArchive); } catch (_) {}
+      }
+
+      {
+        const scanForSymlinks = (dir) => {
+          const symlinks = [];
+          try {
+            for (const entry of fs.readdirSync(dir, { withFileTypes: true })) {
+              const abs = path.join(dir, entry.name);
+              if (entry.isSymbolicLink()) {
+                symlinks.push(abs);
+              } else if (entry.isDirectory()) {
+                symlinks.push(...scanForSymlinks(abs));
+              }
+            }
+          } catch (_) {}
+          return symlinks;
+        };
+        const symlinks = scanForSymlinks(pendingDir);
+        if (symlinks.length > 0) {
+          cleanUpgradeDir(pendingDir);
+          return json(res, 400, { message: '升级包包含符号链接，拒绝解压' });
+        }
+      }
+
+      if (!fs.existsSync(path.join(pendingDir, 'server.js')) ||
+          !fs.existsSync(path.join(pendingDir, 'package.json')) ||
+          !fs.statSync(path.join(pendingDir, 'public')).isDirectory()) {
+        cleanUpgradeDir(pendingDir);
+        return json(res, 400, { message: '升级包缺少必要文件（server.js / package.json / public/）' });
+      }
+
+      let upgradeVersion = 'unknown';
+      try {
+        const pkgJson = JSON.parse(fs.readFileSync(path.join(pendingDir, 'package.json'), 'utf8'));
+        upgradeVersion = pkgJson.version || 'unknown';
+      } catch (_) {}
+
+      fs.writeFileSync(path.join(upgradesDir, 'UPGRADE_READY'), JSON.stringify({
+        version: upgradeVersion,
+        timestamp: now(),
+        requestedBy: user.username
+      }));
+
+      appendAuditLog(db, user, 'upgrade', 'system', '', `上传升级包 v${upgradeVersion}，系统即将自动重启完成升级`);
+      await writeDb(db);
+
+      const applyAndRestart = () => {
+        if (!isProduction) {
+          console.error('[upgrade] 非生产环境，跳过自动重启。请手动重启服务以应用升级。');
+          return;
+        }
+        try {
+          const appDir = path.resolve(__dirname);
+          const pendingDir = path.join(dataDir, 'upgrades', 'pending');
+          const readyFlag = path.join(dataDir, 'upgrades', 'UPGRADE_READY');
+          const entries = fs.readdirSync(pendingDir);
+          for (const entry of entries) {
+            const src = path.join(pendingDir, entry);
+            const dest = path.join(appDir, entry);
+            try {
+              if (fs.statSync(src).isDirectory()) {
+                if (entry === 'public' || entry === 'scripts') {
+                  fs.rmSync(dest, { recursive: true, force: true });
+                  fs.cpSync(src, dest, { recursive: true });
+                }
+              } else {
+                fs.copyFileSync(src, dest);
+              }
+              console.error(`[upgrade] Applied ${entry}`);
+            } catch (e) {
+              console.error(`[upgrade] Failed to apply ${entry}: ${e.message}`);
+            }
+          }
+          fs.rmSync(pendingDir, { recursive: true, force: true });
+          try { fs.unlinkSync(readyFlag); } catch (_) {}
+          console.error(`[upgrade] v${upgradeVersion} 升级完成，即将重启...`);
+        } catch (e) {
+          console.error(`[upgrade] 升级失败: ${e.message}`);
+        }
+        process.exit(0);
+      };
+
+      const body = JSON.stringify({
+        message: `升级包 v${upgradeVersion} 已接收，系统将自动应用升级并重启`,
+        version: upgradeVersion
+      });
+      res.writeHead(200, { 'Content-Type': 'application/json' });
+      res.end(body);
+      setTimeout(applyAndRestart, 800);
+      return;
+    }
+
+    if (req.method === 'GET' && pathname === '/api/system/upgrade/status') {
+      const user = requireAdmin(req, res, db);
+      if (!user) return;
+      const upgradesDir = path.join(dataDir, 'upgrades');
+      const readyFlag = path.join(upgradesDir, 'UPGRADE_READY');
+      const pendingDir = path.join(upgradesDir, 'pending');
+      const pendingVersion = fs.existsSync(path.join(pendingDir, 'package.json'))
+        ? JSON.parse(fs.readFileSync(path.join(pendingDir, 'package.json'), 'utf8')).version || 'unknown'
+        : null;
+      const ready = fs.existsSync(readyFlag)
+        ? JSON.parse(fs.readFileSync(readyFlag, 'utf8'))
+        : null;
+      const currentVersion = packageInfo.version;
+      return json(res, 200, {
+        currentVersion,
+        pendingVersion,
+        ready,
+        hasPending: fs.existsSync(pendingDir) && fs.readdirSync(pendingDir).length > 0
+      });
+    }
+
     return serveStatic(req, res, pathname);
   } catch (error) {
     console.error('Request error:', error.message);
@@ -7031,32 +7245,45 @@ wss.on('connection', (ws) => {
 });
 
 const wsHeartbeatTimer = setInterval(() => {
+  const stale = [];
   for (const ws of wsClients) {
     if (ws.isAlive === false) {
       ws.terminate();
-      wsClients.delete(ws);
+      stale.push(ws);
       continue;
     }
     ws.isAlive = false;
     try {
       if (ws.readyState === 1) ws.ping();
     } catch (_) {
-      wsClients.delete(ws);
+      stale.push(ws);
     }
   }
+  for (const ws of stale) wsClients.delete(ws);
 }, webSocketHeartbeatIntervalMs);
 
 if (wsHeartbeatTimer.unref) wsHeartbeatTimer.unref();
 
 function broadcastChange(topic, payload = {}) {
   const message = JSON.stringify({ type: 'data-changed', topic, payload, timestamp: Date.now() });
+  sendToAllWs(message);
+}
+
+function broadcastToProject(projectId, payload = {}) {
+  const message = JSON.stringify({ type: 'monitor_alert', projectId, ...payload, timestamp: Date.now() });
+  sendToAllWs(message);
+}
+
+function sendToAllWs(message) {
+  const stale = [];
   for (const ws of wsClients) {
     try {
       if (ws.readyState === 1) ws.send(message);
     } catch (_) {
-      wsClients.delete(ws);
+      stale.push(ws);
     }
   }
+  for (const ws of stale) wsClients.delete(ws);
 }
 
 const port = Number(process.env.PORT || 3000);
@@ -7093,6 +7320,115 @@ initializeRuntimeServices().catch(error => {
 });
 runAiInspectionScheduler();
 const schedulerIntervalId = setInterval(runAiInspectionScheduler, maintenanceIntervalMs);
+
+const monitorRuntimeState = { statuses: {} };
+
+function getMonitorStatus(assetId) {
+  return monitorRuntimeState.statuses[assetId] || null;
+}
+
+function setMonitorStatus(assetId, status) {
+  const prev = monitorRuntimeState.statuses[assetId];
+  const entry = { status, lastCheck: Date.now() };
+  monitorRuntimeState.statuses[assetId] = entry;
+  return { prev, current: entry, changed: !prev || prev.status !== status };
+}
+
+function checkAssetPing(host, timeoutMs = 3000) {
+  return new Promise(resolve => {
+    try {
+      const { exec } = require('child_process');
+      const child = exec(`ping -c 1 -W 2 ${host.replace(/[^a-zA-Z0-9.\-]/g, '')}`, { timeout: timeoutMs }, (err) => {
+        resolve(err ? 'offline' : 'online');
+      });
+      setTimeout(() => { child.kill(); resolve('offline'); }, timeoutMs);
+    } catch (_) {
+      resolve('offline');
+    }
+  });
+}
+
+function checkAssetTcp(host, port, timeoutMs = 3000) {
+  return new Promise(resolve => {
+    try {
+      const net = require('net');
+      const socket = new net.Socket();
+      socket.setTimeout(timeoutMs);
+      socket.on('connect', () => { socket.destroy(); resolve('online'); });
+      socket.on('error', () => { socket.destroy(); resolve('offline'); });
+      socket.on('timeout', () => { socket.destroy(); resolve('offline'); });
+      socket.connect(Number(port), host);
+    } catch (_) {
+      resolve('offline');
+    }
+  });
+}
+
+async function checkAssetMonitor(asset) {
+  if (!asset.monitorEnabled) return;
+  const host = asset.monitorHost || asset.installationLocation || '';
+  if (!host) {
+    setMonitorStatus(asset.id, 'unknown');
+    return;
+  }
+  let status = 'unknown';
+  try {
+    if (asset.monitorType === 'tcp') {
+      const port = Number(asset.monitorPort) || 80;
+      status = await checkAssetTcp(host, port);
+    } else {
+      status = await checkAssetPing(host);
+    }
+  } catch (_) {
+    status = 'unknown';
+  }
+  const result = setMonitorStatus(asset.id, status);
+  if (result.changed && result.prev) {
+    await notifyMonitorChange(asset, result.prev.status, status);
+  }
+}
+
+async function notifyMonitorChange(asset, prevStatus, newStatus) {
+  try {
+    const db = await readDb();
+    const title = newStatus === 'offline'
+      ? `设备离线告警: ${asset.name}`
+      : `设备恢复在线: ${asset.name}`;
+    const message = newStatus === 'offline'
+      ? `资产 "${asset.name}" (${asset.monitorHost || '未配置地址'}) 监测到离线`
+      : `资产 "${asset.name}" (${asset.monitorHost || '未配置地址'}) 已恢复在线`;
+    if (!db.notifications) db.notifications = [];
+    db.notifications.push({
+      id: id('notif'),
+      type: 'monitor_alert',
+      title,
+      message,
+      level: newStatus === 'offline' ? 'danger' : 'info',
+      targetType: 'asset',
+      targetId: asset.id,
+      read: false,
+      createdAt: now()
+    });
+    await writeDb(db);
+    broadcastToProject(asset.projectId, { type: 'monitor_alert', assetId: asset.id, assetName: asset.name, monitorStatus: newStatus, title, message });
+  } catch (_) {}
+}
+
+async function runAssetMonitorScheduler() {
+  try {
+    const db = await readDb();
+    const monitoredAssets = (db.assets || []).filter(a => a.monitorEnabled && a.monitorHost);
+    for (const asset of monitoredAssets) {
+      await checkAssetMonitor(asset);
+    }
+  } catch (error) {
+    console.warn('Asset monitor scheduler error:', error.message);
+  }
+}
+
+const monitorIntervalMs = 60000;
+setInterval(runAssetMonitorScheduler, monitorIntervalMs);
+setTimeout(() => runAssetMonitorScheduler(), 5000);
 
 function runAutoBackup() {
   try {
@@ -7153,5 +7489,4 @@ process.on('uncaughtException', (err) => {
 });
 process.on('unhandledRejection', (reason) => {
   console.error('Unhandled rejection:', reason);
-  gracefulShutdown('unhandledRejection');
 });

@@ -222,6 +222,7 @@
     .pagination-bar button { font-size: 12px; padding: 6px 12px; }
     td .toolbar button { font-size: 13px; padding: 5px 10px; white-space: nowrap; }
     td .toolbar { font-size: 13px; white-space: nowrap; }
+    .workbench-item:hover { box-shadow: 0 2px 8px rgba(0,0,0,0.1); }
     .toolbar {
       display: flex;
       gap: 10px;
@@ -453,27 +454,44 @@
     }
     .login-card {
       width: min(440px, 100%);
-      background: #fff;
+      background: rgba(255,255,255,0.95);
+      backdrop-filter: blur(10px);
       border-radius: 20px;
-      box-shadow: 0 4px 24px rgba(15,23,42,.08), 0 1px 2px rgba(15,23,42,.06);
+      border: 1px solid rgba(148,163,184,0.15);
+      box-shadow: 0 8px 32px rgba(15,23,42,.1), 0 2px 8px rgba(15,23,42,.06), inset 0 1px 0 rgba(255,255,255,.6);
       padding: 36px 32px 32px;
     }
     .login-card .logo-wrap {
       display: flex;
       align-items: center;
-      gap: 14px;
+      gap: 16px;
       margin-bottom: 8px;
+      perspective: 600px;
     }
     .login-card svg.logo {
-      width: 48px;
-      height: 48px;
+      width: 56px;
+      height: 56px;
       flex-shrink: 0;
+      filter: drop-shadow(0 8px 16px rgba(37,99,235,0.35));
+      transform-style: preserve-3d;
+      animation: logoFloat 3s ease-in-out infinite;
+    }
+    @keyframes logoFloat {
+      0%, 100% { transform: translateY(0) rotateY(0deg); }
+      50% { transform: translateY(-4px) rotateY(6deg); }
     }
     .login-card h1 {
       margin: 0;
-      font-size: 22px;
+      font-size: 24px;
       line-height: 1.3;
-      font-weight: 700;
+      font-weight: 800;
+      letter-spacing: 1px;
+      background: linear-gradient(135deg, #1e40af 0%, #3b82f6 35%, #60a5fa 65%, #1d4ed8 100%);
+      -webkit-background-clip: text;
+      -webkit-text-fill-color: transparent;
+      background-clip: text;
+      text-shadow: none;
+      filter: drop-shadow(0 2px 4px rgba(37,99,235,0.3));
     }
     .badge {
       display: inline-block;
@@ -788,6 +806,7 @@
       .section-tabs button { font-size: 13px; padding: 4px 8px; }
     }
   </style>
+  <script src="https://cdn.sheetjs.com/xlsx-0.20.3/package/dist/xlsx.full.min.js"></script>
 </head>
 <body>
   <section id="loginView" class="login-wrap">
@@ -795,35 +814,52 @@
       <div class="logo-wrap">
         <svg class="logo" viewBox="0 0 200 200" xmlns="http://www.w3.org/2000/svg">
           <defs>
-            <linearGradient id="login-rack-grad" x1="0%" y1="0%" x2="0%" y2="100%">
-              <stop offset="0%" style="stop-color:#60a5fa"/>
-              <stop offset="50%" style="stop-color:#3b82f6"/>
-              <stop offset="100%" style="stop-color:#2563eb"/>
-            </linearGradient>
-            <linearGradient id="login-shield-grad" x1="0%" y1="0%" x2="0%" y2="100%">
-              <stop offset="0%" style="stop-color:#60a5fa"/>
-              <stop offset="50%" style="stop-color:#3b82f6"/>
+            <linearGradient id="login-rack-grad" x1="0%" y1="0%" x2="100%" y2="100%">
+              <stop offset="0%" style="stop-color:#93c5fd"/>
+              <stop offset="25%" style="stop-color:#60a5fa"/>
+              <stop offset="60%" style="stop-color:#3b82f6"/>
               <stop offset="100%" style="stop-color:#1d4ed8"/>
             </linearGradient>
-            <filter id="login-shadow">
-              <feDropShadow dx="0" dy="2" stdDeviation="3" flood-color="#000" flood-opacity="0.25"/>
+            <linearGradient id="login-shield-grad" x1="0%" y1="0%" x2="0%" y2="100%">
+              <stop offset="0%" style="stop-color:#93c5fd"/>
+              <stop offset="40%" style="stop-color:#3b82f6"/>
+              <stop offset="100%" style="stop-color:#1e3a8a"/>
+            </linearGradient>
+            <filter id="login-shadow" x="-20%" y="-10%" width="140%" height="130%">
+              <feDropShadow dx="0" dy="6" stdDeviation="6" flood-color="#1e3a8a" flood-opacity="0.35"/>
             </filter>
-            <linearGradient id="login-shield-fill" x1="0%" y1="0%" x2="0%" y2="100%">
+            <filter id="login-inner-glow">
+              <feGaussianBlur in="SourceAlpha" stdDeviation="3" result="blur"/>
+              <feOffset dx="0" dy="0"/>
+              <feComposite in2="SourceAlpha" operator="arithmetic" k2="-1" k3="1" result="shadowDiff"/>
+              <feFlood flood-color="#60a5fa" flood-opacity="0.4"/>
+              <feComposite in2="shadowDiff" operator="in"/>
+              <feComposite in2="SourceGraphic" operator="over"/>
+            </filter>
+            <linearGradient id="login-shield-fill" x1="0%" y1="0%" x2="100%" y2="100%">
               <stop offset="0%" style="stop-color:#eff6ff"/>
+              <stop offset="50%" style="stop-color:#bfdbfe"/>
               <stop offset="100%" style="stop-color:#93c5fd"/>
             </linearGradient>
+            <linearGradient id="login-rack-top" x1="0%" y1="0%" x2="100%" y2="100%">
+              <stop offset="0%" style="stop-color:#bfdbfe"/>
+              <stop offset="100%" style="stop-color:#3b82f6"/>
+            </linearGradient>
           </defs>
-          <path d="M30 90 L30 140 Q30 165 55 175 L100 190 L145 175 Q170 165 170 140 L170 90" stroke="url(#login-shield-grad)" stroke-width="9" stroke-linecap="round" fill="url(#login-shield-fill)"/>
+          <path d="M30 90 L30 140 Q30 165 55 175 L100 190 L145 175 Q170 165 170 140 L170 90" stroke="url(#login-shield-grad)" stroke-width="9" stroke-linecap="round" fill="url(#login-shield-fill)" filter="url(#login-shadow)"/>
+          <rect x="38" y="48" width="124" height="104" rx="14" fill="#1e3a8a" opacity="0.3"/>
           <rect x="40" y="50" width="120" height="100" rx="12" fill="url(#login-rack-grad)"/>
-          <rect x="44" y="52" width="112" height="5" rx="2.5" fill="#fff" opacity="0.22"/>
-          <rect x="55" y="60" width="90" height="8" rx="4" fill="#fff" opacity=".85"/>
-          <circle cx="70" cy="80" r="5" fill="#22c55e"/>
-          <circle cx="70" cy="100" r="5" fill="#22c55e"/>
-          <circle cx="70" cy="120" r="5" fill="#eab308"/>
-          <rect x="85" y="76" width="50" height="6" rx="3" fill="#fff" opacity=".45"/>
-          <rect x="85" y="96" width="50" height="6" rx="3" fill="#fff" opacity=".45"/>
-          <rect x="85" y="116" width="50" height="6" rx="3" fill="#fff" opacity=".45"/>
-          <path d="M34 93 L34 139 Q34 159 55 169 L100 182 L145 169 Q166 159 166 139 L166 93" fill="#93c5fd" opacity="0.15"/>
+          <rect x="40" y="50" width="120" height="14" rx="7" fill="url(#login-rack-top)" opacity="0.9"/>
+          <rect x="44" y="54" width="112" height="5" rx="2.5" fill="#fff" opacity="0.3"/>
+          <rect x="55" y="68" width="90" height="10" rx="5" fill="#fff" opacity=".9"/>
+          <circle cx="70" cy="88" r="6" fill="#22c55e"/>
+          <circle cx="70" cy="110" r="6" fill="#22c55e"/>
+          <circle cx="70" cy="132" r="6" fill="#eab308"/>
+          <rect x="86" y="83" width="55" height="8" rx="4" fill="#fff" opacity=".5"/>
+          <rect x="86" y="105" width="55" height="8" rx="4" fill="#fff" opacity=".5"/>
+          <rect x="86" y="127" width="55" height="8" rx="4" fill="#fff" opacity=".5"/>
+          <path d="M35 94 L35 140 Q35 160 55 170 L100 183 L145 170 Q165 160 165 140 L165 94" fill="#1e3a8a" opacity="0.06"/>
+          <path d="M100 55 L100 142" stroke="#fff" stroke-width="2" opacity="0.15" stroke-dasharray="4 4"/>
         </svg>
         <div>
           <h1>驻场运维管理系统</h1>
@@ -876,8 +912,27 @@
 
       <p style="text-align:center; font-size:12px; color:var(--sub); margin:20px 0 0 0;">&copy; 2026 Onsite-Ops-System. All rights reserved.</p>
       <div id="loginMessage"></div>
-    </div>
-  </section>
+        </div>
+        <div class="subtab-panel hidden" data-section="assets" data-subtab="topology">
+          <div class="card" style="position:relative;">
+            <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:12px;">
+              <h3 style="margin:0;">资产拓扑图</h3>
+              <div>
+                <button class="secondary" id="topoAddRelBtn" type="button" style="font-size:13px;padding:6px 12px;">添加连接</button>
+                <button class="secondary" id="topoRefreshBtn" type="button" style="font-size:13px;padding:6px 12px;margin-left:4px;">刷新</button>
+                <span id="topoLegend" style="margin-left:8px;font-size:12px;color:#666;">
+                  <span style="color:#16a34a;">●</span> 在线 <span style="color:#dc2626;margin-left:6px;">●</span> 离线 <span style="color:#9ca3af;margin-left:6px;">●</span> 未监控
+                </span>
+              </div>
+            </div>
+            <div id="topologyCanvas" style="position:relative;width:100%;min-height:500px;border:1px dashed #d1d5db;border-radius:8px;overflow:hidden;background:#f9fafb;">
+              <div id="topologyNodes" style="position:absolute;top:0;left:0;right:0;bottom:0;"></div>
+              <svg id="topologySvg" style="position:absolute;top:0;left:0;width:100%;height:100%;pointer-events:none;"></svg>
+            </div>
+            <p style="margin-top:8px;font-size:12px;color:#9ca3af;">拖拽节点调整布局 · 点击已有连接线可删除关系</p>
+          </div>
+        </div>
+      </section>
 
   <div id="forgotPwdModal" class="modal-overlay hidden">
     <div class="modal-box">
@@ -1042,12 +1097,59 @@
         <label>序列号<input id="edAssetSerialNumber" required placeholder="请输入序列号" /></label>
         <label>状态<input id="edAssetStatus" placeholder="使用中/停用/维护中" /></label>
         <label>维保到期日<input id="edAssetMaintainExpiryDate" type="date" required /></label>
+        <label class="full">安装位置<input id="edAssetInstallationLocation" placeholder="例：A区机房-03号机柜-2U" /></label>
         <label class="full">备注<textarea id="edAssetNotes"></textarea></label>
+        <label class="full" style="border-top:1px solid #e5e7eb;padding-top:12px;margin-top:4px;font-weight:600;color:#374151;font-size:13px;">设备监控设置</label>
+        <label><span>启用监控</span><input type="checkbox" id="edAssetMonitorEnabled" style="width:auto;height:auto;margin-right:4px;" /></label>
+        <label>监控方式
+          <select id="edAssetMonitorType">
+            <option value="ping">Ping (ICMP)</option>
+            <option value="tcp">TCP 端口检测</option>
+          </select>
+        </label>
+        <label>监控地址/IP<input id="edAssetMonitorHost" placeholder="例：192.168.1.1" /></label>
+        <label id="edAssetMonitorPortLabel" style="display:none;">端口号<input id="edAssetMonitorPort" type="number" placeholder="例：80" /></label>
       </div>
       <div id="assetEditMessage" style="margin:8px 0;font-size:13px;"></div>
       <div class="btn-row">
         <button class="secondary" type="button" onclick="closeModal('assetEditModal')">取消</button>
         <button class="primary" id="assetEditSaveBtn" type="button">保存修改</button>
+      </div>
+    </div>
+  </div>
+
+  <div id="assetRelationModal" class="modal-overlay hidden">
+    <div class="modal-box" style="max-width:460px;">
+      <h3 style="margin-top:0;">添加资产连接关系</h3>
+      <div class="grid-form">
+        <label>源资产 <span style="color:#dc2626;">*</span>
+          <select id="relSourceAsset" required>
+            <option value="">-- 请选择 --</option>
+          </select>
+        </label>
+        <label>目标资产 <span style="color:#dc2626;">*</span>
+          <select id="relTargetAsset" required>
+            <option value="">-- 请选择 --</option>
+          </select>
+        </label>
+        <label>关系类型
+          <select id="relType">
+            <option value="connected">连接到</option>
+            <option value="depends_on">依赖于</option>
+            <option value="hosts">承载</option>
+            <option value="monitors">监控</option>
+            <option value="backup">备份</option>
+            <option value="powers">供电</option>
+          </select>
+        </label>
+        <label>标签说明
+          <input id="relLabel" placeholder="例：千兆光纤 / 主备链路" />
+        </label>
+      </div>
+      <div id="relMessage" style="margin:8px 0;font-size:13px;"></div>
+      <div class="btn-row">
+        <button class="secondary" type="button" onclick="closeModal('assetRelationModal')">取消</button>
+        <button class="primary" id="relSaveBtn" type="button">保存</button>
       </div>
     </div>
   </div>
@@ -1106,7 +1208,7 @@
         <label class="full">标题<input id="edKbTitle" required /></label>
         <label class="full">关键字<input id="edKbKeywords" placeholder="如：升级,病毒库,防火墙" required /></label>
         <label class="full">问题描述<textarea id="edKbProblem" required></textarea></label>
-        <label class="full">解决方案<textarea id="edKbSolution" required></textarea></label>
+        <label class="full">解决方案<textarea id="edKbSolution" required style="min-height:200px;"></textarea></label>
       </div>
       <div id="kbEditMessage" style="margin:8px 0;font-size:13px;"></div>
       <div class="btn-row">
@@ -1167,8 +1269,8 @@
         <label>关联项目<select id="edChangeProjectId"></select></label>
         <label>关联资产<select id="edChangeAssetId"></select></label>
         <label>风险等级<select id="edChangeRiskLevel"><option value="低">低</option><option value="中">中</option><option value="高">高</option></select></label>
-        <label>申请人<select id="edChangeCustomerId" required></select></label>
-        <label>审批人<select id="edChangeApproverId" required></select></label>
+        <label>运维审批人<select id="edChangeCustomerId" required></select></label>
+        <label>甲方客户<select id="edChangeApproverId" required></select></label>
         <label class="full">变更内容<textarea id="edChangeContent" required></textarea></label>
       </div>
       <div id="changeRecordEditMessage" style="margin:8px 0;font-size:13px;"></div>
@@ -1311,11 +1413,30 @@
   </div>
 
   <div id="confirmModal" class="modal-overlay hidden">
-    <div class="modal-box" style="max-width:360px; text-align:center;">
-      <p id="confirmMessage" style="font-size:15px; color:var(--text); margin:0 0 20px;"></p>
+    <div class="modal-box" style="max-width:400px; text-align:center;">
+      <p id="confirmMessage" style="font-size:15px; color:var(--text); margin:0 0 16px;"></p>
+      <div id="confirmInputRow" class="hidden" style="margin-bottom:16px;">
+        <p style="font-size:13px;color:var(--danger);margin:0 0 8px;">请输入 <strong style="user-select:text;" id="confirmInputWord">确认操作</strong> 以继续：</p>
+        <input id="confirmInput" type="text" style="width:100%;text-align:center;" autocomplete="off" />
+      </div>
       <div class="btn-row" style="justify-content:center;">
         <button class="secondary" id="confirmCancelBtn" type="button">取消</button>
         <button class="primary" id="confirmOkBtn" type="button">确认</button>
+      </div>
+    </div>
+  </div>
+
+  <div id="configBackupDiffModal" class="modal-overlay hidden" style="z-index:10000;">
+    <div class="modal-box" style="max-width:900px; max-height:85vh; overflow-y:auto;">
+      <h3 style="margin-top:0;">配置备份版本对比</h3>
+      <div id="configBackupDiffSummary" style="margin-bottom:12px;font-size:13px;"></div>
+      <div style="display:flex;gap:8px;margin-bottom:12px;">
+        <div style="flex:1;"><strong>版本 A：</strong><span id="diffRec1Info"></span></div>
+        <div style="flex:1;"><strong>版本 B：</strong><span id="diffRec2Info"></span></div>
+      </div>
+      <div id="configBackupDiffContent" style="font-family:monospace;font-size:12px;line-height:1.6;max-height:60vh;overflow-y:auto;border:1px solid var(--border);border-radius:6px;padding:8px;background:#fafafa;white-space:pre-wrap;word-break:break-all;"></div>
+      <div class="btn-row" style="justify-content:flex-end;margin-top:12px;">
+        <button class="secondary" onclick="closeModal('configBackupDiffModal')" type="button">关闭</button>
       </div>
     </div>
   </div>
@@ -1514,6 +1635,12 @@
               <span id="dashboardPageInfo">第 1 / 1 页</span>
               <button class="secondary" id="dashboardNextBtn" type="button">下一页</button>
             </div>
+          </div>
+        </div>
+        <div class="card" style="margin-top:16px;">
+          <h3 style="margin-top:0;">待办中心</h3>
+          <div class="grid cols-3" id="workbenchPanel">
+            <div class="muted">加载中...</div>
           </div>
         </div>
         <div class="grid cols-2" style="margin-top: 16px;">
@@ -1777,7 +1904,7 @@
               <label class="full"><span>标题</span><input name="title" required /></label>
               <label class="full"><span>关键字</span><input name="keywords" placeholder="如：升级,病毒库,防火墙" required /></label>
               <label class="full"><span>问题描述</span><textarea name="problem" required></textarea></label>
-              <label class="full"><span>解决方案</span><textarea name="solution" required></textarea></label>
+              <label class="full"><span>解决方案</span><textarea name="solution" required style="min-height:200px;"></textarea></label>
               <button class="primary full" id="kbSubmitBtn" type="submit">保存知识</button>
             </form>
             <div id="kbMessage"></div>
@@ -1818,14 +1945,14 @@
         <div class="section-tabs" data-section="assets">
           <button class="active" data-subtab="form" type="button">新增资产</button>
           <button data-subtab="list" type="button">资产列表</button>
+          <button data-subtab="topology" type="button">资产拓扑</button>
         </div>
         <div class="subtab-panel" data-section="assets" data-subtab="form">
           <div class="card">
             <h3 id="assetFormTitle" style="margin-top:0;">新增资产</h3>
             <form id="assetForm" class="grid-form">
               <input name="id" type="hidden" />
-              <label>
-                <span>关联项目 <em style="color:#dc2626;font-style:normal;">*</em></span>
+               <label><span>关联项目 <em style="color:#dc2626;font-style:normal;">*</em></span>
                 <select name="projectId" id="assetProjectId" required>
                   <option value="">请选择关联项目</option>
                 </select>
@@ -1847,14 +1974,30 @@
               <label><span>资产名称 <em style="color:#dc2626;font-style:normal;">*</em></span><input name="name" required placeholder="请输入资产名称" /></label>
               <label><span>品牌 <em style="color:#dc2626;font-style:normal;">*</em></span><input name="brand" required placeholder="请输入品牌" /></label>
               <label><span>规格型号 <em style="color:#dc2626;font-style:normal;">*</em></span><input name="model" required placeholder="请输入规格型号" /></label>
-              <label><span>责任人/部门</span><input name="owner" /></label>
-              <label><span>版本</span><input name="version" /></label>
               <label><span>序列号 <em style="color:#dc2626;font-style:normal;">*</em></span><input name="serialNumber" required placeholder="请输入序列号" /></label>
+              <label><span>版本</span><input name="version" /></label>
+              <label><span>维保到期日 <em style="color:#dc2626;font-style:normal;">*</em></span><input name="maintainExpiryDate" type="date" required /></label>
+               <label><span>安装位置</span><input name="installationLocation" placeholder="例：A区机房-03号机柜-2U" /></label>
                <label><span>状态</span><input name="status" placeholder="使用中/停用/维护中" /></label>
-               <label><span>维保到期日 <em style="color:#dc2626;font-style:normal;">*</em></span><input name="maintainExpiryDate" type="date" required /></label>
-               <label class="full"><span>备注</span><textarea name="notes"></textarea></label>
+               <label><span>责任人/部门</span><input name="owner" /></label>
+                <label class="full"><span>备注</span><textarea name="notes"></textarea></label>
+                <label class="full" style="border-top:1px solid #e5e7eb;padding-top:12px;margin-top:4px;font-weight:600;color:#374151;font-size:13px;">设备监控设置</label>
+                <label><span>启用监控</span><input type="checkbox" name="monitorEnabled" id="assetMonitorEnabled" style="width:auto;height:auto;margin-right:4px;" /></label>
+                <label><span>监控方式</span>
+                  <select name="monitorType" id="assetMonitorType">
+                    <option value="ping">Ping (ICMP)</option>
+                    <option value="tcp">TCP 端口检测</option>
+                  </select>
+                </label>
+                <label><span>监控地址/IP</span><input name="monitorHost" placeholder="例：192.168.1.1" /></label>
+                <label id="assetMonitorPortLabel" style="display:none;"><span>端口号</span><input name="monitorPort" type="number" placeholder="例：80" /></label>
 
-              <button class="primary full" id="assetSubmitBtn" type="submit">保存资产</button>
+              <div style="display:flex;gap:8px;align-items:center;margin-bottom:12px;">
+                <button class="primary" id="assetSubmitBtn" type="submit" style="font-size:13px;padding:6px 12px;">保存资产</button>
+                <button class="secondary" id="assetImportBtn" type="button" title="从Excel批量导入资产" style="font-size:13px;padding:6px 12px;">导入Excel</button>
+                <button class="secondary" id="assetTplBtn" type="button" title="下载导入模板" style="font-size:13px;padding:6px 12px;">下载模板</button>
+                <input type="file" id="assetImportFile" accept=".xlsx,.xls" style="display:none;" />
+              </div>
             </form>
             <div id="assetMessage"></div>
           </div>
@@ -1864,13 +2007,16 @@
             <h3 style="margin-top:0;">资产列表</h3>
             <div class="table-wrap">
               <table>
-                <thead><tr><th>名称</th><th>品牌</th><th>规格型号</th><th>类型</th><th>版本</th><th>序列号</th><th>状态</th><th>维保到期</th><th>项目名称 <span class="sort-arrow" data-sort-target="assetProjectSort" style="cursor:pointer;user-select:none;font-size:15px;">↑↓</span></th><th>操作</th></tr></thead>
+                <thead><tr><th style="width:30px;"><input type="checkbox" id="assetSelectAll" title="全选" /></th><th>项目名称</th><th>资产类型</th><th>资产名称</th><th>品牌</th><th>规格型号</th><th>序列号</th><th>版本</th><th>维保到期日</th><th>安装位置</th><th>状态</th><th>责任人/部门</th><th style="max-width:100px;">备注</th><th>操作</th></tr></thead>
                 <tbody id="assetTable"></tbody>
               </table>
               <div class="pagination-bar">
                 <button class="secondary" id="assetPrevBtn" type="button">上一页</button>
                 <span id="assetPageInfo">第 1 / 1 页</span>
                 <button class="secondary" id="assetNextBtn" type="button">下一页</button>
+                <button class="secondary" id="assetExportBtn" type="button">导出Excel</button>
+                <button class="secondary" id="assetBatchDeleteBtn" type="button" style="background:#fee2e2;color:#dc2626;border-color:#fecaca;">批量删除</button>
+                <a id="assetExportLink" style="display:none;"></a>
               </div>
             </div>
           </div>
@@ -1985,8 +2131,8 @@
                 <label><span>关联项目</span><select name="projectId" id="changeProjectId"></select></label>
                 <label><span>关联资产</span><select name="assetId" id="changeAssetId"></select></label>
                 <label><span>风险等级</span><select name="riskLevel"><option value="低">低</option><option value="中" selected>中</option><option value="高">高</option></select></label>
-                <label><span>申请人</span><select name="approverId" id="changeCustomerId" required></select></label>
-                <label><span>审批人</span><select name="customerId" id="changeApproverId" required></select></label>
+                <label><span>运维审批人</span><select name="approverId" id="changeCustomerId" required></select></label>
+                <label><span>甲方客户</span><select name="customerId" id="changeApproverId" required></select></label>
                 <label class="full"><span>变更内容</span><textarea name="content" required></textarea></label>
                 <button class="primary full" id="changeRecordSubmitBtn" type="submit">提交变更</button>
               </form>
@@ -1994,7 +2140,7 @@
             </div>
             <div class="card" style="margin-top: 16px;">
               <h3 style="margin-top:0;">变更记录列表</h3>
-              <div class="table-wrap"><table><thead><tr><th>标题</th><th>变更内容</th><th>风险</th><th>申请人</th><th>审批人</th><th>审批状态</th><th>关联资产</th><th>项目</th><th>操作</th></tr></thead><tbody id="changeRecordTable"></tbody></table></div>
+              <div class="table-wrap"><table><thead><tr><th>标题</th><th>变更内容</th><th>风险</th><th>运维审批人</th><th>甲方客户</th><th>审批状态</th><th>关联资产</th><th>项目</th><th>操作</th></tr></thead><tbody id="changeRecordTable"></tbody></table></div>
               <div class="pagination-bar">
                 <button class="secondary" id="changeRecordPrevBtn" type="button">上一页</button>
                 <span id="changeRecordPageInfo">第 1 / 1 页</span>
@@ -2201,7 +2347,7 @@
             <div class="pagination-bar"><button class="secondary" id="configBackupPlanPrevBtn" type="button">上一页</button><span id="configBackupPlanPageInfo">第 1 / 1 页</span><button class="secondary" id="configBackupPlanNextBtn" type="button">下一页</button></div>
           </div>
           <div class="card" style="margin-top:16px;">
-            <h3 style="margin-top:0;">备份列表</h3>
+            <h3 style="margin-top:0;">备份记录列表</h3>
             <div class="table-wrap"><table><thead><tr><th>巡检对象</th><th>关联资产</th><th>文件名</th><th>大小</th><th>状态</th><th>说明</th><th>时间</th><th>操作</th></tr></thead><tbody id="configBackupRecordTable"></tbody></table></div>
             <div class="pagination-bar"><button class="secondary" id="configBackupRecordPrevBtn" type="button">上一页</button><span id="configBackupRecordPageInfo">第 1 / 1 页</span><button class="secondary" id="configBackupRecordNextBtn" type="button">下一页</button></div>
           </div>
@@ -2339,12 +2485,12 @@
             <div class="card">
               <h3 style="margin-top:0;">软件升级</h3>
               <div class="muted">当前版本：<span id="systemCurrentVersion">-</span></div>
-              <p class="muted">上传离线升级包（.zip），系统将自动校验并应用升级，升级前自动创建备份。</p>
+              <p class="muted">上传升级包（.tar.gz），系统将自动应用升级并重启容器。</p>
               <label style="margin-top:14px;">
-                <input id="systemUpgradeFile" type="file" accept=".zip,application/zip" />
+                <input id="systemUpgradeFile" type="file" accept=".tar.gz,.tgz,application/gzip,application/x-gzip" />
               </label>
               <div class="system-actions">
-                <button class="primary" id="systemUpgradeBtn" type="button">上传并升级</button>
+                <button class="primary" id="systemUpgradeBtn" type="button">上传升级包并升级</button>
               </div>
               <div id="systemUpgradeMessage"></div>
             </div>
@@ -2478,7 +2624,14 @@
                       <option value="false">关闭</option>
                       <option value="true">启用</option>
                     </select>
-                  </label>
+                    </label>
+                    <label>
+                      <span>禁用 HTTP 登录</span>
+                      <select id="httpLoginDisabled">
+                        <option value="false">不禁止（允许 HTTP 登录）</option>
+                        <option value="true">禁止（仅允许 HTTPS 登录）</option>
+                      </select>
+                    </label>
                   <label>
                     <span>HTTPS 监听端口</span>
                     <input id="httpsPort" type="number" min="1" max="65535" step="1" />
@@ -2594,6 +2747,7 @@
       aiInspectionResults: [],
       configBackupPlans: [],
       configBackupRecords: [],
+      configBackupDiffBaseId: null,
       notifications: [],
       auditLogs: [],
       systemServices: [],
@@ -2601,6 +2755,7 @@
       systemConfig: {
         webIdleLogoutMinutes: 30,
         httpsLoginEnabled: false,
+        httpLoginDisabled: false,
         httpsPort: 3443,
         httpsCertFilename: '',
         httpsKeyFilename: '',
@@ -2623,6 +2778,7 @@
       kbFilterProjectId: '',
       kbFilterUserId: '',
       assetPage: 1,
+      selectedAssetIds: [],
       projectPage: 1,
       userPage: 1,
       userProjectFilter: '',
@@ -2677,7 +2833,16 @@
         headers: { ...headers, ...(options.headers || {}) }
       });
       const isJson = response.headers.get('content-type')?.includes('application/json');
-      const data = isJson ? await response.json() : await response.text();
+      let data;
+      if (isJson) {
+        try {
+          data = await response.json();
+        } catch (_) {
+          data = { message: '服务器响应异常' };
+        }
+      } else {
+        data = await response.text();
+      }
       if (data && typeof data === 'object' && data.csrfToken) state.csrfToken = data.csrfToken;
       if (!response.ok) {
         const errorMessage = data.message || '请求失败';
@@ -2691,6 +2856,10 @@
       const div = document.createElement('div');
       div.appendChild(document.createTextNode(String(text ?? '')));
       return div.innerHTML;
+    }
+
+    function fmt(text) {
+      return esc(text ?? '').replace(/\n/g, '<br>');
     }
 
     function showGlobalError(message) {
@@ -2824,6 +2993,12 @@
             const msg = JSON.parse(event.data);
             if (msg.type === 'data-changed') {
               handleWsDataChanged();
+            } else if (msg.type === 'monitor_alert') {
+              showToast(msg.title, msg.monitorStatus === 'offline' ? 'error' : 'success');
+              if (state.topoMonitorStatus && msg.assetId) {
+                state.topoMonitorStatus[msg.assetId] = { status: msg.monitorStatus, lastCheck: Date.now() };
+                updateTopoStatusDots();
+              }
             }
           } catch (_) {}
         };
@@ -4030,7 +4205,7 @@
       users: ['list'],
       projects: ['list'],
       logs: ['list'],
-      assets: ['list'],
+      assets: ['list', 'topology'],
       documents: ['form', 'list'],
       kb: ['list'],
       system: ['serviceStatus', 'upgrade', 'databaseInit', 'auditLog', 'notification']
@@ -4059,6 +4234,9 @@
       document.querySelectorAll(`.subtab-panel[data-section="${section}"]`).forEach(panel => {
         panel.classList.toggle('hidden', panel.dataset.subtab !== subtab);
       });
+      if (section === 'assets' && subtab === 'topology') {
+        renderTopology();
+      }
     }
 
     function openTabWithSubtab(tab, subtab = 'list') {
@@ -4187,6 +4365,254 @@
       fillLogDispatcherOptions(logProj ? logProj.value : '');
     }
 
+    state.topoData = { assets: [], relations: [] };
+    state.topoNodePositions = {};
+    state.topoMonitorStatus = {};
+    state.topoDragNode = null;
+    state.topoDragOffset = { x: 0, y: 0 };
+    state.topoDeleteLineId = null;
+
+    function renderTopology() {
+      const panel = document.querySelector('.subtab-panel[data-section="assets"][data-subtab="topology"]');
+      if (!panel || panel.classList.contains('hidden')) return;
+      state.topoData = { assets: [], relations: [] };
+      state.topoNodePositions = {};
+      state.topoMonitorStatus = {};
+      renderTopoCanvas();
+      fetchTopologyData();
+      fetchMonitorStatus();
+    }
+
+    async function fetchTopologyData() {
+      try {
+        const query = state.currentProjectFilter ? `?projectId=${encodeURIComponent(state.currentProjectFilter)}` : '';
+        const data = await api('/api/assets/topology' + query);
+        state.topoData = data;
+        renderTopoCanvas();
+      } catch (_) {}
+    }
+
+    async function fetchMonitorStatus() {
+      try {
+        const query = state.currentProjectFilter ? `?projectId=${encodeURIComponent(state.currentProjectFilter)}` : '';
+        const data = await api('/api/assets/monitor-status' + query);
+        state.topoMonitorStatus = data || {};
+        updateTopoStatusDots();
+      } catch (_) {}
+    }
+
+    function renderTopoCanvas() {
+      const nodesContainer = document.getElementById('topologyNodes');
+      const svgElt = document.getElementById('topologySvg');
+      const { assets, relations } = state.topoData;
+      if (!nodesContainer || !svgElt) return;
+      if (!assets.length) {
+        nodesContainer.innerHTML = '<div style="display:flex;align-items:center;justify-content:center;height:400px;color:#9ca3af;">暂无资产数据，请先创建资产并启用监控</div>';
+        svgElt.innerHTML = '';
+        return;
+      }
+      const cols = Math.max(1, Math.ceil(Math.sqrt(assets.length)));
+      const spacingX = 100 / cols;
+      const spacingY = Math.min(100 / Math.ceil(assets.length / cols), 20);
+      assets.forEach((asset, i) => {
+        const col = i % cols;
+        const row = Math.floor(i / cols);
+        if (!state.topoNodePositions[asset.id]) {
+          state.topoNodePositions[asset.id] = {
+            x: spacingX * col + spacingX / 2,
+            y: Math.max(5, spacingY * row + 8)
+          };
+        }
+      });
+      nodesContainer.innerHTML = assets.map(asset => {
+        const pos = state.topoNodePositions[asset.id] || { x: 10, y: 10 };
+        const name = esc(asset.name);
+        const type = esc(asset.type || '未知');
+        return `<div class="topo-node" data-asset-id="${asset.id}" style="position:absolute;left:${pos.x}%;top:${pos.y}%;transform:translate(-50%,-50%);background:#fff;border:2px solid #d1d5db;border-radius:8px;padding:8px 14px;cursor:move;z-index:2;min-width:120px;text-align:center;box-shadow:0 1px 4px rgba(0,0,0,0.08);user-select:none;">
+          <div style="font-weight:600;font-size:13px;color:#1f2937;">${name}</div>
+          <div style="font-size:11px;color:#6b7280;">${type}</div>
+          <div class="topo-status-dot" data-asset-id="${asset.id}" style="position:absolute;top:-6px;right:-6px;width:12px;height:12px;border-radius:50%;background:#9ca3af;border:2px solid #fff;" title="未监控"></div>
+        </div>`;
+      }).join('');
+      renderTopoLines();
+      bindTopoNodeEvents();
+      updateTopoStatusDots();
+    }
+
+    function renderTopoLines() {
+      const svgElt = document.getElementById('topologySvg');
+      const canvas = document.getElementById('topologyCanvas');
+      if (!svgElt || !canvas) return;
+      const rect = canvas.getBoundingClientRect();
+      const w = rect.width || 800;
+      const h = Math.max(500, rect.height);
+      svgElt.setAttribute('viewBox', `0 0 ${w} ${h}`);
+      let html = '';
+      state.topoData.relations.forEach(rel => {
+        const p1 = state.topoNodePositions[rel.sourceAssetId];
+        const p2 = state.topoNodePositions[rel.targetAssetId];
+        if (!p1 || !p2) return;
+        const x1 = (p1.x / 100) * w;
+        const y1 = (p1.y / 100) * h;
+        const x2 = (p2.x / 100) * w;
+        const y2 = (p2.y / 100) * h;
+        const mx = (x1 + x2) / 2;
+        const my = (y1 + y2) / 2;
+        const color = state.topoDeleteLineId === rel.id ? '#dc2626' : '#2563eb';
+        const strokeW = state.topoDeleteLineId === rel.id ? 3 : 2;
+        html += `<line x1="${x1}" y1="${y1}" x2="${x2}" y2="${y2}" stroke="${color}" stroke-width="${strokeW}" stroke-dasharray="${state.topoDeleteLineId === rel.id ? '6,3' : ''}" data-rel-id="${rel.id}" style="pointer-events:stroke;cursor:pointer;"/>`;
+        if (rel.label) {
+          html += `<text x="${mx}" y="${my - 6}" text-anchor="middle" font-size="11" fill="#6b7280" style="pointer-events:none;">${esc(rel.label)}</text>`;
+        }
+      });
+      svgElt.innerHTML = html;
+      svgElt.querySelectorAll('line[data-rel-id]').forEach(line => {
+        line.addEventListener('click', function (e) {
+          e.stopPropagation();
+          const relId = this.dataset.relId;
+          onTopoLineClick(relId);
+        });
+      });
+    }
+
+    function onTopoLineClick(relId) {
+      if (state.topoDeleteLineId === relId) {
+        deleteTopoRelation(relId);
+      } else {
+        state.topoDeleteLineId = relId;
+        renderTopoLines();
+        setTimeout(() => {
+          if (state.topoDeleteLineId === relId) {
+            state.topoDeleteLineId = null;
+            renderTopoLines();
+          }
+        }, 5000);
+      }
+    }
+
+    async function deleteTopoRelation(relId) {
+      try {
+        await api('/api/asset-relations/' + relId, { method: 'DELETE' });
+        state.topoDeleteLineId = null;
+        showToast('连接关系已删除', 'success');
+        await fetchTopologyData();
+      } catch (e) {
+        showToast(e.message || '删除失败', 'error');
+        state.topoDeleteLineId = null;
+        renderTopoLines();
+      }
+    }
+
+    function updateTopoStatusDots() {
+      document.querySelectorAll('.topo-status-dot').forEach(dot => {
+        const assetId = dot.dataset.assetId;
+        const ms = state.topoMonitorStatus[assetId];
+        if (!ms || ms.status === 'unknown') {
+          dot.style.background = '#9ca3af';
+          dot.title = '未监控';
+        } else if (ms.status === 'online') {
+          dot.style.background = '#16a34a';
+          dot.title = '在线 (' + new Date(ms.lastCheck).toLocaleTimeString() + ')';
+        } else {
+          dot.style.background = '#dc2626';
+          dot.title = '离线 (' + new Date(ms.lastCheck).toLocaleTimeString() + ')';
+        }
+      });
+    }
+
+    function bindTopoNodeEvents() {
+      document.querySelectorAll('.topo-node').forEach(node => {
+        node.onmousedown = function (e) {
+          if (e.button !== 0) return;
+          e.preventDefault();
+          state.topoDragNode = node;
+          const canvas = document.getElementById('topologyCanvas');
+          const crect = canvas.getBoundingClientRect();
+          const nrect = node.getBoundingClientRect();
+          state.topoDragOffset = { x: e.clientX - nrect.left, y: e.clientY - nrect.top };
+          node.style.zIndex = 10;
+          document.addEventListener('mousemove', onTopoMouseMove);
+          document.addEventListener('mouseup', onTopoMouseUp);
+        };
+      });
+    }
+
+    function onTopoMouseMove(e) {
+      if (!state.topoDragNode) return;
+      const canvas = document.getElementById('topologyCanvas');
+      const crect = canvas.getBoundingClientRect();
+      const newLeft = ((e.clientX - crect.left - state.topoDragOffset.x) / crect.width) * 100;
+      const newTop = ((e.clientY - crect.top - state.topoDragOffset.y) / crect.height) * 100;
+      const assetId = state.topoDragNode.dataset.assetId;
+      state.topoDragNode.style.left = newLeft + '%';
+      state.topoDragNode.style.top = newTop + '%';
+    }
+
+    function onTopoMouseUp(e) {
+      if (!state.topoDragNode) return;
+      const assetId = state.topoDragNode.dataset.assetId;
+      const node = state.topoDragNode;
+      const canvas = document.getElementById('topologyCanvas');
+      const crect = canvas.getBoundingClientRect();
+      state.topoNodePositions[assetId] = {
+        x: (parseFloat(node.style.left || '10%')),
+        y: (parseFloat(node.style.top || '10%'))
+      };
+      node.style.zIndex = 2;
+      state.topoDragNode = null;
+      document.removeEventListener('mousemove', onTopoMouseMove);
+      document.removeEventListener('mouseup', onTopoMouseUp);
+      renderTopoLines();
+    }
+
+    document.getElementById('topoRefreshBtn').addEventListener('click', () => renderTopology());
+    document.getElementById('topoAddRelBtn').addEventListener('click', () => {
+      const sourceSelect = document.getElementById('relSourceAsset');
+      const targetSelect = document.getElementById('relTargetAsset');
+      let assets = state.topoData.assets || [];
+      if (!assets.length) assets = filterByUserProject(state.assets);
+      [sourceSelect, targetSelect].forEach(sel => {
+        sel.innerHTML = '<option value="">-- 请选择 --</option>' +
+          assets.map(a => `<option value="${a.id}">${esc(a.name)} (${esc(a.type || '')})</option>`).join('');
+      });
+      setMessage('relMessage', '', '');
+      openModal('assetRelationModal');
+    });
+
+    document.getElementById('relSaveBtn').addEventListener('click', async () => {
+      const sourceAssetId = document.getElementById('relSourceAsset').value;
+      const targetAssetId = document.getElementById('relTargetAsset').value;
+      if (!sourceAssetId || !targetAssetId) return setMessage('relMessage', '请选择源资产和目标资产', 'error');
+      if (sourceAssetId === targetAssetId) return setMessage('relMessage', '不能连接自身', 'error');
+      try {
+        await api('/api/asset-relations', {
+          method: 'POST',
+          body: JSON.stringify({
+            sourceAssetId,
+            targetAssetId,
+            relationType: document.getElementById('relType').value,
+            label: document.getElementById('relLabel').value.trim()
+          })
+        });
+        closeModal('assetRelationModal');
+        showToast('连接关系已创建', 'success');
+        await fetchTopologyData();
+      } catch (e) {
+        setMessage('relMessage', e.message || '创建失败', 'error');
+      }
+    });
+
+    let topoMonitorTimer = null;
+    function startTopoMonitorPoll() {
+      if (topoMonitorTimer) return;
+      topoMonitorTimer = setInterval(() => {
+        const panel = document.querySelector('.subtab-panel[data-section="assets"][data-subtab="topology"]');
+        if (panel && !panel.classList.contains('hidden')) {
+          fetchMonitorStatus();
+        }
+      }, 30000);
+    }
+    startTopoMonitorPoll();
 
     function renderAssets() {
       const pageSize = 10;
@@ -4207,20 +4633,28 @@
       state.assetPage = Math.min(Math.max(1, state.assetPage || 1), totalPages);
       const start = (state.assetPage - 1) * pageSize;
       const pageItems = sourceAssets.slice(start, start + pageSize);
-      document.getElementById('assetTable').innerHTML = pageItems.map(item => `
+      document.getElementById('assetTable').innerHTML = pageItems.map(item => {
+        const checked = (state.selectedAssetIds || []).includes(item.id) ? ' checked' : '';
+        return `
         <tr>
+          <td style="text-align:center;"><input type="checkbox" class="asset-checkbox" data-id="${item.id}"${checked} /></td>
+          <td>${esc(formatProjectDisplayById(item.projectId))}</td>
+          <td>${esc(item.type)}</td>
           <td>${esc(item.name)}</td>
           <td>${esc(item.brand || '-')}</td>
           <td>${esc(item.model || '-')}</td>
-          <td>${esc(item.type)}</td>
-          <td>${esc(item.version || '-')}</td>
           <td>${esc(item.serialNumber || '-')}</td>
-          <td>${esc(item.status === '运行中' ? '使用中' : (item.status || '-'))}</td>
+          <td>${esc(item.version || '-')}</td>
           <td>${esc(item.maintainExpiryDate || '-')}</td>
-          <td>${esc(formatProjectDisplayById(item.projectId))}</td>
-          <td><div class="toolbar">${canEditData() ? `<button class="secondary" data-action="edit-asset" data-id="${item.id}" type="button">修改</button><button class="secondary" data-action="delete-asset" data-id="${item.id}" type="button" style="background:#fee2e2;color:#dc2626;border-color:#fecaca;">删除</button>` : ''}</div></td>
+          <td style="max-width:140px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;" title="${esc(item.installationLocation || '')}">${esc(item.installationLocation || '-')}</td>
+          <td>${esc(item.status === '运行中' ? '使用中' : (item.status || '-'))}</td>
+          <td>${esc(item.owner || '-')}</td>
+          <td style="max-width:100px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;" title="${esc(item.notes || '')}">${esc(item.notes || '')}</td>
+          <td><div class="toolbar" style="white-space:nowrap;">${canEditData() ? `<button class="secondary" data-action="edit-asset" data-id="${item.id}" type="button">修改</button><button class="secondary" data-action="delete-asset" data-id="${item.id}" type="button" style="background:#fee2e2;color:#dc2626;border-color:#fecaca;">删除</button>` : ''}</div></td>
         </tr>
-      `).join('') || '<tr><td colspan="10">暂无数据</td></tr>';
+        `;
+      }).join('') || '<tr><td colspan="14">暂无数据</td></tr>';
+      document.getElementById('assetSelectAll').checked = pageItems.length > 0 && pageItems.every(item => (state.selectedAssetIds || []).includes(item.id));
       document.getElementById('assetPageInfo').textContent = `第 ${state.assetPage} / ${totalPages} 页`;
       document.getElementById('assetPrevBtn').disabled = state.assetPage <= 1;
       document.getElementById('assetNextBtn').disabled = state.assetPage >= totalPages;
@@ -4255,7 +4689,7 @@
                <td><div class="toolbar"><button class="secondary" data-action="view-log-detail" data-id="${item.id}" type="button">${expanded ? '收起' : '详情'}</button>${canEditData() ? `<button class="secondary" data-action="edit-log" data-id="${item.id}" type="button">修改</button><button class="secondary" data-action="delete-log" data-id="${item.id}" type="button" style="background:#fee2e2;color:#dc2626;border-color:#fecaca;">删除</button>` : ''}</div></td>
 
             </tr>
-            ${expanded ? `<tr><td colspan="7"><div class="card" style="margin: 8px 0;"><div class="muted" style="margin-bottom: 8px;">工单详情</div><div class="grid-form" style="grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));"><div><div class="muted">派单时间</div><div>${esc(item.date || '-')}</div></div><div><div class="muted">派单部门</div><div>${esc(item.dispatchDepartment || '-')}</div></div><div><div class="muted">派单人</div><div>${esc(item.dispatcher || '-')}</div></div><div><div class="muted">工单类型</div><div>${esc(item.ticketType || '-')}</div></div><div><div class="muted">接单人</div><div>${esc(item.assignee || '-')}</div></div><div><div class="muted">关联项目</div><div>${esc(formatProjectDisplayById(item.projectId))}</div></div><div><div class="muted">关联资产</div><div>${esc(formatAssetName(item.assetId))}</div></div><div><div class="muted">工单位置</div><div>${esc(item.relatedTarget || '-')}</div></div><div><div class="muted">工单用时（小时）</div><div>${esc(item.durationHours)}</div></div></div><div class="muted" style="margin: 12px 0 8px;">工单内容</div><div>${esc(item.event || '-')}</div><div class="muted" style="margin: 12px 0 8px;">处理过程</div><div>${esc(item.process || '暂无处理过程')}</div><div class="muted" style="margin: 12px 0 8px;">结论</div><div>${esc(item.conclusion || '-')}</div><div class="muted" style="margin: 12px 0 8px;">备注</div><div>${esc(item.remark || '-')}</div></div></td></tr>` : ''}`;
+            ${expanded ? `<tr><td colspan="7"><div class="card" style="margin: 8px 0;"><div class="muted" style="margin-bottom: 8px;">工单详情</div><div class="grid-form" style="grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));"><div><div class="muted">派单时间</div><div>${esc(item.date || '-')}</div></div><div><div class="muted">派单部门</div><div>${esc(item.dispatchDepartment || '-')}</div></div><div><div class="muted">派单人</div><div>${esc(item.dispatcher || '-')}</div></div><div><div class="muted">工单类型</div><div>${esc(item.ticketType || '-')}</div></div><div><div class="muted">接单人</div><div>${esc(item.assignee || '-')}</div></div><div><div class="muted">关联项目</div><div>${esc(formatProjectDisplayById(item.projectId))}</div></div><div><div class="muted">关联资产</div><div>${esc(formatAssetName(item.assetId))}</div></div><div><div class="muted">工单位置</div><div>${esc(item.relatedTarget || '-')}</div></div><div><div class="muted">工单用时（小时）</div><div>${esc(item.durationHours)}</div></div></div><div class="muted" style="margin: 12px 0 8px;">工单内容</div><div style="white-space:pre-wrap;">${esc(item.event || '-')}</div><div class="muted" style="margin: 12px 0 8px;">处理过程</div><div style="white-space:pre-wrap;">${esc(item.process || '暂无处理过程')}</div><div class="muted" style="margin: 12px 0 8px;">结论</div><div style="white-space:pre-wrap;">${esc(item.conclusion || '-')}</div><div class="muted" style="margin: 12px 0 8px;">备注</div><div style="white-space:pre-wrap;">${esc(item.remark || '-')}</div></div></td></tr>` : ''}`;
         }).join('') || '<tr><td colspan="7">暂无数据</td></tr>';
       document.getElementById('logPageInfo').textContent = `第 ${state.logPage} / ${totalPages} 页`;
       document.getElementById('logPrevBtn').disabled = state.logPage <= 1;
@@ -4288,7 +4722,7 @@
           <td style="width:520px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;">${esc(item.solution)}</td>
           <td><div class="toolbar" style="white-space:nowrap;">${kbActions}</div></td>
         </tr>
-        ${expanded ? `<tr><td colspan="6"><div class="card" style="margin:8px 0;"><div class="muted" style="margin-bottom:8px;">问题详情</div><div style="margin-bottom:12px;">${esc(item.problem)}</div><div class="muted" style="margin-bottom:8px;">解决方案</div><div>${esc(item.solution)}</div></div></td></tr>` : ''}`;
+        ${expanded ? `<tr><td colspan="6"><div class="card" style="margin:8px 0;"><div class="muted" style="margin-bottom:8px;">问题详情</div><div style="margin-bottom:12px;white-space:pre-wrap;">${esc(item.problem)}</div><div class="muted" style="margin-bottom:8px;">解决方案</div><div style="white-space:pre-wrap;">${esc(item.solution)}</div></div></td></tr>` : ''}`;
       }).join('') || '<tr><td colspan="6">暂无数据</td></tr>';
       document.getElementById('kbPageInfo').textContent = `第 ${state.kbPage} / ${totalPages} 页`;
       document.getElementById('kbPrevBtn').disabled = state.kbPage <= 1;
@@ -4300,7 +4734,17 @@
       today.setHours(0, 0, 0, 0);
       return filterByUserProject(state.assets)
         .filter(item => item.maintainExpiryDate)
-        .map(item => ({ item, diff: Math.ceil((new Date(`${item.maintainExpiryDate}T00:00:00`) - today) / 86400000) }))
+        .map(item => {
+          const diff = Math.ceil((new Date(`${item.maintainExpiryDate}T00:00:00`) - today) / 86400000);
+          let levelClass;
+          if (diff <= 0) levelClass = 'expiry-darkred';
+          else if (diff < 15) levelClass = 'expiry-darkred';
+          else if (diff < 30) levelClass = 'expiry-red';
+          else if (diff < 60) levelClass = 'expiry-orange';
+          else if (diff < 90) levelClass = 'expiry-blue';
+          else levelClass = 'expiry-green';
+          return { item, diff, levelClass };
+        })
         .sort((a, b) => a.diff - b.diff)
         .slice(0, limit);
     }
@@ -4850,8 +5294,10 @@
       document.getElementById('configBackupRecordTable').innerHTML = backupRecordRows.map(item => {
         const target = state.aiInspectionTargets.find(entry => entry.id === item.targetId);
         const asset = state.assets.find(entry => entry.id === item.assetId);
+        const isSelected = state.configBackupDiffBaseId === item.id;
         const actions = [
           item.status === '成功' ? `<button class="secondary" data-action="download-config-backup-record" data-id="${item.id}" data-filename="${esc(item.filename || 'config-backup.txt')}" type="button">下载</button>` : '',
+          item.status === '成功' ? `<button class="secondary" data-action="diff-config-backup-record" data-id="${item.id}" type="button" style="${isSelected ? 'background:#dbeafe;color:#1d4ed8;border-color:#93c5fd;' : ''}">${isSelected ? '对比 (已选A)' : '对比'}</button>` : '',
           canEditData() ? `<button class="secondary" data-action="delete-config-backup-record" data-id="${item.id}" type="button">删除</button>` : ''
         ].filter(Boolean).join(' ') || '-';
         return `<tr><td>${esc(target?.name || '-')}</td><td>${esc(asset?.name || '-')}</td><td>${esc(item.filename || '-')}</td><td>${esc(formatBackupSize(item.size))}</td><td>${esc(item.status || '-')}</td><td>${esc(item.message || '-')}</td><td>${esc(item.createdAt || '-')}</td><td><div class="toolbar">${actions}</div></td></tr>`;
@@ -4911,6 +5357,8 @@
       if (!timeoutInput || !httpsEnabledInput || !httpsPortInput || !httpsCertificateStatus) return;
       timeoutInput.value = String(getWebIdleLogoutMinutes());
       httpsEnabledInput.value = state.systemConfig?.httpsLoginEnabled ? 'true' : 'false';
+      const httpLoginDisabledInput = document.getElementById('httpLoginDisabled');
+      if (httpLoginDisabledInput) httpLoginDisabledInput.value = state.systemConfig?.httpLoginDisabled ? 'true' : 'false';
       httpsPortInput.value = String(Number(state.systemConfig?.httpsPort || 3443));
       if (allowRegistrationInput) allowRegistrationInput.value = state.systemConfig?.allowRegistration ? 'true' : 'false';
       if (maxAttemptsInput) maxAttemptsInput.value = String(Number(state.systemConfig?.loginRateLimitMaxAttempts || 5));
@@ -5055,6 +5503,9 @@
       form.elements.id.value = '';
       document.getElementById('assetFormTitle').textContent = '新增资产';
       document.getElementById('assetSubmitBtn').textContent = '保存资产';
+      document.getElementById('assetMonitorEnabled').checked = false;
+      document.getElementById('assetMonitorType').value = 'ping';
+      document.getElementById('assetMonitorPortLabel').style.display = 'none';
     }
 
     function resetLogForm() {
@@ -5234,7 +5685,13 @@
       document.getElementById('edAssetSerialNumber').value = asset.serialNumber || '';
       document.getElementById('edAssetStatus').value = asset.status || '';
       document.getElementById('edAssetMaintainExpiryDate').value = asset.maintainExpiryDate || '';
+      document.getElementById('edAssetInstallationLocation').value = asset.installationLocation || '';
       document.getElementById('edAssetNotes').value = asset.notes || '';
+      document.getElementById('edAssetMonitorEnabled').checked = asset.monitorEnabled === true;
+      document.getElementById('edAssetMonitorType').value = asset.monitorType || 'ping';
+      document.getElementById('edAssetMonitorHost').value = asset.monitorHost || '';
+      document.getElementById('edAssetMonitorPort').value = asset.monitorPort || '';
+      toggleEdMonitorPort();
       fillSelect('edAssetProjectId', state.projects);
       document.getElementById('edAssetProjectId').value = asset.projectId || '';
       document.getElementById('assetEditMessage').textContent = '';
@@ -5738,15 +6195,74 @@
         </div>
       `).join('') || '<div class="muted">暂无项目数据</div>';
       const maintainReminders = getMaintainReminders(5);
-      document.getElementById('dashboardMaintainReminder').innerHTML = maintainReminders.map(({ item, diff }) => `
+      document.getElementById('dashboardMaintainReminder').innerHTML = maintainReminders.map(({ item, diff, levelClass }) => `
         <div class="project-expiry-item">
           <div>
-            <div>${esc(item.name)}</div>
+            <div class="project-expiry-name ${levelClass}">${esc(item.name)}</div>
             <div class="muted">${esc(formatProjectDisplayById(item.projectId))}</div>
           </div>
           <div class="muted">${diff >= 0 ? `剩余 ${diff} 天` : `已到期 ${Math.abs(diff)} 天`}</div>
         </div>
       `).join('') || '<div class="muted">暂无维保提醒</div>';
+      renderWorkbench();
+    }
+
+    function renderWorkbench() {
+      const role = state.user?.role || '';
+      const panels = [];
+      const today = new Date(); today.setHours(0, 0, 0, 0);
+
+      if (role === 'admin' || role === 'engineer') {
+        const pendingApprovals = filterByUserProject(state.approvals).filter(a => a.status === '待运维审批').length;
+        const pendingTasks = filterByUserProject(state.aiInspectionTasks).filter(t => t.status === '待执行' || t.status === '执行中').length;
+        const todayInspections = filterByUserProject(state.inspectionPlans).filter(p => p.nextDate && new Date(`${p.nextDate}T00:00:00`).getTime() === today.getTime() && p.status !== '已完成').length;
+        const expiredMaintenance = filterByUserProject(state.assets).filter(a => a.maintainExpiryDate && new Date(`${a.maintainExpiryDate}T00:00:00`) < today).length;
+        const pendingIncidents = filterByUserProject(state.incidents).filter(i => i.status !== '已关闭' && i.status !== '已解决').length;
+        const pendingChanges = filterByUserProject(state.changeRecords).filter(c => c.status === '待运维审批').length;
+        panels.push({ title: '待审批', count: pendingApprovals, color: '#ea580c', link: 'governance', linkSubtab: 'approvals' });
+        panels.push({ title: '自动化任务', count: pendingTasks, color: '#2563eb', link: 'aiInspection', linkSubtab: 'tasks' });
+        panels.push({ title: '今日巡检', count: todayInspections, color: '#16a34a', link: 'assetOps', linkSubtab: 'inspections' });
+        panels.push({ title: '维保已到期', count: expiredMaintenance, color: '#dc2626', link: 'assets', linkSubtab: 'list' });
+        panels.push({ title: '待处理故障', count: pendingIncidents, color: '#7f1d1d', link: 'assetOps', linkSubtab: 'incidents' });
+        panels.push({ title: '待审批变更', count: pendingChanges, color: '#9333ea', link: 'assetOps', linkSubtab: 'change' });
+      } else if (role === 'customer') {
+        const pendingCustomerApprovals = filterByUserProject(state.approvals).filter(a => a.status === '待客户确认').length;
+        const myIncidents = filterByUserProject(state.incidents).filter(i => i.status !== '已关闭').length;
+        panels.push({ title: '待客户确认', count: pendingCustomerApprovals, color: '#ea580c', link: 'governance', linkSubtab: 'approvals' });
+        panels.push({ title: '我的故障', count: myIncidents, color: '#dc2626', link: 'assetOps', linkSubtab: 'incidents' });
+      }
+      const html = panels.length ? panels.map(p => `
+        <a href="#" class="workbench-item" data-link-tab="${p.link}" data-link-subtab="${p.linkSubtab}" style="display:flex;align-items:center;gap:10px;padding:12px 16px;border:1px solid var(--border);border-radius:8px;text-decoration:none;color:inherit;transition:box-shadow 0.2s;">
+          <span style="font-size:24px;font-weight:700;color:${p.color};min-width:48px;text-align:center;">${p.count}</span>
+          <span style="font-size:14px;">${p.title}</span>
+        </a>
+      `).join('') : '<div class="muted">暂无待办事项</div>';
+      const panel = document.getElementById('workbenchPanel');
+      if (panel) panel.innerHTML = html;
+    }
+
+    async function showConfigBackupDiff(id1, id2) {
+      try {
+        const result = await api(`/api/ai-inspection/config-backup/records/diff?id1=${id1}&id2=${id2}`);
+        document.getElementById('diffRec1Info').textContent = `${result.record1.filename || '版本A'} (${result.record1.createdAt})`;
+        document.getElementById('diffRec2Info').textContent = `${result.record2.filename || '版本B'} (${result.record2.createdAt})`;
+        const driftIcon = result.hasDrift ? '&#9888;' : '&#10003;';
+        const driftColor = result.hasDrift ? '#dc2626' : '#16a34a';
+        document.getElementById('configBackupDiffSummary').innerHTML = `<span style="color:${driftColor};font-weight:600;">${driftIcon} ${result.hasDrift ? '检测到配置漂移' : '配置一致，无漂移'}</span> &nbsp; (<span style="color:#dc2626;">新增 ${result.added}</span>, <span style="color:#e02424;">删除 ${result.removed}</span>, <span style="color:#ea580c;">变更 ${result.changed}</span>)`;
+        const diffHtml = result.diff.map(d => {
+          let bg = ''; let prefix = ' ';
+          if (d.type === 'added') { bg = 'background:#dcfce7;'; prefix = '+'; }
+          else if (d.type === 'removed') { bg = 'background:#fee2e2;'; prefix = '-'; }
+          else if (d.type === 'changed') { bg = 'background:#fef3c7;'; prefix = '~'; }
+          const aText = d.a !== null ? esc(d.a) : '';
+          const bText = d.b !== null ? esc(d.b) : '';
+          return `<div style="${bg}padding:1px 6px;margin:1px 0;">${prefix} ${aText}</div>${d.type === 'changed' ? `<div style="${bg}padding:1px 6px;margin:1px 0;border-top:1px dashed #d4d4d4;">${prefix} ${bText}</div>` : ''}`;
+        }).join('');
+        document.getElementById('configBackupDiffContent').innerHTML = diffHtml || '<div class="muted">无差异内容</div>';
+        openModal('configBackupDiffModal');
+      } catch (error) {
+        setMessage('configBackupMessage', error.message, 'error');
+      }
     }
 
     function renderDashboardTable() {
@@ -5839,10 +6355,10 @@
       document.getElementById('systemBackupList').innerHTML = info.backups.slice(0, 5).map(item => `
         <div class="system-backup-item">
           <div>
-            <div>${item.name}</div>
-            <div class="muted">${item.createdAt}</div>
+            <div>${esc(item.name)}</div>
+            <div class="muted">${esc(item.createdAt)}</div>
           </div>
-          <a href="${item.href}">下载</a>
+          <a href="${esc(item.href)}">下载</a>
         </div>
       `).join('') || '<div class="muted">暂无备份文件</div>';
       renderSystemServices();
@@ -5872,14 +6388,14 @@
           renderSystemServices();
           renderSystemLoad();
           const serviceEl = document.getElementById('systemServiceMessage');
-          if (serviceEl) serviceEl.innerHTML = `<div class="message success">最近刷新：${load.checkedAt}</div>`;
+          if (serviceEl) serviceEl.innerHTML = `<div class="message success">最近刷新：${esc(load.checkedAt)}</div>`;
           const el = document.getElementById('systemLoadMessage');
-          if (el) el.innerHTML = `<div class="message success">最近刷新：${load.checkedAt}</div>`;
+          if (el) el.innerHTML = `<div class="message success">最近刷新：${esc(load.checkedAt)}</div>`;
         } catch (error) {
           const serviceEl = document.getElementById('systemServiceMessage');
-          if (serviceEl) serviceEl.innerHTML = `<div class="message error">${error.message}</div>`;
+          if (serviceEl) serviceEl.innerHTML = `<div class="message error">${esc(error.message)}</div>`;
           const el = document.getElementById('systemLoadMessage');
-          if (el) el.innerHTML = `<div class="message error">${error.message}</div>`;
+          if (el) el.innerHTML = `<div class="message error">${esc(error.message)}</div>`;
         }
       }, 5000);
       if (state.systemTimeDisplayTimer) clearInterval(state.systemTimeDisplayTimer);
@@ -6101,6 +6617,60 @@
         modal.addEventListener('click', backdrop);
         okBtn.addEventListener('click', ok);
         cancelBtn.addEventListener('click', cancel);
+        document.getElementById('confirmInputRow').classList.add('hidden');
+        document.getElementById('confirmOkBtn').disabled = false;
+        openModal('confirmModal');
+      });
+    }
+
+    function showDangerConfirm(message, confirmWord = '确认操作') {
+      return new Promise((resolve) => {
+        const messageEl = document.getElementById('confirmMessage');
+        const modal = document.getElementById('confirmModal');
+        const okBtn = document.getElementById('confirmOkBtn');
+        const cancelBtn = document.getElementById('confirmCancelBtn');
+        const inputRow = document.getElementById('confirmInputRow');
+        const input = document.getElementById('confirmInput');
+        const inputWord = document.getElementById('confirmInputWord');
+        messageEl.textContent = message;
+        inputWord.textContent = confirmWord;
+        input.value = '';
+        inputRow.classList.remove('hidden');
+        okBtn.disabled = true;
+        let settled = false;
+        const checkInput = () => { okBtn.disabled = input.value.trim() !== confirmWord; };
+        input.addEventListener('input', checkInput);
+        const cleanup = () => {
+          modal.removeEventListener('click', backdrop);
+          okBtn.removeEventListener('click', ok);
+          cancelBtn.removeEventListener('click', cancel);
+          input.removeEventListener('input', checkInput);
+          inputRow.classList.add('hidden');
+          okBtn.disabled = false;
+        };
+        const settle = value => {
+          if (settled) return;
+          settled = true;
+          cleanup();
+          closeModal('confirmModal');
+          resolve(value);
+        };
+        const backdrop = event => {
+          if (event.target === modal) settle(false);
+        };
+        const ok = event => {
+          event.preventDefault();
+          event.stopPropagation();
+          settle(true);
+        };
+        const cancel = event => {
+          event.preventDefault();
+          event.stopPropagation();
+          settle(false);
+        };
+        modal.addEventListener('click', backdrop);
+        okBtn.addEventListener('click', ok);
+        cancelBtn.addEventListener('click', cancel);
         openModal('confirmModal');
       });
     }
@@ -6232,7 +6802,7 @@
     }
 
     function ssoLogin() {
-      fetch('/api/auth/oidc/login', { redirect: 'manual' }).then(res => {
+      fetch('/api/auth/oidc/login', { redirect: 'manual', credentials: 'include' }).then(res => {
         if (res.type === 'opaqueredirect') {
           window.location.href = '/api/auth/oidc/login';
         } else if (res.status === 501 || res.status === 502) {
@@ -6828,7 +7398,12 @@
         serialNumber: document.getElementById('edAssetSerialNumber').value.trim(),
         status: document.getElementById('edAssetStatus').value.trim(),
         maintainExpiryDate: document.getElementById('edAssetMaintainExpiryDate').value,
-        notes: document.getElementById('edAssetNotes').value.trim()
+        installationLocation: document.getElementById('edAssetInstallationLocation').value.trim(),
+        notes: document.getElementById('edAssetNotes').value.trim(),
+        monitorEnabled: document.getElementById('edAssetMonitorEnabled').checked,
+        monitorType: document.getElementById('edAssetMonitorType').value,
+        monitorHost: document.getElementById('edAssetMonitorHost').value.trim(),
+        monitorPort: document.getElementById('edAssetMonitorPort').value.trim()
       };
       const msg = document.getElementById('assetEditMessage');
       if (!data.projectId) { msg.textContent = '请选择关联项目'; msg.className = 'message error'; return; }
@@ -6989,8 +7564,8 @@
       const msg = document.getElementById('changeRecordEditMessage');
       if (!data.title) { msg.textContent = '请输入变更标题'; msg.className = 'message error'; return; }
       if (!data.content) { msg.textContent = '请输入变更内容'; msg.className = 'message error'; return; }
-      if (!data.approverId) { msg.textContent = '请选择申请人'; msg.className = 'message error'; return; }
-      if (!data.customerId) { msg.textContent = '请选择审批人'; msg.className = 'message error'; return; }
+      if (!data.approverId) { msg.textContent = '请选择运维审批人'; msg.className = 'message error'; return; }
+      if (!data.customerId) { msg.textContent = '请选择甲方客户'; msg.className = 'message error'; return; }
       try {
         await api(`/api/change-records/${id}`, { method: 'PUT', body: JSON.stringify(data) });
         closeModal('changeRecordEditModal');
@@ -7209,6 +7784,18 @@
     });
 
     document.getElementById('assetTable').addEventListener('click', async event => {
+      const checkbox = event.target.closest('.asset-checkbox');
+      if (checkbox) {
+        const id = checkbox.dataset.id;
+        if (!state.selectedAssetIds) state.selectedAssetIds = [];
+        if (checkbox.checked) {
+          if (!state.selectedAssetIds.includes(id)) state.selectedAssetIds.push(id);
+        } else {
+          state.selectedAssetIds = state.selectedAssetIds.filter(x => x !== id);
+        }
+        document.getElementById('assetSelectAll').checked = document.querySelectorAll('.asset-checkbox:checked').length === document.querySelectorAll('.asset-checkbox').length;
+        return;
+      }
       const button = event.target.closest('button[data-action]');
       if (!button) return;
       try {
@@ -7220,6 +7807,17 @@
         }
       } catch (error) {
         setMessage('assetMessage', error.message, 'error');
+      }
+    });
+
+    document.getElementById('assetSelectAll').addEventListener('change', function() {
+      if (!state.selectedAssetIds) state.selectedAssetIds = [];
+      const checkboxes = document.querySelectorAll('.asset-checkbox');
+      if (this.checked) {
+        checkboxes.forEach(cb => { cb.checked = true; if (!state.selectedAssetIds.includes(cb.dataset.id)) state.selectedAssetIds.push(cb.dataset.id); });
+      } else {
+        checkboxes.forEach(cb => { cb.checked = false; });
+        state.selectedAssetIds = [];
       }
     });
 
@@ -7521,6 +8119,16 @@
           await loadBaseData();
           openTabWithSubtab('aiInspection', 'configBackup');
         }
+        if (button.dataset.action === 'diff-config-backup-record') {
+          const id = button.dataset.id;
+          if (!state.configBackupDiffBaseId || state.configBackupDiffBaseId === id) {
+            state.configBackupDiffBaseId = state.configBackupDiffBaseId === id ? null : id;
+            renderAiInspection();
+          } else {
+            showConfigBackupDiff(state.configBackupDiffBaseId, id);
+            state.configBackupDiffBaseId = null;
+          }
+        }
       } catch (error) {
         setMessage('configBackupMessage', error.message, 'error');
       }
@@ -7620,14 +8228,15 @@
       button.textContent = '升级中...';
       try {
         const formData = new FormData();
-        formData.append('file', file);
+        formData.append('package', file);
         const data = await api('/api/system/upgrade', { method: 'POST', body: formData });
-        setMessage('systemUpgradeMessage', data.message);
+        setMessage('systemUpgradeMessage', data.message + '，页面即将自动刷新...', 'success');
         fileInput.value = '';
-        await refreshSystemManagement();
+        button.disabled = true;
+        button.textContent = '系统重启中...';
+        setTimeout(() => { location.reload(); }, 5000);
       } catch (error) {
         setMessage('systemUpgradeMessage', error.message, 'error');
-      } finally {
         button.disabled = false;
         button.textContent = originalText;
       }
@@ -7638,7 +8247,7 @@
         setMessage('systemImportMessage', '请先选择 JSON 数据文件', 'error');
         return;
       }
-      if (!await showConfirm('高风险操作：导入会覆盖当前业务数据。系统会先自动创建导入前备份，并保留当前管理员登录状态，确认继续吗？')) {
+      if (!await showDangerConfirm('高风险操作：导入会覆盖当前业务数据。系统会先自动创建导入前备份，并保留当前管理员登录状态，请输入"确认操作"以继续。')) {
         return;
       }
       try {
@@ -7674,7 +8283,7 @@
         passwordInput.focus();
         return;
       }
-      if (!await showConfirm('高风险操作：数据库初始化后将清空所有业务数据，仅保留当前登录管理员账号。系统会先自动备份，确认继续执行吗？')) {
+      if (!await showDangerConfirm('高风险操作：数据库初始化后将清空所有业务数据，仅保留当前登录管理员账号。系统会先自动备份，请输入"确认操作"以继续。')) {
         return;
       }
       button.disabled = true;
@@ -7700,6 +8309,7 @@
       const maxAttemptsInput = document.getElementById('loginRateLimitMaxAttempts');
       const rateWindowInput = document.getElementById('loginRateLimitWindowMinutes');
       const rateLockInput = document.getElementById('loginRateLimitLockMinutes');
+      const httpLoginDisabledInput = document.getElementById('httpLoginDisabled');
       const timeoutValue = Number(timeoutInput.value);
       const httpsPortValue = Number(httpsPortInput.value);
       const maxAttemptsValue = Number(maxAttemptsInput.value);
@@ -7742,6 +8352,7 @@
           body: JSON.stringify({
             webIdleLogoutMinutes: timeoutValue,
             httpsLoginEnabled: httpsEnabledInput.value === 'true',
+            httpLoginDisabled: httpLoginDisabledInput ? httpLoginDisabledInput.value === 'true' : false,
             httpsPort: httpsPortValue,
             allowRegistration: allowRegistrationInput.value === 'true',
             loginRateLimitMaxAttempts: maxAttemptsValue,
@@ -7962,6 +8573,10 @@
     document.getElementById('assetForm').addEventListener('submit', async event => {
       event.preventDefault();
       const data = Object.fromEntries(new FormData(event.target).entries());
+      data.monitorEnabled = document.getElementById('assetMonitorEnabled').checked;
+      data.monitorType = document.getElementById('assetMonitorType').value;
+      data.monitorHost = (document.querySelector('[name="monitorHost"]') || {}).value || '';
+      data.monitorPort = (document.querySelector('[name="monitorPort"]') || {}).value || '';
       const method = data.id ? 'PUT' : 'POST';
       const path = data.id ? `/api/assets/${data.id}` : '/api/assets';
       try {
@@ -7974,6 +8589,114 @@
         setMessage('assetMessage', error.message, 'error');
       }
     });
+
+    document.getElementById('assetImportBtn').addEventListener('click', () => {
+      document.getElementById('assetImportFile').click();
+    });
+    document.getElementById('assetImportFile').addEventListener('change', async (e) => {
+      const file = e.target.files[0];
+      if (!file) return;
+      try {
+        const data = await file.arrayBuffer();
+        const wb = XLSX.read(data, { type: 'array' });
+        const ws = wb.Sheets[wb.SheetNames[0]];
+        const rows = XLSX.utils.sheet_to_json(ws);
+        if (!rows.length) { setMessage('assetMessage', 'Excel文件中没有数据', 'error'); return; }
+        const result = await api('/api/assets/import', { method: 'POST', body: JSON.stringify({ assets: rows }) });
+        let msg = `导入完成：成功 ${result.created} 条`;
+        if (result.skipped) msg += `，跳过 ${result.skipped} 条`;
+        if (result.errors.length) msg += '\n' + result.errors.join('\n');
+        setMessage('assetMessage', msg, result.errors.length ? 'error' : '');
+        await loadBaseData();
+        switchSectionSubtab('assets', 'list');
+      } catch (err) {
+        setMessage('assetMessage', '导入失败：' + err.message, 'error');
+      }
+      e.target.value = '';
+    });
+    document.getElementById('assetTplBtn').addEventListener('click', () => {
+      const rows = [{
+        '关联项目': '（管理员填项目名，非管理员留空即可）',
+        '资产类型': '网络设备',
+        '资产名称': '示例：核心交换机',
+        '品牌': '示例：华为',
+        '规格型号': '示例：S5735-L48P4XE',
+        '序列号': 'SN-2026-001',
+        '版本': 'V200R021C00',
+        '维保到期日': '2027-12-31',
+        '安装位置': 'A区机房-03号机柜-4U',
+        '状态': '使用中',
+        '责任人/部门': '网络部',
+        '备注': '备注信息'
+      }];
+      const ws = XLSX.utils.json_to_sheet(rows);
+      ws['!cols'] = [
+        { wch: 30 }, { wch: 10 }, { wch: 22 }, { wch: 14 }, { wch: 22 },
+        { wch: 20 }, { wch: 14 }, { wch: 14 }, { wch: 26 }, { wch: 14 },
+        { wch: 14 }, { wch: 20 }
+      ];
+      const wb = XLSX.utils.book_new();
+      XLSX.utils.book_append_sheet(wb, ws, '资产导入模板');
+      XLSX.writeFile(wb, '资产导入模板.xlsx');
+    });
+    document.getElementById('assetExportBtn').addEventListener('click', () => {
+      const selectedIds = state.selectedAssetIds || [];
+      let assets = filterByUserProject(state.assets);
+      if (selectedIds.length) assets = assets.filter(item => selectedIds.includes(item.id));
+      if (!assets.length) { showToast('没有可导出的资产'); return; }
+      const rows = assets.map(item => ({
+        '关联项目': formatProjectDisplayById(item.projectId) || '',
+        '资产类型': item.type || '',
+        '资产名称': item.name || '',
+        '品牌': item.brand || '',
+        '规格型号': item.model || '',
+        '序列号': item.serialNumber || '',
+        '版本': item.version || '',
+        '维保到期日': item.maintainExpiryDate || '',
+        '安装位置': item.installationLocation || '',
+        '状态': item.status || '',
+        '责任人/部门': item.owner || '',
+        '备注': item.notes || ''
+      }));
+      const ws = XLSX.utils.json_to_sheet(rows);
+      ws['!cols'] = [
+        { wch: 18 }, { wch: 10 }, { wch: 20 }, { wch: 14 }, { wch: 20 },
+        { wch: 20 }, { wch: 10 }, { wch: 14 }, { wch: 26 }, { wch: 14 },
+        { wch: 14 }, { wch: 20 }
+      ];
+      const wb = XLSX.utils.book_new();
+      XLSX.utils.book_append_sheet(wb, ws, '资产列表');
+      XLSX.writeFile(wb, `资产导出_${new Date().toISOString().slice(0,10)}.xlsx`);
+      showToast(`已导出 ${assets.length} 条资产`);
+    });
+
+    document.getElementById('assetBatchDeleteBtn').addEventListener('click', async () => {
+      const ids = state.selectedAssetIds || [];
+      if (!ids.length) { showToast('请先勾选要删除的资产'); return; }
+      if (!await showConfirm(`确认删除选中的 ${ids.length} 条资产吗？`)) return;
+      let count = 0;
+      for (const id of ids) {
+        try {
+          await api(`/api/assets/${id}`, { method: 'DELETE' });
+          count++;
+        } catch (e) {}
+      }
+      state.selectedAssetIds = [];
+      setMessage('assetMessage', `已删除 ${count} 条资产`);
+      await loadBaseData();
+      switchSectionSubtab('assets', 'list');
+    });
+
+    function toggleMonitorPort() {
+      const type = document.getElementById('assetMonitorType').value;
+      document.getElementById('assetMonitorPortLabel').style.display = type === 'tcp' ? '' : 'none';
+    }
+    function toggleEdMonitorPort() {
+      const type = document.getElementById('edAssetMonitorType').value;
+      document.getElementById('edAssetMonitorPortLabel').style.display = type === 'tcp' ? '' : 'none';
+    }
+    document.getElementById('assetMonitorType').addEventListener('change', toggleMonitorPort);
+    document.getElementById('edAssetMonitorType').addEventListener('change', toggleEdMonitorPort);
 
     document.getElementById('inspectionPlanForm').addEventListener('submit', async event => {
       event.preventDefault();
@@ -8100,7 +8823,7 @@
       try {
         await api(path, { method, body: JSON.stringify(data) });
         resetKbForm();
-        setMessage('kbMessage', id ? 'Article modifi\u00e9 avec succ\u00e8s' : 'Article enregistr\u00e9 avec succ\u00e8s');
+        setMessage('kbMessage', id ? '知识条目修改成功' : '知识条目创建成功');
         state.kb = (await api('/api/kb')).data;
         renderKb();
         await refreshReports();
@@ -8213,6 +8936,16 @@
     document.getElementById('documentEditModal').addEventListener('modalClosed', () => { delete state.editDocumentAccessKey; });
     document.getElementById('documentPasswordModal').addEventListener('click', function(e) { if (e.target === this) closeModal('documentPasswordModal'); });
     document.getElementById('documentDetailModal').addEventListener('click', function(e) { if (e.target === this) closeModal('documentDetailModal'); });
+    document.getElementById('configBackupDiffModal').addEventListener('click', function(e) { if (e.target === this) closeModal('configBackupDiffModal'); });
+
+    document.getElementById('workbenchPanel').addEventListener('click', event => {
+      const item = event.target.closest('.workbench-item');
+      if (!item) return;
+      event.preventDefault();
+      const tab = item.dataset.linkTab;
+      const subtab = item.dataset.linkSubtab;
+      if (tab && subtab) openTabWithSubtab(tab, subtab);
+    });
 
     ['change', 'input'].forEach(ev => {
       document.getElementById('documentProjectFilter')?.addEventListener(ev, renderDocuments);

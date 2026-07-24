@@ -19,14 +19,15 @@ services:
     build:
       context: .
       dockerfile: Dockerfile
-    image: onsite-ops-system:${APP_VERSION:-1.0.3}
+    image: onsite-ops-system:latest
     pull_policy: never
     ports:
-      - "${APP_BIND:-127.0.0.1}:${APP_PORT:-3000}:3000"
+      - "${APP_BIND:-0.0.0.0}:${APP_PORT:-3000}:3000"
+      - "${APP_BIND:-0.0.0.0}:${HTTPS_PORT:-3443}:3443"
     environment:
       PORT: "3000"
       NODE_ENV: production
-      MYSQL_HOST: mysql
+      MYSQL_HOST: ${MYSQL_HOST:-mysql}
       MYSQL_PORT: "3306"
       MYSQL_USER: ${MYSQL_USER:-onsite_ops}
       MYSQL_PASSWORD: ${MYSQL_PASSWORD}
@@ -39,6 +40,7 @@ services:
       INITIAL_ENGINEER_SECURITY_QUESTION: ${INITIAL_ENGINEER_SECURITY_QUESTION:-工程师安全问题}
       INITIAL_ENGINEER_SECURITY_ANSWER: ${INITIAL_ENGINEER_SECURITY_ANSWER}
       ENCRYPTION_KEY: ${ENCRYPTION_KEY}
+      DOCUMENT_TOKEN_SECRET: ${DOCUMENT_TOKEN_SECRET}
       UPGRADE_SIGNING_KEY: ${UPGRADE_SIGNING_KEY}
       SESSION_MAX_AGE_SECONDS: ${SESSION_MAX_AGE_SECONDS:-604800}
       WEB_IDLE_LOGOUT_MINUTES: ${WEB_IDLE_LOGOUT_MINUTES:-30}
@@ -49,8 +51,9 @@ services:
       AUDIT_ARCHIVE_RETENTION_DAYS: ${AUDIT_ARCHIVE_RETENTION_DAYS:-180}
       MAINTENANCE_INTERVAL_MS: ${MAINTENANCE_INTERVAL_MS:-60000}
       CONFIG_BACKUP_ALLOWED_COMMANDS: ${CONFIG_BACKUP_ALLOWED_COMMANDS:-show running-config,display current-configuration,show configuration}
+      HTTPS_PORT: ${HTTPS_PORT:-3443}
     volumes:
-      - app-data:/app/data
+      - ./data:/app/data
     depends_on:
       mysql:
         condition: service_healthy
@@ -64,4 +67,3 @@ services:
 
 volumes:
   mysql-data:
-  app-data:
