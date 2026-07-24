@@ -1989,17 +1989,17 @@
                   <span style="font-weight:600;color:#374151;font-size:13px;">启用监控</span>
                 </label>
               <div class="full" style="display:flex;flex-wrap:wrap;gap:10px;align-items:flex-end;">
-                <label style="flex:1;min-width:120px;"><span>监控方式</span>
-                  <select name="monitorType" id="assetMonitorType">
+                <label><span>监控方式</span>
+                  <select name="monitorType" id="assetMonitorType" style="width:140px;">
                     <option value="ping">Ping (ICMP)</option>
                     <option value="tcp">TCP 端口检测</option>
                     <option value="snmp">SNMP</option>
                   </select>
                 </label>
-                <label style="flex:2;min-width:150px;"><span>监控地址/IP</span><input name="monitorHost" placeholder="例：192.168.1.1" /></label>
-                <label id="assetMonitorPortLabel" style="display:none;flex:1;min-width:100px;"><span>端口号</span><input name="monitorPort" type="number" placeholder="例：80" /></label>
-                <label id="assetSnmpCommunityLabel" style="display:none;flex:1;min-width:140px;"><span>SNMP 团体字</span><input name="snmpCommunity" placeholder="默认: public" /></label>
-                <label id="assetSnmpPortLabel" style="display:none;flex:0.5;min-width:80px;"><span>SNMP 端口</span><input name="snmpPort" type="number" placeholder="161" /></label>
+                <label><span>监控地址/IP</span><input name="monitorHost" placeholder="例：192.168.1.1" style="width:160px;" /></label>
+                <label id="assetMonitorPortLabel" style="display:none;"><span>端口号</span><input name="monitorPort" type="number" placeholder="例：80" style="width:80px;" /></label>
+                <label id="assetSnmpCommunityLabel" style="display:none;"><span>SNMP 团体字</span><input name="snmpCommunity" placeholder="默认: public" style="width:130px;" /></label>
+                <label id="assetSnmpPortLabel" style="display:none;"><span>SNMP 端口</span><input name="snmpPort" type="number" placeholder="161" style="width:80px;" /></label>
               </div>
 
               <div class="full" style="display:flex;gap:8px;align-items:center;margin-bottom:12px;">
