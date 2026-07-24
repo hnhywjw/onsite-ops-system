@@ -4936,9 +4936,7 @@ const requestHandler = async (req, res) => {
     if (req.method === 'GET' && pathname === '/api/assets/topology') {
       const user = requireAuth(req, res, db);
       if (!user) return;
-      const query = Object.fromEntries(reqUrl.searchParams);
       let assets = db.assets || [];
-      if (query.projectId) assets = assets.filter(a => a.projectId === query.projectId);
       if (user.role !== 'admin') assets = assets.filter(a => a.projectId === user.projectId);
       const assetIds = new Set(assets.map(a => a.id));
       const relations = (db.assetRelations || []).filter(r => assetIds.has(r.sourceAssetId) && assetIds.has(r.targetAssetId));

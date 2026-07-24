@@ -913,26 +913,6 @@
       <p style="text-align:center; font-size:12px; color:var(--sub); margin:20px 0 0 0;">&copy; 2026 Onsite-Ops-System. All rights reserved.</p>
       <div id="loginMessage"></div>
         </div>
-        <div class="subtab-panel hidden" data-section="assets" data-subtab="topology">
-          <div class="card" style="position:relative;">
-            <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:12px;">
-              <h3 style="margin:0;">资产拓扑图</h3>
-              <div>
-                <button class="secondary" id="topoAddRelBtn" type="button" style="font-size:13px;padding:6px 12px;">添加连接</button>
-                <button class="secondary" id="topoRefreshBtn" type="button" style="font-size:13px;padding:6px 12px;margin-left:4px;">刷新</button>
-                <span id="topoLegend" style="margin-left:8px;font-size:12px;color:#666;">
-                  <span style="color:#16a34a;">●</span> 在线 <span style="color:#dc2626;margin-left:6px;">●</span> 离线 <span style="color:#9ca3af;margin-left:6px;">●</span> 未监控
-                </span>
-              </div>
-            </div>
-            <div id="topologyCanvas" style="position:relative;width:100%;min-height:500px;border:1px dashed #d1d5db;border-radius:8px;overflow:hidden;background:#f9fafb;">
-              <div id="topologyNodes" style="position:absolute;top:0;left:0;right:0;bottom:0;"></div>
-              <svg id="topologySvg" style="position:absolute;top:0;left:0;width:100%;height:100%;pointer-events:none;"></svg>
-            </div>
-            <p style="margin-top:8px;font-size:12px;color:#9ca3af;">拖拽节点调整布局 · 点击已有连接线可删除关系</p>
-          </div>
-        </div>
-      </section>
 
   <div id="forgotPwdModal" class="modal-overlay hidden">
     <div class="modal-box">
@@ -2016,9 +1996,28 @@
                 <button class="secondary" id="assetNextBtn" type="button">下一页</button>
                 <button class="secondary" id="assetExportBtn" type="button">导出Excel</button>
                 <button class="secondary" id="assetBatchDeleteBtn" type="button" style="background:#fee2e2;color:#dc2626;border-color:#fecaca;">批量删除</button>
-                <a id="assetExportLink" style="display:none;"></a>
+                 <a id="assetExportLink" style="display:none;"></a>
               </div>
             </div>
+          </div>
+        </div>
+        <div class="subtab-panel hidden" data-section="assets" data-subtab="topology">
+          <div class="card" style="position:relative;">
+            <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:12px;">
+              <h3 style="margin:0;">资产拓扑图</h3>
+              <div>
+                <button class="secondary" id="topoAddRelBtn" type="button" style="font-size:13px;padding:6px 12px;">添加连接</button>
+                <button class="secondary" id="topoRefreshBtn" type="button" style="font-size:13px;padding:6px 12px;margin-left:4px;">刷新</button>
+                <span id="topoLegend" style="margin-left:8px;font-size:12px;color:#666;">
+                  <span style="color:#16a34a;">●</span> 在线 <span style="color:#dc2626;margin-left:6px;">●</span> 离线 <span style="color:#9ca3af;margin-left:6px;">●</span> 未监控
+                </span>
+              </div>
+            </div>
+            <div id="topologyCanvas" style="position:relative;width:100%;min-height:500px;border:1px dashed #d1d5db;border-radius:8px;overflow:hidden;background:#f9fafb;">
+              <div id="topologyNodes" style="position:absolute;top:0;left:0;right:0;bottom:0;"></div>
+              <svg id="topologySvg" style="position:absolute;top:0;left:0;width:100%;height:100%;pointer-events:none;"></svg>
+            </div>
+            <p style="margin-top:8px;font-size:12px;color:#9ca3af;">拖拽节点调整布局 · 点击已有连接线可删除关系</p>
           </div>
         </div>
       </section>
@@ -2428,7 +2427,7 @@
               <span id="approvalPageInfo">第 1 / 1 页</span>
               <button class="secondary" id="approvalNextBtn" type="button">下一页</button>
             </div>
-          </div>
+        </div>
       </section>
 
       <section class="tab-panel hidden" data-tab="reports">
@@ -4381,12 +4380,12 @@
       renderTopoCanvas();
       fetchTopologyData();
       fetchMonitorStatus();
+      startTopoMonitorPoll();
     }
 
     async function fetchTopologyData() {
       try {
-        const query = state.currentProjectFilter ? `?projectId=${encodeURIComponent(state.currentProjectFilter)}` : '';
-        const data = await api('/api/assets/topology' + query);
+        const data = await api('/api/assets/topology');
         state.topoData = data;
         renderTopoCanvas();
       } catch (_) {}
@@ -4394,8 +4393,7 @@
 
     async function fetchMonitorStatus() {
       try {
-        const query = state.currentProjectFilter ? `?projectId=${encodeURIComponent(state.currentProjectFilter)}` : '';
-        const data = await api('/api/assets/monitor-status' + query);
+        const data = await api('/api/assets/monitor-status');
         state.topoMonitorStatus = data || {};
         updateTopoStatusDots();
       } catch (_) {}
@@ -4607,12 +4605,11 @@
       if (topoMonitorTimer) return;
       topoMonitorTimer = setInterval(() => {
         const panel = document.querySelector('.subtab-panel[data-section="assets"][data-subtab="topology"]');
-        if (panel && !panel.classList.contains('hidden')) {
+        if (panel && !panel.classList.contains('hidden') && state.user) {
           fetchMonitorStatus();
         }
       }, 30000);
     }
-    startTopoMonitorPoll();
 
     function renderAssets() {
       const pageSize = 10;
