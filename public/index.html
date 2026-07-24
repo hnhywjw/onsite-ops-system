@@ -4620,6 +4620,8 @@
       if (state.topoDeleteTimer) { clearTimeout(state.topoDeleteTimer); state.topoDeleteTimer = null; }
       state.topoContextRelId = null;
       state.topoEditRelId = null;
+      const cmenu = document.getElementById('topoLineContextMenu');
+      if (cmenu) cmenu.style.display = 'none';
       if (topoCmenuHideHandler) {
         document.removeEventListener('click', topoCmenuHideHandler);
         topoCmenuHideHandler = null;
