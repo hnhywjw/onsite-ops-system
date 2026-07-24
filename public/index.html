@@ -2068,8 +2068,9 @@
             <div id="topologyCanvas" style="position:relative;width:100%;min-height:500px;border:1px dashed #d1d5db;border-radius:8px;overflow:hidden;background:#f9fafb;">
               <div id="topologyNodes" style="position:absolute;top:0;left:0;right:0;bottom:0;"></div>
               <svg id="topologySvg" style="position:absolute;top:0;left:0;width:100%;height:100%;pointer-events:none;"></svg>
+              <div id="topoSelectionRect" style="position:absolute;border:1px dashed #3b82f6;background:rgba(59,130,246,0.1);display:none;pointer-events:none;z-index:50;"></div>
             </div>
-            <p style="margin-top:8px;font-size:12px;color:#9ca3af;">拖拽节点调整布局 · 点击已有连接线可删除关系 · Ctrl+点击多选节点后使用对齐按钮</p>
+            <p style="margin-top:8px;font-size:12px;color:#9ca3af;">单击选择设备 · 按住鼠标左键拖拽空白区域框选多个设备 · 拖拽节点调整布局 · 点击已有连接线可删除关系</p>
           </div>
         </div>
       </section>
@@ -4721,32 +4722,26 @@
       });
     }
 
+    function clearTopoSelection() {
+      state.topoSelectedNodes.forEach(id => {
+        const n = document.querySelector(`.topo-node[data-asset-id="${id}"]`);
+        if (n) updateNodeSelectionStyle(n, false);
+      });
+      state.topoSelectedNodes.clear();
+      renderAlignBar();
+    }
+
     function bindTopoNodeEvents() {
       document.querySelectorAll('.topo-node').forEach(node => {
+        let startX, startY, moved;
         node.onmousedown = function (e) {
           if (e.button !== 0) return;
-          if (e.ctrlKey || e.metaKey) {
-            e.preventDefault();
-            const aid = node.dataset.assetId;
-            if (state.topoSelectedNodes.has(aid)) {
-              state.topoSelectedNodes.delete(aid);
-              updateNodeSelectionStyle(node, false);
-            } else {
-              state.topoSelectedNodes.add(aid);
-              updateNodeSelectionStyle(node, true);
-            }
-            renderAlignBar();
-            return;
-          }
           e.preventDefault();
-          if (state.topoSelectedNodes.size > 0 && !state.topoSelectedNodes.has(node.dataset.assetId)) {
-            state.topoSelectedNodes.forEach(id => {
-              const n = document.querySelector(`.topo-node[data-asset-id="${id}"]`);
-              if (n) updateNodeSelectionStyle(n, false);
-            });
-            state.topoSelectedNodes.clear();
-            renderAlignBar();
-          }
+          e.stopPropagation();
+          startX = e.clientX;
+          startY = e.clientY;
+          moved = false;
+          const aid = node.dataset.assetId;
           state.topoDragNode = node;
           const canvas = document.getElementById('topologyCanvas');
           const crect = canvas.getBoundingClientRect();
@@ -4757,36 +4752,123 @@
             y: e.clientY - crect.top - (nodeTopPct / 100 * crect.height)
           };
           node.style.zIndex = 10;
-          document.addEventListener('mousemove', onTopoMouseMove);
-          document.addEventListener('mouseup', onTopoMouseUp);
+          function onMove(ev) {
+            if (Math.abs(ev.clientX - startX) > 3 || Math.abs(ev.clientY - startY) > 3) {
+              moved = true;
+            }
+            if (!moved) return;
+            const c = document.getElementById('topologyCanvas');
+            const cr = c.getBoundingClientRect();
+            const newLeft = ((ev.clientX - cr.left - state.topoDragStartCenter.x) / cr.width) * 100;
+            const newTop = ((ev.clientY - cr.top - state.topoDragStartCenter.y) / cr.height) * 100;
+            state.topoDragNode.style.left = newLeft + '%';
+            state.topoDragNode.style.top = newTop + '%';
+          }
+          function onUp(ev) {
+            document.removeEventListener('mousemove', onMove);
+            document.removeEventListener('mouseup', onUp);
+            if (moved) {
+              const aId = state.topoDragNode.dataset.assetId;
+              const nd = state.topoDragNode;
+              state.topoNodePositions[aId] = {
+                x: parseFloat(nd.style.left || '10%'),
+                y: parseFloat(nd.style.top || '10%')
+              };
+              nd.style.zIndex = 2;
+              state.topoDragNode = null;
+              renderTopoLines();
+            } else {
+              state.topoDragNode.style.zIndex = 2;
+              state.topoDragNode = null;
+              if (e.ctrlKey || e.metaKey) {
+                if (state.topoSelectedNodes.has(aid)) {
+                  state.topoSelectedNodes.delete(aid);
+                  updateNodeSelectionStyle(node, false);
+                } else {
+                  state.topoSelectedNodes.add(aid);
+                  updateNodeSelectionStyle(node, true);
+                }
+              } else {
+                clearTopoSelection();
+                state.topoSelectedNodes.add(aid);
+                updateNodeSelectionStyle(node, true);
+              }
+              renderAlignBar();
+            }
+          }
+          document.addEventListener('mousemove', onMove);
+          document.addEventListener('mouseup', onUp);
         };
       });
     }
 
-    function onTopoMouseMove(e) {
-      if (!state.topoDragNode) return;
+    (function setupCanvasSelection() {
       const canvas = document.getElementById('topologyCanvas');
-      const crect = canvas.getBoundingClientRect();
-      const newLeft = ((e.clientX - crect.left - state.topoDragStartCenter.x) / crect.width) * 100;
-      const newTop = ((e.clientY - crect.top - state.topoDragStartCenter.y) / crect.height) * 100;
-      state.topoDragNode.style.left = newLeft + '%';
-      state.topoDragNode.style.top = newTop + '%';
-    }
-
-    function onTopoMouseUp(e) {
-      if (!state.topoDragNode) return;
-      const assetId = state.topoDragNode.dataset.assetId;
-      const node = state.topoDragNode;
-      state.topoNodePositions[assetId] = {
-        x: parseFloat(node.style.left || '10%'),
-        y: parseFloat(node.style.top || '10%')
-      };
-      node.style.zIndex = 2;
-      state.topoDragNode = null;
-      document.removeEventListener('mousemove', onTopoMouseMove);
-      document.removeEventListener('mouseup', onTopoMouseUp);
-      renderTopoLines();
-    }
+      const selRect = document.getElementById('topoSelectionRect');
+      let selStartX, selStartY, selDragging;
+      canvas.addEventListener('mousedown', function (e) {
+        if (e.button !== 0) return;
+        if (e.target.closest('.topo-node') || e.target.closest('[data-rel-id]')) return;
+        const crect = canvas.getBoundingClientRect();
+        selStartX = e.clientX - crect.left;
+        selStartY = e.clientY - crect.top;
+        selDragging = false;
+        selRect.style.display = 'block';
+        selRect.style.left = selStartX + 'px';
+        selRect.style.top = selStartY + 'px';
+        selRect.style.width = '0px';
+        selRect.style.height = '0px';
+        function onMove(ev) {
+          const cr = canvas.getBoundingClientRect();
+          const cx = ev.clientX - cr.left;
+          const cy = ev.clientY - cr.top;
+          if (Math.abs(cx - selStartX) > 3 || Math.abs(cy - selStartY) > 3) selDragging = true;
+          if (!selDragging) return;
+          const l = Math.min(selStartX, cx);
+          const t = Math.min(selStartY, cy);
+          const rw = Math.abs(cx - selStartX);
+          const rh = Math.abs(cy - selStartY);
+          selRect.style.left = l + 'px';
+          selRect.style.top = t + 'px';
+          selRect.style.width = rw + 'px';
+          selRect.style.height = rh + 'px';
+        }
+        function onUp(ev) {
+          document.removeEventListener('mousemove', onMove);
+          document.removeEventListener('mouseup', onUp);
+          selRect.style.display = 'none';
+          if (!selDragging) {
+            clearTopoSelection();
+          } else {
+            const cr = canvas.getBoundingClientRect();
+            const rx = selStartX;
+            const ry = selStartY;
+            const ex = ev.clientX - cr.left;
+            const ey = ev.clientY - cr.top;
+            const l = Math.min(rx, ex);
+            const t = Math.min(ry, ey);
+            const r = Math.max(rx, ex);
+            const b = Math.max(ry, ey);
+            clearTopoSelection();
+            document.querySelectorAll('.topo-node').forEach(nd => {
+              const nrect = nd.getBoundingClientRect();
+              const nL = nrect.left - cr.left;
+              const nT = nrect.top - cr.top;
+              const nR = nL + nrect.width;
+              const nB = nT + nrect.height;
+              if (nR > l && nL < r && nB > t && nT < b) {
+                state.topoSelectedNodes.add(nd.dataset.assetId);
+                updateNodeSelectionStyle(nd, true);
+              }
+            });
+            renderAlignBar();
+          }
+          selDragging = false;
+        }
+        document.addEventListener('mousemove', onMove);
+        document.addEventListener('mouseup', onUp);
+      });
+    })();
 
     document.getElementById('topoSaveLayoutBtn').addEventListener('click', () => {
       saveTopoLayout();
