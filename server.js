@@ -7511,7 +7511,7 @@ async function notifyMonitorChange(asset, prevStatus, newStatus) {
       createdAt: now()
     });
     await writeDb(db);
-    broadcastToProject(asset.projectId, { type: 'monitor_alert', assetId: asset.id, assetName: asset.name, monitorStatus: newStatus, title, message });
+    broadcastToProject(asset.projectId, { type: 'monitor_alert', assetId: asset.id, assetName: asset.name, host: asset.monitorHost || '', monitorStatus: newStatus, title, message });
   } catch (_) {}
 }
 
