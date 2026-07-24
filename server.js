@@ -1375,6 +1375,8 @@ function normalizeDb(raw = {}) {
       monitorType: asset.monitorType || 'ping',
       monitorHost: asset.monitorHost || '',
       monitorPort: asset.monitorPort || '',
+      snmpCommunity: asset.snmpCommunity || 'public',
+      snmpPort: asset.snmpPort || '161',
       createdAt: asset.createdAt || now()
     })),
     assetRelations: (raw.assetRelations || []).map(rel => ({
@@ -1383,6 +1385,8 @@ function normalizeDb(raw = {}) {
       targetAssetId: rel.targetAssetId || '',
       relationType: rel.relationType || 'connected',
       label: rel.label || '',
+      sourcePort: rel.sourcePort || '',
+      targetPort: rel.targetPort || '',
       createdAt: rel.createdAt || now()
     })),
     logs: (raw.logs || []).map(log => ({
@@ -1663,6 +1667,9 @@ function normalizeDb(raw = {}) {
       createdAt: item.createdAt || now(),
       expiresAt: item.expiresAt || new Date(currentTime + sessionMaxAgeSeconds * 1000).toISOString()
     })).filter(item => item.token && item.userId && Date.parse(item.expiresAt) > currentTime),
+    topologyLayouts: (raw.topologyLayouts && typeof raw.topologyLayouts === 'object' && !Array.isArray(raw.topologyLayouts))
+      ? raw.topologyLayouts
+      : { positions: {} },
     systemConfig: normalizeSystemConfig(raw.systemConfig),
     runtimeState: normalizeRuntimeState(raw.runtimeState)
   };

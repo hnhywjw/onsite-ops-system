@@ -1086,17 +1086,21 @@
         <label class="full">安装位置<input id="edAssetInstallationLocation" placeholder="例：A区机房-03号机柜-2U" /></label>
         <label class="full">备注<textarea id="edAssetNotes"></textarea></label>
         <label class="full" style="border-top:1px solid #e5e7eb;padding-top:12px;margin-top:4px;font-weight:600;color:#374151;font-size:13px;">设备监控设置</label>
-        <label><span>启用监控</span><input type="checkbox" id="edAssetMonitorEnabled" style="width:auto;height:auto;margin-right:4px;" /></label>
+        <label class="full" style="display:flex;align-items:center;gap:8px;">
+          <input type="checkbox" id="edAssetMonitorEnabled" style="width:16px;height:16px;margin:0;flex-shrink:0;" />
+          <span style="font-weight:600;color:#374151;font-size:13px;">启用监控</span>
+        </label>
         <label>监控方式
           <select id="edAssetMonitorType">
             <option value="ping">Ping (ICMP)</option>
             <option value="tcp">TCP 端口检测</option>
+            <option value="snmp">SNMP</option>
           </select>
         </label>
         <label>监控地址/IP<input id="edAssetMonitorHost" placeholder="例：192.168.1.1" /></label>
         <label id="edAssetMonitorPortLabel" style="display:none;">端口号<input id="edAssetMonitorPort" type="number" placeholder="例：80" /></label>
-        <label>SNMP 团体字<input id="edAssetSnmpCommunity" placeholder="默认: public" /></label>
-        <label>SNMP 端口<input id="edAssetSnmpPort" type="number" placeholder="默认: 161" /></label>
+        <label id="edAssetSnmpCommunityLabel" style="display:none;">SNMP 团体字<input id="edAssetSnmpCommunity" placeholder="默认: public" /></label>
+        <label id="edAssetSnmpPortLabel" style="display:none;">SNMP 端口<input id="edAssetSnmpPort" type="number" placeholder="默认: 161" /></label>
       </div>
       <div id="assetEditMessage" style="margin:8px 0;font-size:13px;"></div>
       <div class="btn-row">
@@ -1980,17 +1984,21 @@
                <label><span>责任人/部门</span><input name="owner" /></label>
                 <label class="full"><span>备注</span><textarea name="notes"></textarea></label>
                 <label class="full" style="border-top:1px solid #e5e7eb;padding-top:12px;margin-top:4px;font-weight:600;color:#374151;font-size:13px;">设备监控设置</label>
-                <label><span>启用监控</span><input type="checkbox" name="monitorEnabled" id="assetMonitorEnabled" style="width:auto;height:auto;margin-right:4px;" /></label>
+                <label class="full" style="display:flex;align-items:center;gap:8px;">
+                  <input type="checkbox" name="monitorEnabled" id="assetMonitorEnabled" style="width:16px;height:16px;margin:0;flex-shrink:0;" />
+                  <span style="font-weight:600;color:#374151;font-size:13px;">启用监控</span>
+                </label>
                 <label><span>监控方式</span>
                   <select name="monitorType" id="assetMonitorType">
                     <option value="ping">Ping (ICMP)</option>
                     <option value="tcp">TCP 端口检测</option>
+                    <option value="snmp">SNMP</option>
                   </select>
                 </label>
                 <label><span>监控地址/IP</span><input name="monitorHost" placeholder="例：192.168.1.1" /></label>
                 <label id="assetMonitorPortLabel" style="display:none;"><span>端口号</span><input name="monitorPort" type="number" placeholder="例：80" /></label>
-                <label><span>SNMP 团体字</span><input name="snmpCommunity" placeholder="默认: public" /></label>
-                <label><span>SNMP 端口</span><input name="snmpPort" type="number" placeholder="默认: 161" /></label>
+                <label id="assetSnmpCommunityLabel" style="display:none;"><span>SNMP 团体字</span><input name="snmpCommunity" placeholder="默认: public" /></label>
+                <label id="assetSnmpPortLabel" style="display:none;"><span>SNMP 端口</span><input name="snmpPort" type="number" placeholder="默认: 161" /></label>
 
               <div style="display:flex;gap:8px;align-items:center;margin-bottom:12px;">
                 <button class="primary" id="assetSubmitBtn" type="submit" style="font-size:13px;padding:6px 12px;">保存资产</button>
@@ -4537,6 +4545,7 @@
       renderTopoLines();
       bindTopoNodeEvents();
       bindAlignButtons();
+      syncSelectedNodeTransforms();
       updateTopoStatusDots();
     }
 
@@ -4691,6 +4700,13 @@
       const baseTransform = 'translate(-50%,-50%)';
       node.style.transform = isSelected ? `${baseTransform} scale(1.05)` : baseTransform;
       node.classList.toggle('selected', isSelected);
+    }
+
+    function syncSelectedNodeTransforms() {
+      state.topoSelectedNodes.forEach(id => {
+        const node = document.querySelector(`.topo-node[data-asset-id="${id}"]`);
+        if (node) updateNodeSelectionStyle(node, true);
+      });
     }
 
     function bindTopoNodeEvents() {
@@ -8936,10 +8952,14 @@
     function toggleMonitorPort() {
       const type = document.getElementById('assetMonitorType').value;
       document.getElementById('assetMonitorPortLabel').style.display = type === 'tcp' ? '' : 'none';
+      document.getElementById('assetSnmpCommunityLabel').style.display = type === 'snmp' ? '' : 'none';
+      document.getElementById('assetSnmpPortLabel').style.display = type === 'snmp' ? '' : 'none';
     }
     function toggleEdMonitorPort() {
       const type = document.getElementById('edAssetMonitorType').value;
       document.getElementById('edAssetMonitorPortLabel').style.display = type === 'tcp' ? '' : 'none';
+      document.getElementById('edAssetSnmpCommunityLabel').style.display = type === 'snmp' ? '' : 'none';
+      document.getElementById('edAssetSnmpPortLabel').style.display = type === 'snmp' ? '' : 'none';
     }
     document.getElementById('assetMonitorType').addEventListener('change', toggleMonitorPort);
     document.getElementById('edAssetMonitorType').addEventListener('change', toggleEdMonitorPort);
