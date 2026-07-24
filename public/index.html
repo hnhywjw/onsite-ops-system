@@ -2409,7 +2409,7 @@
             <div class="card">
               <h3 style="margin-top:0;">软件升级</h3>
               <div class="muted">当前版本：<span id="systemCurrentVersion">-</span></div>
-              <p class="muted">上传升级包（.tar.gz），系统校验后将在下次重启容器时自动应用升级。</p>
+              <p class="muted">上传升级包（.tar.gz），系统将自动应用升级并重启容器。</p>
               <label style="margin-top:14px;">
                 <input id="systemUpgradeFile" type="file" accept=".tar.gz,.tgz,application/gzip,application/x-gzip" />
               </label>
@@ -7885,12 +7885,13 @@
         const formData = new FormData();
         formData.append('package', file);
         const data = await api('/api/system/upgrade', { method: 'POST', body: formData });
-        setMessage('systemUpgradeMessage', data.message);
+        setMessage('systemUpgradeMessage', data.message + '，页面即将自动刷新...', 'success');
         fileInput.value = '';
-        await refreshSystemManagement();
+        button.disabled = true;
+        button.textContent = '系统重启中...';
+        setTimeout(() => { location.reload(); }, 5000);
       } catch (error) {
         setMessage('systemUpgradeMessage', error.message, 'error');
-      } finally {
         button.disabled = false;
         button.textContent = originalText;
       }

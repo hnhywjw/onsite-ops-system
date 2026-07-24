@@ -7017,13 +7017,53 @@ const requestHandler = async (req, res) => {
         requestedBy: user.username
       }));
 
-      appendAuditLog(db, user, 'upgrade', 'system', '', `上传升级包 v${upgradeVersion}，将在下次容器重启后生效`);
+      appendAuditLog(db, user, 'upgrade', 'system', '', `上传升级包 v${upgradeVersion}，系统即将自动重启完成升级`);
       await writeDb(db);
 
-      return json(res, 200, {
-        message: `升级包 v${upgradeVersion} 已就绪，重启容器即可完成升级`,
+      const applyAndRestart = () => {
+        if (!isProduction) {
+          console.error('[upgrade] 非生产环境，跳过自动重启。请手动重启服务以应用升级。');
+          return;
+        }
+        try {
+          const appDir = path.resolve(__dirname);
+          const pendingDir = path.join(dataDir, 'upgrades', 'pending');
+          const readyFlag = path.join(dataDir, 'upgrades', 'UPGRADE_READY');
+          const entries = fs.readdirSync(pendingDir);
+          for (const entry of entries) {
+            const src = path.join(pendingDir, entry);
+            const dest = path.join(appDir, entry);
+            try {
+              if (fs.statSync(src).isDirectory()) {
+                if (entry === 'public' || entry === 'scripts') {
+                  fs.rmSync(dest, { recursive: true, force: true });
+                  fs.cpSync(src, dest, { recursive: true });
+                }
+              } else {
+                fs.copyFileSync(src, dest);
+              }
+              console.error(`[upgrade] Applied ${entry}`);
+            } catch (e) {
+              console.error(`[upgrade] Failed to apply ${entry}: ${e.message}`);
+            }
+          }
+          fs.rmSync(pendingDir, { recursive: true, force: true });
+          try { fs.unlinkSync(readyFlag); } catch (_) {}
+          console.error(`[upgrade] v${upgradeVersion} 升级完成，即将重启...`);
+        } catch (e) {
+          console.error(`[upgrade] 升级失败: ${e.message}`);
+        }
+        process.exit(0);
+      };
+
+      const body = JSON.stringify({
+        message: `升级包 v${upgradeVersion} 已接收，系统将自动应用升级并重启`,
         version: upgradeVersion
       });
+      res.writeHead(200, { 'Content-Type': 'application/json' });
+      res.end(body);
+      setTimeout(applyAndRestart, 800);
+      return;
     }
 
     if (req.method === 'GET' && pathname === '/api/system/upgrade/status') {
