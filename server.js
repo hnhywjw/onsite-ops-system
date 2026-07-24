@@ -6421,6 +6421,45 @@ const requestHandler = async (req, res) => {
       return res.end(record.content);
     }
 
+    if (req.method === 'GET' && pathname === '/api/ai-inspection/config-backup/records/diff') {
+      const user = requireAuth(req, res, db);
+      if (!user) return;
+      const id1 = reqUrl.searchParams.get('id1') || '';
+      const id2 = reqUrl.searchParams.get('id2') || '';
+      if (!id1 || !id2) return json(res, 400, { message: '请提供两个备份记录ID' });
+      const record1 = (db.configBackupRecords || []).find(item => item.id === id1);
+      const record2 = (db.configBackupRecords || []).find(item => item.id === id2);
+      if (!record1 || !record2) return json(res, 404, { message: '备份记录不存在' });
+      if (!canViewProject(user, record1.projectId) || !canViewProject(user, record2.projectId)) return json(res, 403, { message: '无权查看' });
+      const lines1 = (record1.content || '').split('\n');
+      const lines2 = (record2.content || '').split('\n');
+      const maxLen = Math.max(lines1.length, lines2.length);
+      const diffLines = [];
+      for (let i = 0; i < maxLen; i++) {
+        const l1 = i < lines1.length ? lines1[i] : null;
+        const l2 = i < lines2.length ? lines2[i] : null;
+        if (l1 === l2) {
+          diffLines.push({ type: 'same', line: i + 1, a: l1, b: l2 });
+        } else if (l1 === null) {
+          diffLines.push({ type: 'added', line: i + 1, a: null, b: l2 });
+        } else if (l2 === null) {
+          diffLines.push({ type: 'removed', line: i + 1, a: l1, b: null });
+        } else {
+          diffLines.push({ type: 'changed', line: i + 1, a: l1, b: l2 });
+        }
+      }
+      const added = diffLines.filter(d => d.type === 'added').length;
+      const removed = diffLines.filter(d => d.type === 'removed').length;
+      const changed = diffLines.filter(d => d.type === 'changed').length;
+      const hasDrift = added > 0 || removed > 0 || changed > 0;
+      return json(res, 200, {
+        added, removed, changed, hasDrift,
+        record1: { id: record1.id, filename: record1.filename, createdAt: record1.createdAt },
+        record2: { id: record2.id, filename: record2.filename, createdAt: record2.createdAt },
+        diff: diffLines
+      });
+    }
+
     if (req.method === 'DELETE' && pathname.startsWith('/api/ai-inspection/config-backup/records/')) {
       const user = requireEditor(req, res, db);
       if (!user) return;

@@ -222,6 +222,7 @@
     .pagination-bar button { font-size: 12px; padding: 6px 12px; }
     td .toolbar button { font-size: 13px; padding: 5px 10px; white-space: nowrap; }
     td .toolbar { font-size: 13px; white-space: nowrap; }
+    .workbench-item:hover { box-shadow: 0 2px 8px rgba(0,0,0,0.1); }
     .toolbar {
       display: flex;
       gap: 10px;
@@ -1347,11 +1348,30 @@
   </div>
 
   <div id="confirmModal" class="modal-overlay hidden">
-    <div class="modal-box" style="max-width:360px; text-align:center;">
-      <p id="confirmMessage" style="font-size:15px; color:var(--text); margin:0 0 20px;"></p>
+    <div class="modal-box" style="max-width:400px; text-align:center;">
+      <p id="confirmMessage" style="font-size:15px; color:var(--text); margin:0 0 16px;"></p>
+      <div id="confirmInputRow" class="hidden" style="margin-bottom:16px;">
+        <p style="font-size:13px;color:var(--danger);margin:0 0 8px;">请输入 <strong style="user-select:text;" id="confirmInputWord">确认操作</strong> 以继续：</p>
+        <input id="confirmInput" type="text" style="width:100%;text-align:center;" autocomplete="off" />
+      </div>
       <div class="btn-row" style="justify-content:center;">
         <button class="secondary" id="confirmCancelBtn" type="button">取消</button>
         <button class="primary" id="confirmOkBtn" type="button">确认</button>
+      </div>
+    </div>
+  </div>
+
+  <div id="configBackupDiffModal" class="modal-overlay hidden" style="z-index:10000;">
+    <div class="modal-box" style="max-width:900px; max-height:85vh; overflow-y:auto;">
+      <h3 style="margin-top:0;">配置备份版本对比</h3>
+      <div id="configBackupDiffSummary" style="margin-bottom:12px;font-size:13px;"></div>
+      <div style="display:flex;gap:8px;margin-bottom:12px;">
+        <div style="flex:1;"><strong>版本 A：</strong><span id="diffRec1Info"></span></div>
+        <div style="flex:1;"><strong>版本 B：</strong><span id="diffRec2Info"></span></div>
+      </div>
+      <div id="configBackupDiffContent" style="font-family:monospace;font-size:12px;line-height:1.6;max-height:60vh;overflow-y:auto;border:1px solid var(--border);border-radius:6px;padding:8px;background:#fafafa;white-space:pre-wrap;word-break:break-all;"></div>
+      <div class="btn-row" style="justify-content:flex-end;margin-top:12px;">
+        <button class="secondary" onclick="closeModal('configBackupDiffModal')" type="button">关闭</button>
       </div>
     </div>
   </div>
@@ -1550,6 +1570,12 @@
               <span id="dashboardPageInfo">第 1 / 1 页</span>
               <button class="secondary" id="dashboardNextBtn" type="button">下一页</button>
             </div>
+          </div>
+        </div>
+        <div class="card" style="margin-top:16px;">
+          <h3 style="margin-top:0;">待办中心</h3>
+          <div class="grid cols-3" id="workbenchPanel">
+            <div class="muted">加载中...</div>
           </div>
         </div>
         <div class="grid cols-2" style="margin-top: 16px;">
@@ -2645,6 +2671,7 @@
       aiInspectionResults: [],
       configBackupPlans: [],
       configBackupRecords: [],
+      configBackupDiffBaseId: null,
       notifications: [],
       auditLogs: [],
       systemServices: [],
@@ -4934,8 +4961,10 @@
       document.getElementById('configBackupRecordTable').innerHTML = backupRecordRows.map(item => {
         const target = state.aiInspectionTargets.find(entry => entry.id === item.targetId);
         const asset = state.assets.find(entry => entry.id === item.assetId);
+        const isSelected = state.configBackupDiffBaseId === item.id;
         const actions = [
           item.status === '成功' ? `<button class="secondary" data-action="download-config-backup-record" data-id="${item.id}" data-filename="${esc(item.filename || 'config-backup.txt')}" type="button">下载</button>` : '',
+          item.status === '成功' ? `<button class="secondary" data-action="diff-config-backup-record" data-id="${item.id}" type="button" style="${isSelected ? 'background:#dbeafe;color:#1d4ed8;border-color:#93c5fd;' : ''}">${isSelected ? '对比 (已选A)' : '对比'}</button>` : '',
           canEditData() ? `<button class="secondary" data-action="delete-config-backup-record" data-id="${item.id}" type="button">删除</button>` : ''
         ].filter(Boolean).join(' ') || '-';
         return `<tr><td>${esc(target?.name || '-')}</td><td>${esc(asset?.name || '-')}</td><td>${esc(item.filename || '-')}</td><td>${esc(formatBackupSize(item.size))}</td><td>${esc(item.status || '-')}</td><td>${esc(item.message || '-')}</td><td>${esc(item.createdAt || '-')}</td><td><div class="toolbar">${actions}</div></td></tr>`;
@@ -5834,6 +5863,65 @@
           <div class="muted">${diff >= 0 ? `剩余 ${diff} 天` : `已到期 ${Math.abs(diff)} 天`}</div>
         </div>
       `).join('') || '<div class="muted">暂无维保提醒</div>';
+      renderWorkbench();
+    }
+
+    function renderWorkbench() {
+      const role = state.user?.role || '';
+      const panels = [];
+      const today = new Date(); today.setHours(0, 0, 0, 0);
+
+      if (role === 'admin' || role === 'engineer') {
+        const pendingApprovals = filterByUserProject(state.approvals).filter(a => a.status === '待运维审批').length;
+        const pendingTasks = filterByUserProject(state.aiInspectionTasks).filter(t => t.status === '待执行' || t.status === '执行中').length;
+        const todayInspections = filterByUserProject(state.inspectionPlans).filter(p => p.nextDate && new Date(`${p.nextDate}T00:00:00`).getTime() === today.getTime() && p.status !== '已完成').length;
+        const expiredMaintenance = filterByUserProject(state.assets).filter(a => a.maintainExpiryDate && new Date(`${a.maintainExpiryDate}T00:00:00`) < today).length;
+        const pendingIncidents = filterByUserProject(state.incidents).filter(i => i.status !== '已关闭' && i.status !== '已解决').length;
+        const pendingChanges = filterByUserProject(state.changeRecords).filter(c => c.status === '待运维审批').length;
+        panels.push({ title: '待审批', count: pendingApprovals, color: '#ea580c', link: 'governance', linkSubtab: 'approvals' });
+        panels.push({ title: '自动化任务', count: pendingTasks, color: '#2563eb', link: 'aiInspection', linkSubtab: 'tasks' });
+        panels.push({ title: '今日巡检', count: todayInspections, color: '#16a34a', link: 'assetOps', linkSubtab: 'inspections' });
+        panels.push({ title: '维保已到期', count: expiredMaintenance, color: '#dc2626', link: 'assets', linkSubtab: 'list' });
+        panels.push({ title: '待处理故障', count: pendingIncidents, color: '#7f1d1d', link: 'assetOps', linkSubtab: 'incidents' });
+        panels.push({ title: '待审批变更', count: pendingChanges, color: '#9333ea', link: 'assetOps', linkSubtab: 'change' });
+      } else if (role === 'customer') {
+        const pendingCustomerApprovals = filterByUserProject(state.approvals).filter(a => a.status === '待客户确认').length;
+        const myIncidents = filterByUserProject(state.incidents).filter(i => i.status !== '已关闭').length;
+        panels.push({ title: '待客户确认', count: pendingCustomerApprovals, color: '#ea580c', link: 'governance', linkSubtab: 'approvals' });
+        panels.push({ title: '我的故障', count: myIncidents, color: '#dc2626', link: 'assetOps', linkSubtab: 'incidents' });
+      }
+      const html = panels.length ? panels.map(p => `
+        <a href="#" class="workbench-item" data-link-tab="${p.link}" data-link-subtab="${p.linkSubtab}" style="display:flex;align-items:center;gap:10px;padding:12px 16px;border:1px solid var(--border);border-radius:8px;text-decoration:none;color:inherit;transition:box-shadow 0.2s;">
+          <span style="font-size:24px;font-weight:700;color:${p.color};min-width:48px;text-align:center;">${p.count}</span>
+          <span style="font-size:14px;">${p.title}</span>
+        </a>
+      `).join('') : '<div class="muted">暂无待办事项</div>';
+      const panel = document.getElementById('workbenchPanel');
+      if (panel) panel.innerHTML = html;
+    }
+
+    async function showConfigBackupDiff(id1, id2) {
+      try {
+        const result = await api(`/api/ai-inspection/config-backup/records/diff?id1=${id1}&id2=${id2}`);
+        document.getElementById('diffRec1Info').textContent = `${result.record1.filename || '版本A'} (${result.record1.createdAt})`;
+        document.getElementById('diffRec2Info').textContent = `${result.record2.filename || '版本B'} (${result.record2.createdAt})`;
+        const driftIcon = result.hasDrift ? '&#9888;' : '&#10003;';
+        const driftColor = result.hasDrift ? '#dc2626' : '#16a34a';
+        document.getElementById('configBackupDiffSummary').innerHTML = `<span style="color:${driftColor};font-weight:600;">${driftIcon} ${result.hasDrift ? '检测到配置漂移' : '配置一致，无漂移'}</span> &nbsp; (<span style="color:#dc2626;">新增 ${result.added}</span>, <span style="color:#e02424;">删除 ${result.removed}</span>, <span style="color:#ea580c;">变更 ${result.changed}</span>)`;
+        const diffHtml = result.diff.map(d => {
+          let bg = ''; let prefix = ' ';
+          if (d.type === 'added') { bg = 'background:#dcfce7;'; prefix = '+'; }
+          else if (d.type === 'removed') { bg = 'background:#fee2e2;'; prefix = '-'; }
+          else if (d.type === 'changed') { bg = 'background:#fef3c7;'; prefix = '~'; }
+          const aText = d.a !== null ? esc(d.a) : '';
+          const bText = d.b !== null ? esc(d.b) : '';
+          return `<div style="${bg}padding:1px 6px;margin:1px 0;">${prefix} ${aText}</div>${d.type === 'changed' ? `<div style="${bg}padding:1px 6px;margin:1px 0;border-top:1px dashed #d4d4d4;">${prefix} ${bText}</div>` : ''}`;
+        }).join('');
+        document.getElementById('configBackupDiffContent').innerHTML = diffHtml || '<div class="muted">无差异内容</div>';
+        openModal('configBackupDiffModal');
+      } catch (error) {
+        setMessage('configBackupMessage', error.message, 'error');
+      }
     }
 
     function renderDashboardTable() {
@@ -6164,6 +6252,60 @@
           modal.removeEventListener('click', backdrop);
           okBtn.removeEventListener('click', ok);
           cancelBtn.removeEventListener('click', cancel);
+        };
+        const settle = value => {
+          if (settled) return;
+          settled = true;
+          cleanup();
+          closeModal('confirmModal');
+          resolve(value);
+        };
+        const backdrop = event => {
+          if (event.target === modal) settle(false);
+        };
+        const ok = event => {
+          event.preventDefault();
+          event.stopPropagation();
+          settle(true);
+        };
+        const cancel = event => {
+          event.preventDefault();
+          event.stopPropagation();
+          settle(false);
+        };
+        modal.addEventListener('click', backdrop);
+        okBtn.addEventListener('click', ok);
+        cancelBtn.addEventListener('click', cancel);
+        document.getElementById('confirmInputRow').classList.add('hidden');
+        document.getElementById('confirmOkBtn').disabled = false;
+        openModal('confirmModal');
+      });
+    }
+
+    function showDangerConfirm(message, confirmWord = '确认操作') {
+      return new Promise((resolve) => {
+        const messageEl = document.getElementById('confirmMessage');
+        const modal = document.getElementById('confirmModal');
+        const okBtn = document.getElementById('confirmOkBtn');
+        const cancelBtn = document.getElementById('confirmCancelBtn');
+        const inputRow = document.getElementById('confirmInputRow');
+        const input = document.getElementById('confirmInput');
+        const inputWord = document.getElementById('confirmInputWord');
+        messageEl.textContent = message;
+        inputWord.textContent = confirmWord;
+        input.value = '';
+        inputRow.classList.remove('hidden');
+        okBtn.disabled = true;
+        let settled = false;
+        const checkInput = () => { okBtn.disabled = input.value.trim() !== confirmWord; };
+        input.addEventListener('input', checkInput);
+        const cleanup = () => {
+          modal.removeEventListener('click', backdrop);
+          okBtn.removeEventListener('click', ok);
+          cancelBtn.removeEventListener('click', cancel);
+          input.removeEventListener('input', checkInput);
+          inputRow.classList.add('hidden');
+          okBtn.disabled = false;
         };
         const settle = value => {
           if (settled) return;
@@ -7632,6 +7774,16 @@
           await loadBaseData();
           openTabWithSubtab('aiInspection', 'configBackup');
         }
+        if (button.dataset.action === 'diff-config-backup-record') {
+          const id = button.dataset.id;
+          if (!state.configBackupDiffBaseId || state.configBackupDiffBaseId === id) {
+            state.configBackupDiffBaseId = state.configBackupDiffBaseId === id ? null : id;
+            renderAiInspection();
+          } else {
+            showConfigBackupDiff(state.configBackupDiffBaseId, id);
+            state.configBackupDiffBaseId = null;
+          }
+        }
       } catch (error) {
         setMessage('configBackupMessage', error.message, 'error');
       }
@@ -7749,7 +7901,7 @@
         setMessage('systemImportMessage', '请先选择 JSON 数据文件', 'error');
         return;
       }
-      if (!await showConfirm('高风险操作：导入会覆盖当前业务数据。系统会先自动创建导入前备份，并保留当前管理员登录状态，确认继续吗？')) {
+      if (!await showDangerConfirm('高风险操作：导入会覆盖当前业务数据。系统会先自动创建导入前备份，并保留当前管理员登录状态，请输入"确认操作"以继续。')) {
         return;
       }
       try {
@@ -7785,7 +7937,7 @@
         passwordInput.focus();
         return;
       }
-      if (!await showConfirm('高风险操作：数据库初始化后将清空所有业务数据，仅保留当前登录管理员账号。系统会先自动备份，确认继续执行吗？')) {
+      if (!await showDangerConfirm('高风险操作：数据库初始化后将清空所有业务数据，仅保留当前登录管理员账号。系统会先自动备份，请输入"确认操作"以继续。')) {
         return;
       }
       button.disabled = true;
@@ -8423,6 +8575,16 @@
     document.getElementById('documentEditModal').addEventListener('modalClosed', () => { delete state.editDocumentAccessKey; });
     document.getElementById('documentPasswordModal').addEventListener('click', function(e) { if (e.target === this) closeModal('documentPasswordModal'); });
     document.getElementById('documentDetailModal').addEventListener('click', function(e) { if (e.target === this) closeModal('documentDetailModal'); });
+    document.getElementById('configBackupDiffModal').addEventListener('click', function(e) { if (e.target === this) closeModal('configBackupDiffModal'); });
+
+    document.getElementById('workbenchPanel').addEventListener('click', event => {
+      const item = event.target.closest('.workbench-item');
+      if (!item) return;
+      event.preventDefault();
+      const tab = item.dataset.linkTab;
+      const subtab = item.dataset.linkSubtab;
+      if (tab && subtab) openTabWithSubtab(tab, subtab);
+    });
 
     ['change', 'input'].forEach(ev => {
       document.getElementById('documentProjectFilter')?.addEventListener(ev, renderDocuments);
