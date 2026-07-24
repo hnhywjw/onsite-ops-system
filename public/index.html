@@ -1052,6 +1052,16 @@
     </div>
   </div>
 
+  <div id="assetDetailModal" class="modal-overlay hidden">
+    <div class="modal-box" style="max-width:520px;">
+      <h3 style="margin-top:0;">资产详情</h3>
+      <div id="assetDetailBody" style="max-height:60vh;overflow-y:auto;"></div>
+      <div class="btn-row" style="margin-top:12px;">
+        <button class="secondary" type="button" onclick="closeModal('assetDetailModal')">关闭</button>
+      </div>
+    </div>
+  </div>
+
   <div id="assetEditModal" class="modal-overlay hidden">
     <div class="modal-box" style="max-width:520px;">
       <h3 id="assetEditModalTitle">修改资产</h3>
@@ -4908,7 +4918,7 @@
           <td>${esc(item.status === '运行中' ? '使用中' : (item.status || '-'))}</td>
           <td>${esc(item.owner || '-')}</td>
           <td style="max-width:100px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;" title="${esc(item.notes || '')}">${esc(item.notes || '')}</td>
-          <td><div class="toolbar" style="white-space:nowrap;">${canEditData() ? `<button class="secondary" data-action="edit-asset" data-id="${item.id}" type="button">修改</button><button class="secondary" data-action="delete-asset" data-id="${item.id}" type="button" style="background:#fee2e2;color:#dc2626;border-color:#fecaca;">删除</button>` : ''}</div></td>
+          <td><div class="toolbar" style="white-space:nowrap;">${canEditData() ? `<button class="secondary" data-action="edit-asset" data-id="${item.id}" type="button">修改</button><button class="secondary" data-action="detail-asset" data-id="${item.id}" type="button">详情</button><button class="secondary" data-action="delete-asset" data-id="${item.id}" type="button" style="background:#fee2e2;color:#dc2626;border-color:#fecaca;">删除</button>` : `<button class="secondary" data-action="detail-asset" data-id="${item.id}" type="button">详情</button>`}</div></td>
         </tr>
         `;
       }).join('') || '<tr><td colspan="14">暂无数据</td></tr>';
@@ -5928,6 +5938,44 @@
       document.getElementById('projectEditMessage').textContent = '';
       document.getElementById('projectEditMessage').className = 'message';
       openModal('projectEditModal');
+    }
+
+    function detailAsset(id) {
+      const asset = state.assets.find(item => item.id === id);
+      if (!asset) return;
+      const fields = [
+        ['资产名称', asset.name],
+        ['资产类型', asset.type],
+        ['品牌', asset.brand],
+        ['规格型号', asset.model],
+        ['序列号', asset.serialNumber],
+        ['版本', asset.version],
+        ['责任人/部门', asset.owner],
+        ['状态', asset.status],
+        ['维保到期日', asset.maintainExpiryDate],
+        ['安装位置', asset.installationLocation],
+        ['备注', asset.notes],
+        ['关联项目', formatProjectDisplayById(asset.projectId)]
+      ];
+      const monFields = [
+        ['启用监控', asset.monitorEnabled ? '是' : '否'],
+        ['监控方式', asset.monitorType || 'ping'],
+        ['监控地址/IP', asset.monitorHost],
+        ['端口号', asset.monitorPort],
+        ['SNMP 团体字', asset.snmpCommunity],
+        ['SNMP 端口', asset.snmpPort]
+      ];
+      let html = '<div style="display:grid;grid-template-columns:100px 1fr;gap:6px 12px;font-size:13px;">';
+      fields.forEach(([label, val]) => {
+        html += `<div style="color:#6b7280;text-align:right;">${esc(label)}</div><div style="color:#1f2937;">${esc(val || '-')}</div>`;
+      });
+      html += `<div style="grid-column:1/-1;border-top:1px solid #e5e7eb;margin:6px 0;padding-top:6px;color:#374151;font-weight:600;">设备监控设置</div>`;
+      monFields.forEach(([label, val]) => {
+        html += `<div style="color:#6b7280;text-align:right;">${esc(label)}</div><div style="color:#1f2937;">${esc(val || '-')}</div>`;
+      });
+      html += '</div>';
+      document.getElementById('assetDetailBody').innerHTML = html;
+      openModal('assetDetailModal');
     }
 
     function editAsset(id) {
@@ -8064,6 +8112,9 @@
         if (button.dataset.action === 'edit-asset') {
           editAsset(button.dataset.id);
         }
+        if (button.dataset.action === 'detail-asset') {
+          detailAsset(button.dataset.id);
+        }
         if (button.dataset.action === 'delete-asset') {
           await removeAsset(button.dataset.id);
         }
@@ -8891,13 +8942,19 @@
         '安装位置': 'A区机房-03号机柜-4U',
         '状态': '使用中',
         '责任人/部门': '网络部',
-        '备注': '备注信息'
+        '备注': '备注信息',
+        '监控方式': '（选填）ping / tcp / snmp',
+        '监控地址/IP': '（选填）192.168.1.1',
+        '端口号': '（选填）选tcp时填写，如80',
+        'SNMP团体字': '（选填）选snmp时填写，默认public',
+        'SNMP端口': '（选填）选snmp时填写，默认161'
       }];
       const ws = XLSX.utils.json_to_sheet(rows);
       ws['!cols'] = [
         { wch: 30 }, { wch: 10 }, { wch: 22 }, { wch: 14 }, { wch: 22 },
         { wch: 20 }, { wch: 14 }, { wch: 14 }, { wch: 26 }, { wch: 14 },
-        { wch: 14 }, { wch: 20 }
+        { wch: 14 }, { wch: 20 },
+        { wch: 18 }, { wch: 18 }, { wch: 14 }, { wch: 18 }, { wch: 14 }
       ];
       const wb = XLSX.utils.book_new();
       XLSX.utils.book_append_sheet(wb, ws, '资产导入模板');
