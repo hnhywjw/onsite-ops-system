@@ -7340,6 +7340,9 @@ wss.on('connection', (ws) => {
   wsClients.add(ws);
   ws.on('close', () => wsClients.delete(ws));
   ws.on('error', () => wsClients.delete(ws));
+  try {
+    ws.send(JSON.stringify({ type: 'traffic_update', rates: trafficMonitorState.rates, portStatus: trafficMonitorState.portStatus, timestamp: Date.now() }));
+  } catch (_) {}
 });
 
 const wsHeartbeatTimer = setInterval(() => {
