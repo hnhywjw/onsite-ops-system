@@ -1131,9 +1131,8 @@
           </select>
         </label>
         <label>源端口
-          <select id="relSourcePort" disabled>
-            <option value="">请先选择源资产</option>
-          </select>
+          <input id="relSourcePort" list="relSourcePortList" placeholder="请先选择源资产" disabled />
+          <datalist id="relSourcePortList"></datalist>
         </label>
         <label>目标资产 <span style="color:#dc2626;">*</span>
           <select id="relTargetAsset" required>
@@ -1141,9 +1140,8 @@
           </select>
         </label>
         <label>目标端口
-          <select id="relTargetPort" disabled>
-            <option value="">请先选择目标资产</option>
-          </select>
+          <input id="relTargetPort" list="relTargetPortList" placeholder="请先选择目标资产" disabled />
+          <datalist id="relTargetPortList"></datalist>
         </label>
         <label>关系类型
           <select id="relType">
@@ -4983,37 +4981,45 @@
       });
       const srcPort = document.getElementById('relSourcePort');
       const tgtPort = document.getElementById('relTargetPort');
-      srcPort.innerHTML = '<option value="">请先选择源资产</option>';
-      tgtPort.innerHTML = '<option value="">请先选择目标资产</option>';
+      srcPort.value = '';
+      srcPort.placeholder = '请先选择源资产';
       srcPort.disabled = true;
+      tgtPort.value = '';
+      tgtPort.placeholder = '请先选择目标资产';
       tgtPort.disabled = true;
+      document.getElementById('relSourcePortList').innerHTML = '';
+      document.getElementById('relTargetPortList').innerHTML = '';
       setMessage('relMessage', '', '');
       openModal('assetRelationModal');
     });
 
-    async function loadSnmpPorts(assetId, targetSelect) {
+    async function loadSnmpPorts(assetId, inputId, datalistId) {
+      const input = document.getElementById(inputId);
+      const datalist = document.getElementById(datalistId);
       if (!assetId) {
-        targetSelect.innerHTML = '<option value="">请先选择资产</option>';
-        targetSelect.disabled = true;
+        input.value = '';
+        input.placeholder = '请先选择资产';
+        input.disabled = true;
+        datalist.innerHTML = '';
         return;
       }
-      targetSelect.innerHTML = '<option value="">正在通过SNMP获取端口...</option>';
-      targetSelect.disabled = true;
+      input.placeholder = '正在通过SNMP获取端口...';
+      input.disabled = true;
       try {
         const data = await api('/api/assets/' + assetId + '/snmp-interfaces');
         const ports = data.interfaces || [];
-        if (data.error) {
-          targetSelect.innerHTML = '<option value="">SNMP不可用，请手动输入</option>';
-        } else if (!ports.length) {
-          targetSelect.innerHTML = '<option value="">未获取到端口（设备未开启SNMP或不可达）</option>';
+        if (data.error || !ports.length) {
+          datalist.innerHTML = '';
+          input.placeholder = '手动输入端口(SNMP不可用)';
         } else {
-          targetSelect.innerHTML = '<option value="">-- 请选择端口 --</option>' +
-            ports.map(p => `<option value="${esc(p)}">${esc(p)}</option>`).join('');
+          datalist.innerHTML = ports.map(p => `<option value="${esc(p)}">`).join('');
+          input.placeholder = '选择或手动输入端口';
         }
-        targetSelect.disabled = false;
+        input.disabled = false;
       } catch (_) {
-        targetSelect.innerHTML = '<option value="">SNMP查询失败</option>';
-        targetSelect.disabled = false;
+        datalist.innerHTML = '';
+        input.placeholder = '手动输入端口(SNMP不可用)';
+        input.disabled = false;
       }
     }
 
@@ -5034,14 +5040,12 @@
       targetSelect.value = rel.targetAssetId || '';
       const srcPort = document.getElementById('relSourcePort');
       const tgtPort = document.getElementById('relTargetPort');
-      await loadSnmpPorts(rel.sourceAssetId, srcPort);
-      if (rel.sourcePort && Array.from(srcPort.options).some(o => o.value === rel.sourcePort)) {
-        srcPort.value = rel.sourcePort;
-      }
-      await loadSnmpPorts(rel.targetAssetId, tgtPort);
-      if (rel.targetPort && Array.from(tgtPort.options).some(o => o.value === rel.targetPort)) {
-        tgtPort.value = rel.targetPort;
-      }
+      srcPort.value = '';
+      tgtPort.value = '';
+      await loadSnmpPorts(rel.sourceAssetId, 'relSourcePort', 'relSourcePortList');
+      if (rel.sourcePort) srcPort.value = rel.sourcePort;
+      await loadSnmpPorts(rel.targetAssetId, 'relTargetPort', 'relTargetPortList');
+      if (rel.targetPort) tgtPort.value = rel.targetPort;
       document.getElementById('relType').value = rel.relationType || 'connected';
       document.getElementById('relLabel').value = rel.label || '';
       setMessage('relMessage', '', '');
@@ -5049,11 +5053,13 @@
     }
 
     document.getElementById('relSourceAsset').addEventListener('change', function () {
-      loadSnmpPorts(this.value, document.getElementById('relSourcePort'));
+      document.getElementById('relSourcePort').value = '';
+      loadSnmpPorts(this.value, 'relSourcePort', 'relSourcePortList');
     });
 
     document.getElementById('relTargetAsset').addEventListener('change', function () {
-      loadSnmpPorts(this.value, document.getElementById('relTargetPort'));
+      document.getElementById('relTargetPort').value = '';
+      loadSnmpPorts(this.value, 'relTargetPort', 'relTargetPortList');
     });
 
     document.getElementById('relSaveBtn').addEventListener('click', async () => {
