@@ -283,7 +283,7 @@ Caddy 自动处理 HTTPS 和 WebSocket 透传，无需额外配置。
 
 ### 启用步骤
 
-1. 使用默认管理员账号（admin / admin123）登录系统
+1. 使用默认管理员账号（admin / Admin123!）登录系统
 2. 进入「系统管理」
 3. 找到「HTTPS 登录配置」区域
 4. 上传证书与私钥文件
@@ -441,7 +441,7 @@ mysqldump -u onsite_ops -p onsite_ops_system > /backup/onsite_ops_$(date +%Y%m%d
 
 | 账号 | 密码 | 角色 | 说明 |
 |------|------|------|------|
-| admin | admin123 | 管理员 | 拥有全部权限 |
+| admin | Admin123! | 管理员 | 拥有全部权限 |
 
 上线后请立即修改默认管理员密码。
 

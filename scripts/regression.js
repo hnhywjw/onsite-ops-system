@@ -1,5 +1,9 @@
 const https = require('https');
 const crypto = require('crypto');
+const fs = require('fs');
+const os = require('os');
+const path = require('path');
+const { execFileSync } = require('child_process');
 const base = process.env.BASE_URL || `http://localhost:${process.env.PORT || 3000}`;
 const httpsTestCert = `-----BEGIN CERTIFICATE-----
 MIIDCTCCAfGgAwIBAgIUPr7bIVsMkY3VtlXPIxK8jJFFSmgwDQYJKoZIhvcNAQEL
@@ -137,60 +141,22 @@ function sha256(value) {
   return crypto.createHash('sha256').update(value).digest('hex');
 }
 
-function createZip(entries) {
-  const localParts = [];
-  const centralParts = [];
-  let offset = 0;
-  for (const entry of entries) {
-    const nameBuffer = Buffer.from(entry.name);
-    const dataBuffer = Buffer.isBuffer(entry.data) ? entry.data : Buffer.from(entry.data);
-    const localHeader = Buffer.alloc(30);
-    localHeader.writeUInt32LE(0x04034b50, 0);
-    localHeader.writeUInt16LE(20, 4);
-    localHeader.writeUInt16LE(0, 6);
-    localHeader.writeUInt16LE(0, 8);
-    localHeader.writeUInt16LE(0, 10);
-    localHeader.writeUInt16LE(0, 12);
-    localHeader.writeUInt32LE(0, 14);
-    localHeader.writeUInt32LE(dataBuffer.length, 18);
-    localHeader.writeUInt32LE(dataBuffer.length, 22);
-    localHeader.writeUInt16LE(nameBuffer.length, 26);
-    localHeader.writeUInt16LE(0, 28);
-    localParts.push(localHeader, nameBuffer, dataBuffer);
-
-    const centralHeader = Buffer.alloc(46);
-    centralHeader.writeUInt32LE(0x02014b50, 0);
-    centralHeader.writeUInt16LE(20, 4);
-    centralHeader.writeUInt16LE(20, 6);
-    centralHeader.writeUInt16LE(0, 8);
-    centralHeader.writeUInt16LE(0, 10);
-    centralHeader.writeUInt16LE(0, 12);
-    centralHeader.writeUInt16LE(0, 14);
-    centralHeader.writeUInt32LE(0, 16);
-    centralHeader.writeUInt32LE(dataBuffer.length, 20);
-    centralHeader.writeUInt32LE(dataBuffer.length, 24);
-    centralHeader.writeUInt16LE(nameBuffer.length, 28);
-    centralHeader.writeUInt16LE(0, 30);
-    centralHeader.writeUInt16LE(0, 32);
-    centralHeader.writeUInt16LE(0, 34);
-    centralHeader.writeUInt16LE(0, 36);
-    centralHeader.writeUInt32LE(0, 38);
-    centralHeader.writeUInt32LE(offset, 42);
-    centralParts.push(centralHeader, nameBuffer);
-    offset += localHeader.length + nameBuffer.length + dataBuffer.length;
+function createTarGz(entries) {
+  const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), 'onsite-upgrade-'));
+  const archivePath = path.join(tempDir, 'upgrade.tar.gz');
+  const sourceDir = path.join(tempDir, 'payload');
+  fs.mkdirSync(sourceDir, { recursive: true });
+  try {
+    for (const entry of entries) {
+      const targetPath = path.join(sourceDir, entry.name);
+      fs.mkdirSync(path.dirname(targetPath), { recursive: true });
+      fs.writeFileSync(targetPath, Buffer.isBuffer(entry.data) ? entry.data : Buffer.from(entry.data));
+    }
+    execFileSync('tar', ['-czf', archivePath, '-C', sourceDir, '.']);
+    return fs.readFileSync(archivePath);
+  } finally {
+    fs.rmSync(tempDir, { recursive: true, force: true });
   }
-  const centralDirectory = Buffer.concat(centralParts);
-  const localDirectory = Buffer.concat(localParts);
-  const eocd = Buffer.alloc(22);
-  eocd.writeUInt32LE(0x06054b50, 0);
-  eocd.writeUInt16LE(0, 4);
-  eocd.writeUInt16LE(0, 6);
-  eocd.writeUInt16LE(entries.length, 8);
-  eocd.writeUInt16LE(entries.length, 10);
-  eocd.writeUInt32LE(centralDirectory.length, 12);
-  eocd.writeUInt32LE(localDirectory.length, 16);
-  eocd.writeUInt16LE(0, 20);
-  return Buffer.concat([localDirectory, centralDirectory, eocd]);
 }
 
 async function main() {
@@ -207,7 +173,7 @@ async function main() {
   assert(blockedLogin.status === 429, '登录限流未生效');
   const persistentBlockedLogin = await login('admin', 'wrong-password', { headers: throttledHeaders });
   assert(persistentBlockedLogin.status === 429, '登录限流持久化未生效');
-  const admin = await login('admin', 'admin123');
+  const admin = await login('admin', 'Admin123!');
   assert(admin.status === 200, '管理员登录失败');
   assert(Number(admin.data.systemConfig?.webIdleLogoutMinutes) >= 1, '登录响应未返回控制台超时配置');
   let cookie = admin.cookie;
@@ -231,9 +197,9 @@ async function main() {
   assert(settingsResult.status === 200, '保存控制台超时设置失败');
   assert(Number(settingsResult.data.systemConfig?.webIdleLogoutMinutes) === 45, '控制台超时设置保存结果不正确');
   assert(settingsResult.data.systemConfig?.httpsLoginEnabled === false, 'HTTPS 登录默认设置保存失败');
-  const secureLoginBeforeHttps = await login('admin', 'admin123', { headers: { 'x-forwarded-proto': 'https' } });
+  const secureLoginBeforeHttps = await login('admin', 'Admin123!', { headers: { 'x-forwarded-proto': 'https' } });
   assert(String(secureLoginBeforeHttps.headers['set-cookie'] || '').includes('Secure'), 'HTTPS 反代请求应派发 Secure Cookie');
-  const adminReauth = await login('admin', 'admin123');
+  const adminReauth = await login('admin', 'Admin123!');
   cookie = adminReauth.cookie;
   const httpsUploadForm = new FormData();
   httpsUploadForm.append('cert', new Blob([httpsTestCert], { type: 'application/x-pem-file' }), 'https-test-cert.pem');
@@ -250,9 +216,9 @@ async function main() {
     body: JSON.stringify({ httpsLoginEnabled: true, httpsPort: 3443, webIdleLogoutMinutes: 45 })
   });
   assert(httpsSettings.status === 200 && httpsSettings.data.systemConfig?.httpsLoginEnabled === true, '启用 HTTPS 登录失败');
-  const secureLoginAfterEnabled = await login('admin', 'admin123', { headers: { 'x-forwarded-proto': 'https' } });
+  const secureLoginAfterEnabled = await login('admin', 'Admin123!', { headers: { 'x-forwarded-proto': 'https' } });
   assert(String(secureLoginAfterEnabled.headers['set-cookie'] || '').includes('Secure'), '启用 HTTPS 登录后未下发 Secure Cookie');
-  cookie = (await login('admin', 'admin123')).cookie;
+  cookie = (await login('admin', 'Admin123!')).cookie;
   const httpsServices = await request('/api/system/services', { headers: { cookie } });
   const httpsService = Array.isArray(httpsServices.data) ? httpsServices.data.find(item => item.key === 'https-login') : null;
   assert(httpsServices.status === 200 && httpsService, 'HTTPS 服务状态未返回');
@@ -268,12 +234,22 @@ async function main() {
    assert(hasAuditLog(auditAfterBackup.data.data, 'export', '导出系统数据'), '导出系统数据未写入操作日志');
    assert(hasAuditLog(auditAfterBackup.data.data, 'backup', '创建系统备份'), '创建系统备份未写入操作日志');
   const invalidUpgradeForm = new FormData();
-  const invalidManifest = JSON.stringify({ version: '1.0.1', files: ['public/version.txt'], sha256: { 'public/version.txt': sha256('wrong-content') } }, null, 2);
-  const invalidZip = createZip([
+  const invalidManifest = JSON.stringify({
+    version: '1.0.1',
+    files: ['package.json', 'server.js', 'public/version.txt'],
+    sha256: {
+      'package.json': sha256(JSON.stringify({ name: 'onsite-ops-system', version: '1.0.1' })),
+      'server.js': sha256('module.exports = "upgrade";\n'),
+      'public/version.txt': sha256('wrong-content')
+    }
+  }, null, 2);
+  const invalidArchive = createTarGz([
     { name: 'manifest.json', data: invalidManifest },
+    { name: 'package.json', data: JSON.stringify({ name: 'onsite-ops-system', version: '1.0.1' }) },
+    { name: 'server.js', data: 'module.exports = "upgrade";\n' },
     { name: 'public/version.txt', data: 'upgrade-content' }
   ]);
-  invalidUpgradeForm.append('file', new Blob([invalidZip], { type: 'application/zip' }), 'invalid-upgrade.zip');
+  invalidUpgradeForm.append('package', new Blob([invalidArchive], { type: 'application/gzip' }), 'invalid-upgrade.tar.gz');
   const invalidUpgrade = await fetch(base + '/api/system/upgrade', { method: 'POST', headers: withCsrf({ cookie }, 'POST'), body: invalidUpgradeForm });
   const invalidUpgradeData = await invalidUpgrade.json();
   assert(invalidUpgrade.status === 400 && /签名|SHA256/.test(String(invalidUpgradeData.message || '')), `升级包完整性校验未生效: ${invalidUpgrade.status} ${String(invalidUpgradeData.message || '')}`);
@@ -469,7 +445,7 @@ async function main() {
   const reset = await request('/api/system/reset', {
     method: 'POST',
     headers: { cookie, 'Content-Type': 'application/json' },
-    body: JSON.stringify({ password: 'admin123' })
+    body: JSON.stringify({ password: 'Admin123!' })
   });
   assert(reset.status === 200, '初始化数据库失败');
   const usersAfterReset = await request('/api/users', { headers: { cookie } });

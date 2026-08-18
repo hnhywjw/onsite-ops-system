@@ -1112,6 +1112,12 @@ function sanitizeAiInspectionTarget(item) {
   };
 }
 
+function sanitizeUser(user) {
+  if (!user) return null;
+  const { passwordHash, securityQuestion, securityAnswerHash, ...safe } = user;
+  return safe;
+}
+
 function buildAiInspectionAnalysis(category, metrics, realData = null) {
   let score = 100;
   const abnormalItems = [];
@@ -1299,23 +1305,33 @@ function probePortOpen(host, port) {
   });
 }
 
-function executeSSHCheck(host, port, username, password) {
+function executeSSHCheck(host, port, username, secret, options = {}) {
   if (!validateHost(host) || !validatePort(port)) return Promise.resolve({ success: false, stdout: '', stderr: 'Invalid host or port' });
   if (!username || typeof username !== 'string' || !/^[a-zA-Z0-9_.-]+$/.test(username)) return Promise.resolve({ success: false, stdout: '', stderr: 'Invalid username' });
   return new Promise((resolve) => {
     const passFile = `/tmp/sshpass-${Date.now()}-${crypto.randomBytes(8).toString('hex')}`;
-    fs.writeFileSync(passFile, password || '', { mode: 0o600 });
+    const keyFile = `/tmp/sshkey-${Date.now()}-${crypto.randomBytes(8).toString('hex')}`;
     const args = [
-      '-f', passFile,
       'ssh',
       '-o', 'StrictHostKeyChecking=accept-new',
       '-o', 'ConnectTimeout=5',
+      '-o', 'BatchMode=yes',
       '-p', String(port),
-      `${username}@${host}`,
-      'uptime && df -h && free'
+      `${username}@${host}`
     ];
-    execFile('sshpass', args, { timeout: 15000, maxBuffer: 1024 * 1024 }, (error, stdout, stderr) => {
+    let executable = 'ssh';
+    if (options.privateKey) {
+      fs.writeFileSync(keyFile, secret || '', { mode: 0o600 });
+      args.splice(4, 0, '-o', 'IdentitiesOnly=yes', '-i', keyFile);
+    } else {
+      fs.writeFileSync(passFile, secret || '', { mode: 0o600 });
+      executable = 'sshpass';
+      args.unshift('-f', passFile);
+    }
+    args.push('uptime && df -h && free');
+    execFile(executable, args, { timeout: 15000, maxBuffer: 1024 * 1024 }, (error, stdout, stderr) => {
       fs.unlink(passFile, () => {});
+      fs.unlink(keyFile, () => {});
       if (error) return resolve({ success: false, stdout: '', stderr: stderr || error.message });
       resolve({ success: true, stdout: stdout || '', stderr: '' });
     });
@@ -1689,7 +1705,12 @@ function normalizeInspectionAttachment(attachment) {
 
 function serializeDbSnapshot(db) {
   const normalized = normalizeDb(db);
-  return { ...normalized, sessions: [], runtimeState: { loginRateLimits: [] } };
+  return {
+    ...normalized,
+    sessions: [],
+    runtimeState: { loginRateLimits: [] },
+    documentAttachments: collectDocumentAttachments(normalized.documents || [])
+  };
 }
 
 function buildResetDbForNewEnvironment(currentUser, currentSessionToken, currentSession) {
@@ -1724,6 +1745,34 @@ function buildImportedDbPreservingCurrentSession(raw, currentUser, currentSessio
     expiresAt: currentSession.expiresAt || new Date(Date.now() + sessionMaxAgeSeconds * 1000).toISOString()
   }] : [];
   return nextDb;
+}
+
+function collectDocumentAttachments(documents) {
+  return (documents || []).flatMap(doc => {
+    if (!doc.attachmentPath || !fs.existsSync(doc.attachmentPath)) return [];
+    return [{
+      documentId: doc.id,
+      attachmentName: doc.attachmentName || path.basename(doc.attachmentPath),
+      dataBase64: fs.readFileSync(doc.attachmentPath).toString('base64')
+    }];
+  });
+}
+
+function restoreDocumentAttachments(db, attachments) {
+  if (!Array.isArray(attachments) || !attachments.length) return;
+  for (const item of attachments) {
+    const target = (db.documents || []).find(doc => doc.id === item.documentId);
+    if (!target || !item.dataBase64) continue;
+    const attachmentName = sanitizeUploadFilename(item.attachmentName || target.attachmentName || 'attachment');
+    const docDir = path.join(documentsUploadDir, target.id);
+    fs.mkdirSync(docDir, { recursive: true });
+    const attachmentPath = resolveSafeChildPath(docDir, attachmentName);
+    const content = Buffer.from(String(item.dataBase64), 'base64');
+    fs.writeFileSync(attachmentPath, content);
+    target.attachmentName = attachmentName;
+    target.attachmentPath = attachmentPath;
+    target.attachmentSize = content.length;
+  }
 }
 
 function listBackupFiles() {
@@ -1796,6 +1845,7 @@ function writeDbToFile(db) {
 }
 
 let latestFileDbCache = null;
+let fileDbNeedsSyncToMySql = false;
 
 function readDbInternalSync() {
   if (latestFileDbCache) return latestFileDbCache;
@@ -1815,10 +1865,12 @@ let mysqlResetMutex = Promise.resolve();
 async function readDb() {
   try {
     await ensureMySqlReady();
+    await syncFileDbToMySqlIfNeeded();
     const [rows] = await mysqlPool.query('SELECT state_key, state_json FROM app_state');
     if (!rows.length) {
       const initial = readDbFromFile();
       await writeDb(initial, { silent: true });
+      fileDbNeedsSyncToMySql = false;
       return initial;
     }
     const raw = {};
@@ -1865,6 +1917,34 @@ async function resetMySqlConnection() {
   }
 }
 
+async function writeNormalizedDbToMySql(normalized) {
+  const connection = await mysqlPool.getConnection();
+  try {
+    await connection.beginTransaction();
+    for (const key of dbCollectionKeys) {
+      const value = normalized[key] !== undefined ? normalized[key] : (key === 'topologyLayouts' || key === 'systemConfig' || key === 'runtimeState' ? {} : []);
+      await connection.query(
+        'INSERT INTO app_state (state_key, state_json) VALUES (?, ?) ON DUPLICATE KEY UPDATE state_json = VALUES(state_json)',
+        [key, JSON.stringify(value)]
+      );
+    }
+    await connection.commit();
+  } catch (error) {
+    await connection.rollback();
+    throw error;
+  } finally {
+    connection.release();
+  }
+}
+
+async function syncFileDbToMySqlIfNeeded() {
+  if (!fileDbNeedsSyncToMySql) return;
+  const normalized = normalizeDb(readDbInternalSync());
+  await writeNormalizedDbToMySql(normalized);
+  writeDbToFile(normalized);
+  fileDbNeedsSyncToMySql = false;
+}
+
 let dbWriteLock = Promise.resolve();
 let dbSequence = 0;
 
@@ -1877,7 +1957,12 @@ async function writeDb(db, options = {}) {
     let writeTarget = db;
     if (db._seq !== undefined && db._seq < dbSequence) {
       const latest = readDbInternalSync();
+      const replaceCollections = new Set(options.replaceCollections || []);
       for (const key of dbCollectionKeys) {
+        if (replaceCollections.has(key)) {
+          latest[key] = Array.isArray(writeTarget[key]) ? [...writeTarget[key]] : writeTarget[key];
+          continue;
+        }
         if (Array.isArray(latest[key]) && Array.isArray(writeTarget[key])) {
           const latestById = new Map(latest[key].map(item => [item.id, item]));
           for (const item of writeTarget[key]) {
@@ -1890,7 +1975,6 @@ async function writeDb(db, options = {}) {
       }
       if (writeTarget.systemConfig) latest.systemConfig = writeTarget.systemConfig;
       if (writeTarget.runtimeState) latest.runtimeState = writeTarget.runtimeState;
-      latest.sessions = writeTarget.sessions;
       writeTarget = latest;
     }
     dbSequence++;
@@ -1898,27 +1982,15 @@ async function writeDb(db, options = {}) {
     const normalized = normalizeDb(writeTarget);
     try {
       await ensureMySqlReady();
-      const connection = await mysqlPool.getConnection();
-      try {
-        await connection.beginTransaction();
-        for (const key of dbCollectionKeys) {
-          await connection.query(
-            'INSERT INTO app_state (state_key, state_json) VALUES (?, ?) ON DUPLICATE KEY UPDATE state_json = VALUES(state_json)',
-            [key, JSON.stringify(normalized[key] || [])]
-          );
-        }
-        await connection.commit();
-        writeDbToFile(normalized);
-      } catch (error) {
-        await connection.rollback();
-        throw error;
-      } finally {
-        connection.release();
-      }
+      await syncFileDbToMySqlIfNeeded();
+      await writeNormalizedDbToMySql(normalized);
+      writeDbToFile(normalized);
+      fileDbNeedsSyncToMySql = false;
     } catch (error) {
       await resetMySqlConnection();
       if (allowFileDbFallback) {
         writeDbToFile(normalized);
+        fileDbNeedsSyncToMySql = true;
       } else {
         throw error;
       }
@@ -2246,7 +2318,6 @@ function isUnsafeMethod(method) {
 
 function isCsrfExemptPath(pathname) {
   return pathname === '/api/login'
-    || pathname === '/api/auth/ldap'
     || pathname === '/api/forgot-password/verify'
     || pathname === '/api/forgot-password/reset'
     || pathname.startsWith('/api/auth/oidc/');
@@ -2285,12 +2356,6 @@ function getAuthUser(req, db) {
   const user = db.users.find(item => item.id === session.userId) || null;
   if (!user || user.status === 'disabled' || user.status === 'pending') return null;
   return user;
-}
-
-function sanitizeUser(user) {
-  if (!user) return null;
-  const { passwordHash, ...safe } = user;
-  return safe;
 }
 
 function requireAuth(req, res, db) {
@@ -2633,7 +2698,13 @@ async function executeAiInspectionTask(db, task, options = {}) {
     const probeResults = [];
     if (target.address) {
       if (['password', 'key'].includes(target.authType) && (target.protocol === 'ssh' || target.authType === 'password')) {
-        const sshResult = await executeSSHCheck(target.address, target.port || 22, target.account, decryptedPassword || decryptedKey || '');
+        const sshResult = await executeSSHCheck(
+          target.address,
+          target.port || 22,
+          target.account,
+          target.authType === 'key' ? decryptedKey : decryptedPassword,
+          { privateKey: target.authType === 'key' }
+        );
         probeResults.push({ type: 'ssh', result: sshResult });
         if (sshResult.success && sshResult.stdout) {
           const real = {};
@@ -2800,25 +2871,35 @@ function validateBackupCommand(command) {
   return { ok: true, command: normalized };
 }
 
-function executeSSHCommand(host, port, username, password, command) {
+function executeSSHCommand(host, port, username, secret, command, options = {}) {
   if (!validateHost(host) || !validatePort(port)) return Promise.resolve({ success: false, stdout: '', stderr: 'Invalid host or port' });
   if (!username || typeof username !== 'string' || !/^[a-zA-Z0-9_.-]+$/.test(username)) return Promise.resolve({ success: false, stdout: '', stderr: 'Invalid username' });
   const commandValidation = validateBackupCommand(command);
   if (!commandValidation.ok) return Promise.resolve({ success: false, stdout: '', stderr: commandValidation.message });
   return new Promise((resolve) => {
     const passFile = `/tmp/sshpass-${Date.now()}-${crypto.randomBytes(8).toString('hex')}`;
-    fs.writeFileSync(passFile, password || '', { mode: 0o600 });
+    const keyFile = `/tmp/sshkey-${Date.now()}-${crypto.randomBytes(8).toString('hex')}`;
     const args = [
-      '-f', passFile,
       'ssh',
       '-o', 'StrictHostKeyChecking=accept-new',
       '-o', 'ConnectTimeout=8',
+      '-o', 'BatchMode=yes',
       '-p', String(port),
-      `${username}@${host}`,
-      commandValidation.command
+      `${username}@${host}`
     ];
-    execFile('sshpass', args, { timeout: 30000, maxBuffer: 1024 * 1024 }, (error, stdout, stderr) => {
+    let executable = 'ssh';
+    if (options.privateKey) {
+      fs.writeFileSync(keyFile, secret || '', { mode: 0o600 });
+      args.splice(4, 0, '-o', 'IdentitiesOnly=yes', '-i', keyFile);
+    } else {
+      fs.writeFileSync(passFile, secret || '', { mode: 0o600 });
+      executable = 'sshpass';
+      args.unshift('-f', passFile);
+    }
+    args.push(commandValidation.command);
+    execFile(executable, args, { timeout: 30000, maxBuffer: 1024 * 1024 }, (error, stdout, stderr) => {
       fs.unlink(passFile, () => {});
+      fs.unlink(keyFile, () => {});
       if (error) return resolve({ success: false, stdout: '', stderr: stderr || error.message });
       resolve({ success: true, stdout: stdout || '', stderr: '' });
     });
@@ -2897,9 +2978,11 @@ async function executeConfigBackupPlan(db, plan, options = {}) {
   let backupPayload = '';
   if (mode === 'cli') {
     if (target.protocol !== 'ssh') return fail('CLI 配置备份当前支持 SSH 协议');
-    const password = decryptCredential(target.password || target.privateKey || '');
+    const secret = target.authType === 'key'
+      ? decryptCredential(target.privateKey || '')
+      : decryptCredential(target.password || '');
     const command = target.backupCommand || (target.category === 'server' ? 'cat /etc/os-release' : 'show running-config');
-    const commandResult = await executeSSHCommand(target.address, port, target.account, password, command);
+    const commandResult = await executeSSHCommand(target.address, port, target.account, secret, command, { privateKey: target.authType === 'key' });
     if (!commandResult.success) return fail(commandResult.stderr || 'CLI 命令执行失败');
     backupPayload = normalizeBackupContent(commandResult.stdout, 'CLI 命令执行成功，未返回配置内容');
   } else {
@@ -4061,6 +4144,121 @@ function parseMultipart(buffer, boundary) {
   return parts;
 }
 
+function normalizeUpgradeArchivePath(relativePath) {
+  const normalized = path.posix.normalize(String(relativePath || '').replace(/\\/g, '/'));
+  if (!normalized || normalized === '.' || normalized.startsWith('/') || normalized.startsWith('..') || normalized.includes('/../')) {
+    throw new Error(`升级包包含非法路径：${relativePath}`);
+  }
+  return normalized;
+}
+
+function listUpgradeArchiveFiles(dir, baseDir = dir) {
+  const entries = fs.readdirSync(dir, { withFileTypes: true }).sort((a, b) => a.name.localeCompare(b.name));
+  const files = [];
+  for (const entry of entries) {
+    const abs = path.join(dir, entry.name);
+    if (entry.isDirectory()) {
+      files.push(...listUpgradeArchiveFiles(abs, baseDir));
+      continue;
+    }
+    if (entry.isFile()) {
+      files.push(path.relative(baseDir, abs).split(path.sep).join('/'));
+    }
+  }
+  return files;
+}
+
+function canonicalizeJson(value) {
+  if (Array.isArray(value)) return value.map(canonicalizeJson);
+  if (value && typeof value === 'object') {
+    return Object.keys(value).sort().reduce((result, key) => {
+      result[key] = canonicalizeJson(value[key]);
+      return result;
+    }, {});
+  }
+  return value;
+}
+
+function validateUpgradePackageIntegrity(pendingDir) {
+  const manifestPath = path.join(pendingDir, 'manifest.json');
+  if (!fs.existsSync(manifestPath)) return null;
+
+  let manifest;
+  try {
+    manifest = JSON.parse(fs.readFileSync(manifestPath, 'utf8'));
+  } catch (error) {
+    throw new Error(`升级包 manifest 无法解析：${error.message}`);
+  }
+
+  const rawFiles = Array.isArray(manifest.files) ? manifest.files : [];
+  if (!rawFiles.length) {
+    throw new Error('升级包 manifest 缺少 files 清单');
+  }
+  const checksumMap = manifest.sha256 && typeof manifest.sha256 === 'object' ? manifest.sha256 : null;
+  if (!checksumMap) {
+    throw new Error('升级包 manifest 缺少 SHA256 清单');
+  }
+
+  const files = rawFiles.map(item => normalizeUpgradeArchivePath(item));
+  const listedFiles = new Set(files);
+  if (listedFiles.size !== files.length) {
+    throw new Error('升级包 manifest 包含重复文件');
+  }
+
+  const extractedFiles = listUpgradeArchiveFiles(pendingDir).filter(item => item !== 'manifest.json');
+  const extractedSet = new Set(extractedFiles);
+  for (const file of files) {
+    if (!extractedSet.has(file)) {
+      throw new Error(`升级包缺少 manifest 声明文件：${file}`);
+    }
+    const expected = String(checksumMap[file] || '').trim().toLowerCase();
+    if (!/^[a-f0-9]{64}$/.test(expected)) {
+      throw new Error(`升级包 SHA256 清单无效：${file}`);
+    }
+    const actual = crypto.createHash('sha256').update(fs.readFileSync(path.join(pendingDir, file))).digest('hex');
+    if (actual !== expected) {
+      throw new Error(`升级包 SHA256 校验失败：${file}`);
+    }
+  }
+
+  for (const key of Object.keys(checksumMap)) {
+    const normalized = normalizeUpgradeArchivePath(key);
+    if (!listedFiles.has(normalized)) {
+      throw new Error(`升级包 manifest 存在未声明的 SHA256 项：${normalized}`);
+    }
+  }
+
+  const unlistedFiles = extractedFiles.filter(item => !listedFiles.has(item));
+  if (unlistedFiles.length) {
+    throw new Error(`升级包存在未声明文件：${unlistedFiles[0]}`);
+  }
+
+  if (manifest.signature !== undefined && manifest.signature !== null && String(manifest.signature).trim()) {
+    if (!upgradeSigningKey || upgradeSigningKey.length < 32) {
+      throw new Error('系统未配置升级签名密钥');
+    }
+    const normalizedChecksums = files.reduce((result, file) => {
+      result[file] = String(checksumMap[file] || '').trim().toLowerCase();
+      return result;
+    }, {});
+    const payload = JSON.stringify(canonicalizeJson({
+      version: manifest.version || '',
+      files,
+      sha256: normalizedChecksums
+    }));
+    const expectedSignature = crypto.createHmac('sha256', upgradeSigningKey).update(payload).digest('hex');
+    const receivedSignature = String(manifest.signature).trim().toLowerCase();
+    if (receivedSignature.length !== expectedSignature.length || !crypto.timingSafeEqual(Buffer.from(receivedSignature), Buffer.from(expectedSignature))) {
+      throw new Error('升级包签名校验失败');
+    }
+  }
+
+  return {
+    version: manifest.version || '',
+    files
+  };
+}
+
 function serveStatic(req, res, pathname) {
   const filePath = pathname === '/' ? path.join(publicDir, 'index.html') : path.join(publicDir, pathname);
   const normalized = path.resolve(filePath);
@@ -4150,7 +4348,7 @@ const requestHandler = async (req, res) => {
       const expiresAt = new Date(nowMs() + sessionMaxAgeSeconds * 1000).toISOString();
       db.sessions = (db.sessions || []).filter(item => item.userId !== user.id && Date.parse(item.expiresAt) > nowMs());
       db.sessions.push({ token, userId: user.id, createdAt: now(), expiresAt });
-      await writeDb(db, { silent: true });
+      await writeDb(db, { silent: true, replaceCollections: ['sessions'] });
       return json(res, 200, { user: sanitizeUser(user), systemConfig: db.systemConfig, csrfToken: getSessionCsrfToken(token) }, { 'Set-Cookie': buildSessionCookie(req, token, db.systemConfig) });
     }
 
@@ -4176,7 +4374,7 @@ const requestHandler = async (req, res) => {
       user.passwordHash = hash(body.newPassword);
       db.sessions = (db.sessions || []).filter(item => item.userId !== user.id);
       appendAuditLog(db, user, 'update', 'user', user.id, '修改个人密码');
-      await writeDb(db);
+      await writeDb(db, { replaceCollections: ['sessions'] });
       return json(res, 200, { message: '密码修改成功' });
     }
 
@@ -4223,7 +4421,7 @@ const requestHandler = async (req, res) => {
       user.passwordHash = hash(body.newPassword);
       db.sessions = (db.sessions || []).filter(item => item.userId !== user.id);
       appendAuditLog(db, user, 'update', 'user', user.id, '通过安全问题重置密码');
-      await writeDb(db);
+      await writeDb(db, { replaceCollections: ['sessions'] });
       return json(res, 200, { message: '密码重置成功，请使用新密码登录' });
     }
 
@@ -4368,7 +4566,7 @@ const requestHandler = async (req, res) => {
         const expiresAt = new Date(nowMs() + sessionMaxAgeSeconds * 1000).toISOString();
         db.sessions = (db.sessions || []).filter(item => item.userId !== localUser.id && Date.parse(item.expiresAt) > nowMs());
         db.sessions.push({ token, userId: localUser.id, createdAt: now(), expiresAt });
-        await writeDb(db);
+        await writeDb(db, { replaceCollections: ['sessions'] });
         res.writeHead(302, buildSecurityHeaders({
           Location: '/',
           'Set-Cookie': buildSessionCookie(req, token, db.systemConfig)
@@ -4387,14 +4585,27 @@ const requestHandler = async (req, res) => {
       const body = await readBody(req);
       const username = String(body.username || '').trim();
       const password = String(body.password || '');
+      if (!verifyCaptchaToken(body.captchaToken, body.captcha)) {
+        return json(res, 401, { message: '验证码错误' });
+      }
       if (!username || !password) {
         return json(res, 400, { message: '请输入用户名和密码' });
+      }
+      const rateLimitState = getLoginRateLimitState(db, req, username);
+      if (rateLimitState.blocked) {
+        return json(res, 429, { message: loginBlockedMessage(rateLimitState.retryAfterMs) }, rateLimitResponseHeaders(rateLimitState.retryAfterMs));
       }
       try {
         const ldapUser = await ldapAuthenticate(ldapUrl, ldapBaseDn, ldapBindDn, ldapBindPassword, username, password);
         if (!ldapUser) {
+          const failedState = registerLoginFailure(db, req, username);
+          await writeDb(db, { silent: true });
+          if (failedState.lockedUntil > nowMs()) {
+            return json(res, 429, { message: loginBlockedMessage(failedState.lockedUntil - nowMs()) }, rateLimitResponseHeaders(failedState.lockedUntil - nowMs()));
+          }
           return json(res, 401, { message: 'LDAP 认证失败' });
         }
+        clearLoginFailures(db, req, username);
         let createdLocalUser = false;
         let localUser = db.users.find(item => item.username === 'ldap_' + username);
         if (!localUser) {
@@ -4423,7 +4634,7 @@ const requestHandler = async (req, res) => {
         const expiresAt = new Date(nowMs() + sessionMaxAgeSeconds * 1000).toISOString();
         db.sessions = (db.sessions || []).filter(item => item.userId !== localUser.id && Date.parse(item.expiresAt) > nowMs());
         db.sessions.push({ token, userId: localUser.id, createdAt: now(), expiresAt });
-        await writeDb(db, { silent: !createdLocalUser });
+        await writeDb(db, { silent: !createdLocalUser, replaceCollections: ['sessions'] });
         return json(res, 200, { user: sanitizeUser(localUser), csrfToken: getSessionCsrfToken(token) }, { 'Set-Cookie': buildSessionCookie(req, token, db.systemConfig) });
       } catch (err) {
         return json(res, 502, { message: 'LDAP 认证服务不可用' });
@@ -4434,7 +4645,7 @@ const requestHandler = async (req, res) => {
       const cookies = parseCookies(req);
       if (cookies.sessionToken) {
         db.sessions = (db.sessions || []).filter(item => item.token !== cookies.sessionToken);
-        await writeDb(db, { silent: true });
+        await writeDb(db, { silent: true, replaceCollections: ['sessions'] });
       }
       return json(res, 200, { ok: true }, { 'Set-Cookie': buildClearSessionCookie(req, db.systemConfig) });
     }
@@ -4639,7 +4850,7 @@ const requestHandler = async (req, res) => {
       target.status = 'disabled';
       db.sessions = (db.sessions || []).filter(item => item.userId !== target.id);
       appendAuditLog(db, admin, 'update', 'user', target.id, `禁用账号 ${target.name}`, target.projectId);
-      await writeDb(db);
+      await writeDb(db, { replaceCollections: ['sessions'] });
       return json(res, 200, { message: '账号已禁用', user: sanitizeUser(target) });
     }
 
@@ -5329,6 +5540,7 @@ const requestHandler = async (req, res) => {
         if (err.status) return json(res, err.status, { message: err.message });
         throw err;
       });
+      if (!Buffer.isBuffer(rawBody)) return;
       const parts = parseMultipart(rawBody, boundary);
       const getField = (name) => {
         const part = parts.find(p => p.name === name && !p.filename);
@@ -5406,6 +5618,7 @@ const requestHandler = async (req, res) => {
           if (err.status) return json(res, err.status, { message: err.message });
           throw err;
         });
+        if (!Buffer.isBuffer(rawBody)) return;
         const parts = parseMultipart(rawBody, boundary);
         const getField = (name) => {
           const part = parts.find(p => p.name === name && !p.filename);
@@ -6918,7 +7131,7 @@ const requestHandler = async (req, res) => {
       const sessionToken = cookies.sessionToken || '';
       const currentSession = (db.sessions || []).find(item => item.token === sessionToken) || null;
       const nextDb = buildImportedDbPreservingCurrentSession(body, user, sessionToken, currentSession);
-      nextDb.systemConfig = db.systemConfig ? { ...db.systemConfig } : normalizeSystemConfig({});
+      restoreDocumentAttachments(nextDb, body.documentAttachments || []);
       const backupFilename = `backup-before-import-${now().replace(/[:.]/g, '-')}.json`;
       fs.writeFileSync(path.join(backupDir, backupFilename), JSON.stringify(serializeDbSnapshot(db), null, 2));
       appendAuditLog(nextDb, user, 'import', 'system', '', `导入系统数据，导入前备份 ${backupFilename}`);
@@ -7174,7 +7387,7 @@ const requestHandler = async (req, res) => {
         req.on('error', reject);
       });
       const parts = parseMultipart(rawBody, boundary);
-      const pkgPart = parts.find(part => part.name === 'package' && part.filename);
+      const pkgPart = parts.find(part => (part.name === 'package' || part.name === 'file') && part.filename);
       if (!pkgPart) return json(res, 400, { message: '请上传升级包文件' });
 
       const upgradesDir = path.join(dataDir, 'upgrades');
@@ -7233,6 +7446,13 @@ const requestHandler = async (req, res) => {
           !fs.statSync(path.join(pendingDir, 'public')).isDirectory()) {
         cleanUpgradeDir(pendingDir);
         return json(res, 400, { message: '升级包缺少必要文件（server.js / package.json / public/）' });
+      }
+
+      try {
+        validateUpgradePackageIntegrity(pendingDir);
+      } catch (error) {
+        cleanUpgradeDir(pendingDir);
+        return json(res, 400, { message: error.message });
       }
 
       let upgradeVersion = 'unknown';

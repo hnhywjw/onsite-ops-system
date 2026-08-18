@@ -124,7 +124,7 @@ async function cleanupData(page, payload) {
     await request('/api/logout', { method: 'POST', body: '{}' });
     const captchaResp = await request('/api/captcha');
     const decodedCaptcha = atob(captchaResp.data.token.replace(/-/g, '+').replace(/_/g, '/')).split(':')[0];
-    const loginResp = await request('/api/login', { method: 'POST', body: JSON.stringify({ username: 'admin', password: 'admin123', captchaToken: captchaResp.data.token, captcha: decodedCaptcha }) });
+    const loginResp = await request('/api/login', { method: 'POST', body: JSON.stringify({ username: 'admin', password: 'Admin123!', captchaToken: captchaResp.data.token, captcha: decodedCaptcha }) });
     state.csrfToken = loginResp.data && loginResp.data.csrfToken ? loginResp.data.csrfToken : '';
     const getList = async (url) => {
       const result = await request(url);
@@ -172,7 +172,7 @@ async function main() {
 
   try {
     // === Login ===
-    await login(page, 'admin', 'admin123');
+    await login(page, 'admin', 'Admin123!');
     await page.evaluate(() => { window.__DISABLE_WS_REFRESH = true; });
     await page.waitForFunction(() => {
       return typeof state !== 'undefined' && state.projects && Array.isArray(state.projects) && state.projects.length > 0;
@@ -325,7 +325,7 @@ async function main() {
 
     // === System: Backup & Export ===
     await logout(page);
-    await login(page, 'admin', 'admin123');
+    await login(page, 'admin', 'Admin123!');
     await page.click('button[data-tab="system"]');
     await page.click('section[data-tab="system"] button[data-subtab="upgrade"]');
     await page.click('#systemBackupBtn');

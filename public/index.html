@@ -993,6 +993,10 @@
       <input id="ldapUsername" placeholder="请输入 LDAP 用户名" />
       <label>LDAP 密码</label>
       <input id="ldapPassword" type="password" placeholder="请输入 LDAP 密码" />
+      <div class="captcha-row" style="justify-content:flex-start; margin:8px 0;">
+        <input id="ldapCaptchaInput" placeholder="验证码" maxlength="4" autocomplete="off" style="text-transform:uppercase; letter-spacing:4px; text-align:center; font-size:13px;" />
+        <img id="ldapCaptchaImg" src="" alt="LDAP 验证码" title="点击刷新" style="height:38px; width:90px;" />
+      </div>
       <div id="ldapError" class="modal-error"></div>
       <div class="btn-row">
         <button class="secondary" onclick="closeModal('ldapModal')">取消</button>
@@ -2810,6 +2814,7 @@
       user: null,
       csrfToken: '',
       captchaToken: '',
+      ldapCaptchaToken: '',
       regCaptchaToken: '',
       projects: [],
       users: [],
@@ -7219,6 +7224,19 @@
 
     document.getElementById('captchaImg').addEventListener('click', refreshCaptcha);
 
+    async function refreshLdapCaptcha() {
+      try {
+        const result = await api('/api/captcha');
+        state.ldapCaptchaToken = result.token;
+        document.getElementById('ldapCaptchaImg').src = result.svg;
+        document.getElementById('ldapCaptchaInput').value = '';
+      } catch (error) {
+        document.getElementById('ldapError').textContent = error.message;
+      }
+    }
+
+    document.getElementById('ldapCaptchaImg').addEventListener('click', refreshLdapCaptcha);
+
     function loadRememberedUsername() {
       const remembered = localStorage.getItem('rememberedUsername');
       if (remembered) {
@@ -7440,18 +7458,22 @@
     async function ldapLogin() {
       const username = document.getElementById('ldapUsername').value.trim();
       const password = document.getElementById('ldapPassword').value;
+      const captcha = document.getElementById('ldapCaptchaInput').value.trim();
       document.getElementById('ldapError').textContent = '';
       if (!username || !password) { document.getElementById('ldapError').textContent = '请输入用户名和密码'; return; }
+      if (!captcha) { document.getElementById('ldapError').textContent = '请输入验证码'; return; }
       try {
-        const result = await api('/api/auth/ldap', { method: 'POST', body: JSON.stringify({ username, password }) });
+        const result = await api('/api/auth/ldap', { method: 'POST', body: JSON.stringify({ username, password, captchaToken: state.ldapCaptchaToken || '', captcha }) });
         state.user = result.user;
         state.systemConfig = result.systemConfig || state.systemConfig;
         closeModal('ldapModal');
         setMessage('loginMessage', 'LDAP 登录成功');
         document.getElementById('ldapUsername').value = '';
         document.getElementById('ldapPassword').value = '';
+        document.getElementById('ldapCaptchaInput').value = '';
         await boot({ skipSession: true, preserveAppOnError: true });
       } catch (error) {
+        refreshLdapCaptcha();
         if (error.message && error.message.includes('未配置')) {
           closeModal('ldapModal');
           showUnconfiguredModal('LDAP', error.message + '。请联系管理员设置 LDAP_URL、LDAP_BASE_DN 等环境变量。');
@@ -7477,6 +7499,7 @@
 
     function ldapCheck() {
       openModal('ldapModal');
+      refreshLdapCaptcha();
     }
 
     function showUnconfiguredModal(title, message) {

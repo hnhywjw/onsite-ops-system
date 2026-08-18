@@ -59,7 +59,7 @@ async function main() {
   const ready = await request('/api/ready');
   assert(ready.status === 200 && ready.data.ok === true, '就绪检查失败');
 
-  const admin = await login('admin', 'admin123');
+  const admin = await login('admin', 'Admin123!');
   assert(admin.status === 200, '管理员登录失败');
   assert(admin.cookie, '登录后未返回会话 Cookie');
 
