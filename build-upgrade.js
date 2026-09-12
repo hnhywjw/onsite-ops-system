@@ -48,40 +48,70 @@ if (missing.length > 0) {
   process.exit(1);
 }
 
-const entries = [...includeFiles, ...includeDirs];
-
-const hashLines = [];
-for (const file of includeFiles) {
-  const p = path.join(rootDir, file);
-  if (fs.existsSync(p)) {
-    const hash = crypto.createHash('sha256').update(fs.readFileSync(p)).digest('hex');
-    hashLines.push(`${hash}  ${file}`);
-    console.log(`  SHA256 ${file}: ${hash.substring(0, 16)}...`);
+function canonicalizeJson(value) {
+  if (Array.isArray(value)) return value.map(canonicalizeJson);
+  if (value && typeof value === 'object') {
+    return Object.keys(value).sort().reduce((result, key) => {
+      result[key] = canonicalizeJson(value[key]);
+      return result;
+    }, {});
   }
+  return value;
 }
+
+function walkFiles(dir, prefix) {
+  const files = [];
+  const dirents = fs.readdirSync(dir, { withFileTypes: true });
+  for (const entry of dirents) {
+    if (entry.name === 'downloads' && prefix === 'public') continue;
+    const rel = `${prefix}/${entry.name}`;
+    const abs = path.join(dir, entry.name);
+    if (entry.isDirectory()) {
+      files.push(...walkFiles(abs, rel));
+    } else if (entry.isFile()) {
+      files.push(rel.split(path.sep).join('/'));
+    }
+  }
+  return files;
+}
+
+const files = [...includeFiles];
 for (const dir of includeDirs) {
-  const dirPath = path.join(rootDir, dir);
-  try {
-    const walkDir = (dp, prefix) => {
-      const dirents = fs.readdirSync(dp, { withFileTypes: true });
-      for (const e of dirents) {
-        const rel = prefix ? `${prefix}/${e.name}` : `${dir}/${e.name}`;
-        const abs = path.join(dp, e.name);
-        if (e.name === 'downloads' && prefix === 'public') continue;
-        if (e.isDirectory()) {
-          walkDir(abs, rel);
-        } else {
-          const hash = crypto.createHash('sha256').update(fs.readFileSync(abs)).digest('hex');
-          hashLines.push(`${hash}  ${rel}`);
-        }
-      }
-    };
-    walkDir(dirPath, dir);
-  } catch (_) {}
+  files.push(...walkFiles(path.join(rootDir, dir), dir));
 }
-const hashesFile = path.join(rootDir, 'SHA256SUMS');
-fs.writeFileSync(hashesFile, hashLines.join('\n') + '\n');
-entries.push('SHA256SUMS');
+files.sort();
+
+const sha256 = {};
+for (const file of files) {
+  const abs = path.join(rootDir, file);
+  sha256[file] = crypto.createHash('sha256').update(fs.readFileSync(abs)).digest('hex');
+  console.log(`  SHA256 ${file}: ${sha256[file].substring(0, 16)}...`);
+}
+
+const manifest = {
+  version,
+  files,
+  sha256
+};
+
+const signingKey = String(process.env.UPGRADE_SIGNING_KEY || '');
+if (signingKey.length >= 32) {
+  const payload = JSON.stringify(canonicalizeJson({
+    version: manifest.version || '',
+    files,
+    sha256
+  }));
+  manifest.signature = crypto.createHmac('sha256', signingKey).update(payload).digest('hex');
+  console.log('Upgrade package signed with UPGRADE_SIGNING_KEY');
+} else {
+  console.log('UPGRADE_SIGNING_KEY missing or shorter than 32 chars; manifest has no signature');
+  console.log('Production UI upload requires: UPGRADE_SIGNING_KEY=your-key npm run build-upgrade');
+}
+
+const manifestPath = path.join(rootDir, 'manifest.json');
+fs.writeFileSync(manifestPath, JSON.stringify(manifest, null, 2) + '\n');
+
+const entries = [...includeFiles, ...includeDirs, 'manifest.json'];
 
 try {
   execSync(`tar -czf "${outputPath}" --exclude=public/downloads ${entries.map(e => `"${e}"`).join(' ')}`, {
@@ -98,7 +128,7 @@ const sizeMB = (stats.size / (1024 * 1024)).toFixed(1);
 
 console.log(`Upgrade package created: ${outputName} (${sizeMB} MB)`);
 console.log(`Version: ${version}`);
-console.log(`  SHA256SUMS written (${hashLines.length} files)`);
+console.log(`  manifest.json written (${files.length} files)`);
 console.log('');
 console.log('To apply the upgrade:');
 console.log('  1. Upload via System Management -> Software Upgrade in the web UI');

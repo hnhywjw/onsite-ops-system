@@ -32,17 +32,14 @@ function assert(condition, message) {
   }
 }
 
-function decodeCaptchaToken(token) {
-  const decoded = Buffer.from(token, 'base64url').toString('utf8');
-  return decoded.split(':')[0];
-}
+const { decodeCaptchaFromSvg } = require('./captcha-glyphs');
 
 async function login(username, password) {
   const captcha = await request('/api/captcha');
   const result = await request('/api/login', {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ username, password, captchaToken: captcha.data.token, captcha: decodeCaptchaToken(captcha.data.token) })
+    body: JSON.stringify({ username, password, captchaToken: captcha.data.token, captcha: decodeCaptchaFromSvg(captcha.data) })
   });
   const cookie = (result.headers['set-cookie'] || '').split(';')[0];
   if (cookie && result.data.csrfToken) csrfByCookie.set(cookie, result.data.csrfToken);

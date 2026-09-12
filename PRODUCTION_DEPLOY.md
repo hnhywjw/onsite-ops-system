@@ -1,24 +1,33 @@
-# 驻场运维管理系统 v1.0.4 生产安装部署说明
+# 驻场运维管理系统 v1.0.12 生产安装部署说明
 
-本文档用于在生产环境部署 `onsite-ops-system-v1.0.4`。
+本文档用于在生产环境部署 `onsite-ops-system-v1.0.12`。
 
 ## 1. 交付物
 
-生产部署包：`onsite-ops-system-v1.0.4-production.tar.gz`
+完整安装包：`onsite-ops-system-v1.0.12-production.tar.gz`
+
+离线升级包：`onsite-ops-upgrade-v1.0.12.tar.gz`
+
+GitHub Release：https://github.com/hnhywjw/onsite-ops-system/releases/tag/v1.0.12
 
 包内核心文件：
 
 ```text
 README.md
 PRODUCTION_DEPLOY.md
+DEPLOY.md
 .env.production.example
 Dockerfile
+docker-compose.yml
 docker-compose.prod.yml
+docker-entrypoint.sh
 package.json
 package-lock.json
 server.js
-public/index.html
+public/
+scripts/
 pptx-template.json
+build-upgrade.js
 ```
 
 ## 2. 环境要求
@@ -51,7 +60,7 @@ pptx-template.json
 ```bash
 mkdir -p /opt/onsite-ops-system
 cd /opt/onsite-ops-system
-tar -xzf onsite-ops-system-v1.0.4-production.tar.gz
+tar -xzf onsite-ops-system-v1.0.12-production.tar.gz
 ```
 
 ### 3.1.1 创建数据目录并授权
@@ -261,7 +270,19 @@ docker compose --env-file .env.production -f docker-compose.prod.yml exec onsite
 
 ```bash
 cd /opt/onsite-ops-system
-tar -xzf onsite-ops-system-v1.0.4-production.tar.gz
+tar -xzf onsite-ops-system-v1.0.12-production.tar.gz
+```
+
+### 7.2.1 使用离线升级包
+
+已运行的系统可在「系统治理」页面上传 `onsite-ops-upgrade-v1.0.12.tar.gz`。
+
+GitHub 提供的升级包含 `manifest.json` 与 SHA256 清单。生产环境上传前，须用本机 `UPGRADE_SIGNING_KEY`（不少于 32 位）重新执行 `npm run build-upgrade`，生成带 HMAC 签名的包。页面会轮询 `/api/system/upgrade/status`，容器重启后由 `docker-entrypoint.sh` 替换 `server.js`、`public/`、`scripts/` 等文件。
+
+手动准备签名升级包时，可在解压后的安装目录执行：
+
+```bash
+UPGRADE_SIGNING_KEY='生产环境密钥' npm run build-upgrade
 ```
 
 ### 7.3 重建并重启
@@ -285,7 +306,7 @@ curl http://127.0.0.1:3000/api/ready
 - 管理员账号可登录
 - `/api/health` 返回正常
 - `/api/ready` 返回正常
-- 系统版本显示为 `v1.0.4`
+- 系统版本显示为 `v1.0.12`
 - 项目、资产、日志页面可读取数据
 - 自动化巡检页面可打开
 - 配置备份页面可打开

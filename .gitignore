@@ -181,3 +181,6 @@
 *.lz
 *.lzma
 *.iso
+
+# Generated upgrade manifest
+/manifest.json

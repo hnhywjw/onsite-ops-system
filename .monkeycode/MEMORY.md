@@ -39,13 +39,17 @@ Agent 在任务执行过程中发现的条目应遵循以下格式：
   - 每次用户要求手动提交到 GitHub 时，需要同步修改项目版本号。
 
 [生产部署数据库要求]
-- Date: 2026-06-19
-- Context: Agent 在执行 MySQL 存储改造与生产收敛时更新
-- Category: 环境配置
-- Instructions:
-  - 服务启动依赖 MySQL，连接参数通过 `MYSQL_HOST`、`MYSQL_PORT`、`MYSQL_USER`、`MYSQL_PASSWORD`、`MYSQL_DATABASE` 提供。
-  - 首次启动时若 MySQL 中无业务数据，系统会自动导入 `data/db.json` 作为初始数据。
+- Date: 2026-09-08
+  - Context: Agent 在把整库 JSON 改为 MySQL 集合表，并修复基础数据分页截断时更新
+  - Category: 环境配置
+  - Instructions:
+    - 服务启动依赖 MySQL，连接参数通过 `MYSQL_HOST`、`MYSQL_PORT`、`MYSQL_USER`、`MYSQL_PASSWORD`、`MYSQL_DATABASE` 提供。
+    - 首次启动时若 MySQL 中无业务数据，系统会自动导入 `data/db.json` 作为初始数据。
   - 生产环境默认关闭文件存储回退，仅在 `ALLOW_FILE_DB_FALLBACK=true` 时才允许回退到 `data/db.json`。
+  - 业务集合写入 `col_*` InnoDB 表；旧版 `app_state` 仅在集合表为空时迁移一次。
+  - 前端基础数据加载走 `?all=1` 全量接口；智能巡检结果/报告改为分页接口（pageSize=5），避免一次拉取数万条结果。
+  - `readDb()` 使用内存缓存，命中后不再全表读取 MySQL，也不再对整库 `JSON.stringify`；写入只持久化脏集合。
+  - 未设置 `ENCRYPTION_KEY` 时，运行时密钥会写入并复用 `data/encryption.key`，避免重启后无法解密凭据。
 
 [项目启动方式]
 - Date: 2026-06-19
@@ -57,14 +61,15 @@ Agent 在任务执行过程中发现的条目应遵循以下格式：
   - 生产部署默认通过 `docker-compose.yml` 同时启动应用和 MySQL。
 
 [项目校验命令]
-- Date: 2026-06-20
-- Context: Agent 在执行平台全面检查与浏览器级 E2E 补充时更新
-- Category: 测试方法
-- Instructions:
-  - 语法与静态校验使用 `npm run lint` 和 `npm run typecheck`。
-  - 端到端核心回归使用 `npm run regression`，依赖本地 `3000` 端口服务可访问。
-  - 浏览器级冒烟使用 `npm run e2e`，依赖本地 `3000` 端口服务可访问。
-  - 发布后自动化冒烟使用 `npm run smoke`，用于快速校验健康检查、登录态和核心读取接口。
+- Date: 2026-09-12
+  - Context: Agent 在收尾审查修复并同步点阵验证码测试解码时更新
+  - Category: 测试方法
+  - Instructions:
+    - 语法与静态校验使用 `npm run lint` 和 `npm run typecheck`。
+    - 端到端核心回归使用 `npm run regression`，依赖本地 `3000` 端口服务可访问。
+    - 浏览器级冒烟使用 `npm run e2e`，依赖本地 `3000` 端口服务可访问。
+    - 发布后自动化冒烟使用 `npm run smoke`，用于快速校验健康检查、登录态和核心读取接口。
+    - 登录验证码为点阵 SVG，regression / e2e / smoke 使用 `scripts/captcha-glyphs.js` 的 `decodeCaptchaFromSvg` 解码。
 
 [健康检查接口]
 - Date: 2026-06-20
@@ -73,6 +78,20 @@ Agent 在任务执行过程中发现的条目应遵循以下格式：
 - Instructions:
   - 存活检查使用 `GET /api/health`。
   - 就绪检查使用 `GET /api/ready`，会校验 MySQL 与备份目录状态。
+
+[回归前服务重启要求]
+- Date: 2026-08-19
+- Context: Agent 在补充工作汇报提醒回归时发现
+- Category: 排错调试
+- Instructions:
+  - 修改 `server.js` 后需要重启 `npm start` 对应的 `3000` 端口服务，再运行 `npm run regression`，否则回归会继续命中旧进程。
+
+[端到端测试执行顺序]
+- Date: 2026-08-20
+- Context: Agent 在执行平台新增功能与整体回归检查时发现
+- Category: 测试方法
+- Instructions:
+  - `npm run e2e` 需要与 `npm run regression` 顺序执行，避免并发运行导致浏览器登录链路超时并产生假失败。
 
 [Git 推送目标分支]
 - Date: 2026-07-02

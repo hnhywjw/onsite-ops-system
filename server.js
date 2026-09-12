@@ -2,16 +2,18 @@ const http = require('http');
 const https = require('https');
 const fs = require('fs');
 const path = require('path');
-const { exec, execFile, execSync } = require('child_process');
+const { execFile, execSync } = require('child_process');
 const crypto = require('crypto');
 const tls = require('tls');
 const { URL } = require('url');
 const os = require('os');
 const net = require('net');
+const dgram = require('dgram');
 const dns = require('dns').promises;
 const mysql = require('mysql2/promise');
 const { WebSocketServer } = require('ws');
 const packageInfo = require('./package.json');
+const { CAPTCHA_GLYPHS } = require('./scripts/captcha-glyphs');
 
 const root = __dirname;
 const publicDir = path.join(root, 'public');
@@ -33,6 +35,13 @@ const defaultWebIdleLogoutMinutes = parseInt(process.env.WEB_IDLE_LOGOUT_MINUTES
 const defaultHttpsPort = Number(process.env.HTTPS_PORT || 3443);
 const maintenanceIntervalMs = parseInt(process.env.MAINTENANCE_INTERVAL_MS, 10) || 60 * 1000;
 let systemTimezoneOffsetMinutes = 480;
+const defaultDailyReportReminderHour = 12;
+const defaultWeeklyReportReminderDays = 7;
+const defaultMonthlyReportReminderDays = 15;
+const defaultDailyLowHoursThreshold = 1;
+const defaultDailyHighHoursThreshold = 12;
+const defaultNoLogStreakDays = 3;
+const defaultProjectInactiveDays = 7;
 const auditArchiveRetentionDays = parseInt(process.env.AUDIT_ARCHIVE_RETENTION_DAYS, 10) || 180;
 const notificationArchiveRetentionDays = parseInt(process.env.NOTIFICATION_ARCHIVE_RETENTION_DAYS, 10) || 180;
 const localBackupRetentionDays = parseInt(process.env.LOCAL_BACKUP_RETENTION_DAYS, 10) || 30;
@@ -45,7 +54,94 @@ const dbConfig = {
   password: process.env.MYSQL_PASSWORD || 'onsite_ops_password',
   database: process.env.MYSQL_DATABASE || 'onsite_ops_system'
 };
-const dbCollectionKeys = ['users', 'projects', 'assets', 'assetRelations', 'topologyLayouts', 'logs', 'inspectionPlans', 'inspectionExecutions', 'spareParts', 'sparePartMovements', 'changeRecords', 'incidentRecords', 'approvals', 'notifications', 'auditLogs', 'knowledgeBase', 'documents', 'aiInspectionTargets', 'aiInspectionTemplates', 'aiInspectionTasks', 'aiInspectionResults', 'configBackupPlans', 'configBackupRecords', 'sessions', 'systemConfig', 'runtimeState'];
+const dbCollectionKeys = ['users', 'projects', 'assets', 'assetRelations', 'topologyLayouts', 'logs', 'inspectionPlans', 'inspectionExecutions', 'spareParts', 'sparePartMovements', 'changeRecords', 'incidentRecords', 'approvals', 'notifications', 'auditLogs', 'knowledgeBase', 'documents', 'workReports', 'aiInspectionTargets', 'aiInspectionTemplates', 'aiInspectionTasks', 'aiInspectionResults', 'configBackupPlans', 'configBackupRecords', 'sessions', 'systemConfig', 'runtimeState'];
+const objectCollectionKeys = ['topologyLayouts', 'systemConfig', 'runtimeState'];
+const OBJECT_ROOT_ID = '__root__';
+
+function collectionTableName(key) {
+  return `col_${key.replace(/[A-Z]/g, ch => `_${ch.toLowerCase()}`)}`;
+}
+
+function isObjectCollection(key) {
+  return objectCollectionKeys.includes(key);
+}
+
+function cloneDbSnapshot(db) {
+  const snap = {};
+  for (const key of dbCollectionKeys) {
+    const value = db[key];
+    if (Array.isArray(value)) {
+      snap[key] = (key === 'aiInspectionResults' || key === 'notifications')
+        ? value.slice()
+        : value.map(item => (item && typeof item === 'object' ? { ...item } : item));
+    } else if (value && typeof value === 'object') {
+      snap[key] = { ...value };
+    } else {
+      snap[key] = value;
+    }
+  }
+  return snap;
+}
+
+function pickDbCollections(db) {
+  const snap = {};
+  for (const key of dbCollectionKeys) snap[key] = db[key];
+  return snap;
+}
+
+function rememberLiveDb(db) {
+  latestFileDbCache = pickDbCollections(db);
+}
+
+function arrayHasDirtyItems(items) {
+  if (!Array.isArray(items)) return false;
+  for (let i = 0; i < items.length; i += 1) {
+    if (items[i] && items[i]._dirty) return true;
+  }
+  return false;
+}
+
+function clearCollectionDirtyFlags(value) {
+  if (!Array.isArray(value)) return;
+  for (let i = 0; i < value.length; i += 1) {
+    if (value[i] && value[i]._dirty) delete value[i]._dirty;
+  }
+}
+
+function collectionChanged(previous, next, key) {
+  const prev = previous ? previous[key] : undefined;
+  const curr = next ? next[key] : undefined;
+  if (prev === curr) return arrayHasDirtyItems(curr);
+  if (isObjectCollection(key)) {
+    return JSON.stringify(prev ?? null) !== JSON.stringify(curr ?? null);
+  }
+  if (!Array.isArray(prev) || !Array.isArray(curr)) return true;
+  if (prev.length !== curr.length) return true;
+  if (curr.length > 500) {
+    for (let i = 0; i < curr.length; i += 1) {
+      if (prev[i] !== curr[i]) return true;
+      if (curr[i] && curr[i]._dirty) return true;
+    }
+    return false;
+  }
+  return JSON.stringify(prev) !== JSON.stringify(curr);
+}
+
+function parseJsonPayload(raw, fallback) {
+  try {
+    return JSON.parse(raw);
+  } catch (error) {
+    return fallback;
+  }
+}
+
+function changedCollectionKeys(previous, next) {
+  if (!previous) return dbCollectionKeys.slice();
+  return dbCollectionKeys.filter(key => collectionChanged(previous, next, key));
+}
+const importCollectionLimit = parseInt(process.env.IMPORT_COLLECTION_LIMIT, 10) || 50000;
+const importUserLimit = parseInt(process.env.IMPORT_USER_LIMIT, 10) || 10000;
+const importBodyLimitBytes = parseInt(process.env.IMPORT_BODY_LIMIT_BYTES, 10) || 50 * 1024 * 1024;
 const allowFileDbFallback = process.env.ALLOW_FILE_DB_FALLBACK === 'true';
 const loginRateLimitWindowMs = parseInt(process.env.LOGIN_RATE_LIMIT_WINDOW_MS, 10) || 10 * 60 * 1000;
 const loginRateLimitLockMs = parseInt(process.env.LOGIN_RATE_LIMIT_LOCK_MS, 10) || 15 * 60 * 1000;
@@ -503,20 +599,54 @@ async function ldapAuthenticate(ldapUrlStr, baseDn, bindDn, bindPassword, userna
   });
 }
 
-const captchaCharset = 'ABCDEFGHJKLMNPQRSTUVWXYZ23456789';
+const captchaLetters = 'ABCDEFGHJKLMNPQRSTUVWXYZ';
+const captchaDigits = '23456789';
+const captchaCharset = `${captchaLetters}${captchaDigits}`;
 const captchaSecret = crypto.randomBytes(32).toString('hex');
+const captchaChallenges = new Map();
+
+function hashCaptchaAnswer(answer) {
+  return crypto.createHmac('sha256', captchaSecret).update(String(answer || '').trim().toUpperCase()).digest('hex');
+}
+
+function pruneCaptchaChallenges() {
+  const nowMs = Date.now();
+  for (const [token, entry] of captchaChallenges) {
+    if (!entry || entry.expiresAt <= nowMs) captchaChallenges.delete(token);
+  }
+}
 
 function generateCaptchaCode() {
-  let code = '';
-  for (let i = 0; i < 4; i++) {
-    code += captchaCharset[crypto.randomInt(0, captchaCharset.length)];
+  const chars = [
+    captchaLetters[crypto.randomInt(0, captchaLetters.length)],
+    captchaDigits[crypto.randomInt(0, captchaDigits.length)]
+  ];
+  while (chars.length < 4) {
+    chars.push(captchaCharset[crypto.randomInt(0, captchaCharset.length)]);
   }
-  return code;
+  for (let i = chars.length - 1; i > 0; i--) {
+    const j = crypto.randomInt(0, i + 1);
+    [chars[i], chars[j]] = [chars[j], chars[i]];
+  }
+  return chars.join('');
+}
+
+function renderCaptchaGlyph(ch, originX, originY, color, groupIndex) {
+  const pattern = CAPTCHA_GLYPHS[ch];
+  if (!pattern) return '';
+  const cell = 3.2;
+  let out = '';
+  for (let row = 0; row < pattern.length; row += 1) {
+    for (let col = 0; col < pattern[row].length; col += 1) {
+      if (pattern[row][col] !== '1') continue;
+      out += `<rect class="cg" data-g="${groupIndex}" data-r="${row}" data-c="${col}" x="${(originX + col * cell).toFixed(2)}" y="${(originY + row * cell).toFixed(2)}" width="${(cell - 0.5).toFixed(2)}" height="${(cell - 0.5).toFixed(2)}" fill="${color}"/>`;
+    }
+  }
+  return out;
 }
 
 function renderCaptchaSvg(code) {
   const w = 140, h = 44;
-  const cx = w / 2, cy = h / 2;
   let paths = '';
   for (let i = 0; i < 6; i++) {
     const x1 = Math.random() * w, y1 = Math.random() * h;
@@ -528,38 +658,31 @@ function renderCaptchaSvg(code) {
     dots += `<circle cx="${Math.random() * w}" cy="${Math.random() * h}" r="${0.5 + Math.random()}" fill="hsl(${220 + Math.random() * 40}, 60%, 60%)" opacity="${0.3 + Math.random() * 0.4}"/>`;
   }
   let letters = '';
-  for (let i = 0; i < code.length; i++) {
-    const x = 20 + i * 30 + (Math.random() - 0.5) * 6;
-    const y = 30 + (Math.random() - 0.5) * 8;
-    const rot = (Math.random() - 0.5) * 25;
-    const size = 24 + Math.random() * 4;
+  const chars = String(code || '');
+  for (let i = 0; i < chars.length; i++) {
+    const x = 12 + i * 32 + (Math.random() - 0.5) * 4;
+    const y = 10 + (Math.random() - 0.5) * 4;
     const color = `hsl(${210 + Math.random() * 30}, 60%, ${30 + Math.random() * 25}%)`;
-    letters += `<text x="${x}" y="${y}" transform="rotate(${rot},${x},${y})" font-family="sans-serif" font-weight="700" font-size="${size}" fill="${color}">${code[i]}</text>`;
+    letters += renderCaptchaGlyph(chars[i], x, y, color, i);
   }
   return `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 ${w} ${h}" width="${w}" height="${h}"><rect width="${w}" height="${h}" fill="#f8fafc" rx="4"/><rect width="${w}" height="${h}" fill="none" stroke="#e2e8f0" rx="4"/>${paths}${dots}${letters}</svg>`;
 }
 
 function createCaptchaToken(code) {
-  const payload = `${code}:${Date.now()}`;
-  const sig = crypto.createHmac('sha256', captchaSecret).update(payload).digest('hex');
-  return Buffer.from(`${payload}:${sig}`).toString('base64url');
+  pruneCaptchaChallenges();
+  const token = crypto.randomBytes(24).toString('hex');
+  captchaChallenges.set(token, { hash: hashCaptchaAnswer(code), expiresAt: Date.now() + 300000 });
+  return token;
 }
 
 function verifyCaptchaToken(token, answer) {
-  try {
-    const decoded = Buffer.from(token, 'base64url').toString('utf8');
-    const lastColon = decoded.lastIndexOf(':');
-    if (lastColon === -1) return false;
-    const payload = decoded.slice(0, lastColon);
-    const sig = decoded.slice(lastColon + 1);
-    const expectedSig = crypto.createHmac('sha256', captchaSecret).update(payload).digest('hex');
-    if (sig !== expectedSig) return false;
-    const [code, ts] = payload.split(':');
-    if (Date.now() - parseInt(ts, 10) > 300000) return false;
-    return code.toUpperCase() === String(answer || '').trim().toUpperCase();
-  } catch (_) {
-    return false;
-  }
+  const key = String(token || '').trim();
+  const entry = captchaChallenges.get(key);
+  if (!entry) return false;
+  captchaChallenges.delete(key);
+  if (entry.expiresAt <= Date.now()) return false;
+  const received = hashCaptchaAnswer(answer);
+  return received.length === entry.hash.length && crypto.timingSafeEqual(Buffer.from(received), Buffer.from(entry.hash));
 }
 
 function seed() {
@@ -659,9 +782,17 @@ function seed() {
     approvals: [],
     notifications: [],
     auditLogs: [],
+    workReports: [],
     sessions: [],
     systemConfig: {
-      webIdleLogoutMinutes: defaultWebIdleLogoutMinutes
+      webIdleLogoutMinutes: defaultWebIdleLogoutMinutes,
+      dailyReportReminderHour: defaultDailyReportReminderHour,
+      weeklyReportReminderDays: defaultWeeklyReportReminderDays,
+      monthlyReportReminderDays: defaultMonthlyReportReminderDays,
+      dailyLowHoursThreshold: defaultDailyLowHoursThreshold,
+      dailyHighHoursThreshold: defaultDailyHighHoursThreshold,
+      noLogStreakDays: defaultNoLogStreakDays,
+      projectInactiveDays: defaultProjectInactiveDays
     },
     runtimeState: {
       loginRateLimits: [],
@@ -695,6 +826,13 @@ function normalizeSystemConfig(rawSystemConfig = {}) {
   const httpsPort = Number(rawSystemConfig.httpsPort);
   const httpsLoginEnabled = rawSystemConfig.httpsLoginEnabled === true || rawSystemConfig.httpsLoginEnabled === 'true';
   const timezoneOffset = Number(rawSystemConfig.timezoneOffset);
+  const dailyReportReminderHour = Number(rawSystemConfig.dailyReportReminderHour);
+  const weeklyReportReminderDays = Number(rawSystemConfig.weeklyReportReminderDays);
+  const monthlyReportReminderDays = Number(rawSystemConfig.monthlyReportReminderDays);
+  const dailyLowHoursThreshold = Number(rawSystemConfig.dailyLowHoursThreshold);
+  const dailyHighHoursThreshold = Number(rawSystemConfig.dailyHighHoursThreshold);
+  const noLogStreakDays = Number(rawSystemConfig.noLogStreakDays);
+  const projectInactiveDays = Number(rawSystemConfig.projectInactiveDays);
   return {
     webIdleLogoutMinutes: Number.isFinite(webIdleLogoutMinutes)
       ? Math.min(1440, Math.max(1, Math.round(webIdleLogoutMinutes)))
@@ -717,7 +855,26 @@ function normalizeSystemConfig(rawSystemConfig = {}) {
     loginRateLimitMaxAttempts: Number.isFinite(Number(rawSystemConfig.loginRateLimitMaxAttempts)) && Number(rawSystemConfig.loginRateLimitMaxAttempts) >= 1 ? Number(rawSystemConfig.loginRateLimitMaxAttempts) : loginRateLimitMaxAttempts,
     loginRateLimitWindowMinutes: Number.isFinite(Number(rawSystemConfig.loginRateLimitWindowMinutes)) && Number(rawSystemConfig.loginRateLimitWindowMinutes) >= 1 ? Number(rawSystemConfig.loginRateLimitWindowMinutes) : Math.round(loginRateLimitWindowMs / 60000),
     loginRateLimitLockMinutes: Number.isFinite(Number(rawSystemConfig.loginRateLimitLockMinutes)) && Number(rawSystemConfig.loginRateLimitLockMinutes) >= 1 ? Number(rawSystemConfig.loginRateLimitLockMinutes) : Math.round(loginRateLimitLockMs / 60000),
-    timezoneOffset: Number.isFinite(timezoneOffset) ? timezoneOffset : 480
+    timezoneOffset: Number.isFinite(timezoneOffset) ? timezoneOffset : 480,
+    dailyReportReminderHour: Number.isFinite(dailyReportReminderHour) ? Math.min(23, Math.max(0, Math.round(dailyReportReminderHour))) : defaultDailyReportReminderHour,
+    weeklyReportReminderDays: Number.isFinite(weeklyReportReminderDays) ? Math.min(30, Math.max(0, Math.round(weeklyReportReminderDays))) : defaultWeeklyReportReminderDays,
+    monthlyReportReminderDays: Number.isFinite(monthlyReportReminderDays) ? Math.min(31, Math.max(0, Math.round(monthlyReportReminderDays))) : defaultMonthlyReportReminderDays,
+    dailyLowHoursThreshold: Number.isFinite(dailyLowHoursThreshold) ? Math.min(24, Math.max(0, Math.round(dailyLowHoursThreshold * 10) / 10)) : defaultDailyLowHoursThreshold,
+    dailyHighHoursThreshold: Number.isFinite(dailyHighHoursThreshold) ? Math.min(24, Math.max(0, Math.round(dailyHighHoursThreshold * 10) / 10)) : defaultDailyHighHoursThreshold,
+    noLogStreakDays: Number.isFinite(noLogStreakDays) ? Math.min(30, Math.max(1, Math.round(noLogStreakDays))) : defaultNoLogStreakDays,
+    projectInactiveDays: Number.isFinite(projectInactiveDays) ? Math.min(90, Math.max(1, Math.round(projectInactiveDays))) : defaultProjectInactiveDays
+  };
+}
+
+function presentSystemConfig(user, config) {
+  const normalized = normalizeSystemConfig(config || {});
+  if (user && user.role === 'admin') return normalized;
+  return {
+    webIdleLogoutMinutes: normalized.webIdleLogoutMinutes,
+    timezoneOffset: normalized.timezoneOffset,
+    allowRegistration: normalized.allowRegistration,
+    httpsLoginEnabled: normalized.httpsLoginEnabled,
+    httpLoginDisabled: normalized.httpLoginDisabled
   };
 }
 
@@ -917,7 +1074,7 @@ function runMaintenanceTasks(db) {
 
   pruneArchiveFiles(auditArchiveDir, auditArchiveRetentionDays);
   pruneArchiveFiles(notificationArchiveDir, notificationArchiveRetentionDays);
-  checkExpiryNotifications(db);
+  if (checkExpiryNotifications(db)) changed = true;
   return changed;
 }
 
@@ -1102,7 +1259,7 @@ function sanitizeUploadFilename(filename) {
 
 function sanitizeAiInspectionTarget(item) {
   const { password, privateKey, accessToken, community, ...safe } = item;
-  return {
+  const result = {
     ...safe,
     credential: '***',
     hasPassword: Boolean(password),
@@ -1110,12 +1267,103 @@ function sanitizeAiInspectionTarget(item) {
     hasAccessToken: Boolean(accessToken),
     hasCommunity: Boolean(community)
   };
+  return result;
+}
+
+function sanitizeAiInspectionTargetForViewer(item, viewer) {
+  const result = sanitizeAiInspectionTarget(item);
+  if (viewer && viewer.role === 'customer') {
+    delete result.backupCommand;
+    delete result.account;
+    delete result.webBackupPath;
+    delete result.webBackupMethod;
+    delete result.webLoginPath;
+    delete result.address;
+  }
+  return result;
 }
 
 function sanitizeUser(user) {
   if (!user) return null;
   const { passwordHash, securityQuestion, securityAnswerHash, ...safe } = user;
   return safe;
+}
+
+function sanitizeUserForViewer(user, viewer) {
+  const safe = sanitizeUser(user);
+  if (!safe) return null;
+  if (!viewer || viewer.role === 'admin' || viewer.id === user.id) return safe;
+  return { ...safe, idCard: '', phone: '', email: '', username: '', wechat: '' };
+}
+
+function sanitizeAiInspectionResultForViewer(result, viewer) {
+  if (!result) return result;
+  if (!viewer || viewer.role !== 'customer') return result;
+  const {
+    probeError,
+    rawOutput,
+    stdout,
+    stderr,
+    ...safe
+  } = result;
+  return {
+    ...safe,
+    probeError: Boolean(probeError),
+    suggestion: redactNetworkDetails(safe.suggestion),
+    summary: redactNetworkDetails(safe.summary),
+    risk: redactNetworkDetails(safe.risk)
+  };
+}
+
+function redactNetworkDetails(text) {
+  return String(text ?? '')
+    .replace(/\b(?:\d{1,3}\.){3}\d{1,3}(?::\d{1,5})?\b/g, '[已隐藏]')
+    .replace(/\b(?:[a-zA-Z0-9-]+\.)+[a-zA-Z]{2,}(?::\d{1,5})?\b/g, '[已隐藏]');
+}
+
+function sanitizeAssetForApi(asset, viewer) {
+  if (!asset) return asset;
+  const { snmpCommunity, ...rest } = asset;
+  const result = { ...rest, hasSnmpCommunity: Boolean(String(snmpCommunity || '').trim()) };
+  if (viewer && viewer.role === 'customer') {
+    delete result.monitorHost;
+    delete result.installationLocation;
+  }
+  return result;
+}
+
+const DOCUMENT_SECRET_FIELDS = ['accessPasswordHash', 'loginPasswordHash', 'loginPasswordEncrypted', 'attachmentPath'];
+const DOCUMENT_PROTECTED_FIELDS = ['serialNumber', 'managementIp', 'managementPort', 'loginAccount', 'managementMethod'];
+
+function sanitizeDocumentForApi(doc, revealProtected = false) {
+  const sanitized = { ...doc };
+  DOCUMENT_SECRET_FIELDS.forEach(key => { delete sanitized[key]; });
+  if (!revealProtected) {
+    DOCUMENT_PROTECTED_FIELDS.forEach(key => { delete sanitized[key]; });
+  }
+  return sanitized;
+}
+
+function getNotificationReadAtForUser(item, userId) {
+  const map = item && item.readBy && typeof item.readBy === 'object' ? item.readBy : {};
+  return map[userId] || '';
+}
+
+function markNotificationReadForUser(item, userId) {
+  item.readBy = item.readBy && typeof item.readBy === 'object' ? item.readBy : {};
+  if (!item.readBy[userId]) item.readBy[userId] = now();
+  item._dirty = true;
+  return item.readBy[userId];
+}
+
+function presentNotification(item, user) {
+  const userId = user && typeof user === 'object' ? user.id : user;
+  const { readBy, hiddenBy, _dirty, ...rest } = item;
+  const presented = { ...rest, readAt: getNotificationReadAtForUser(item, userId) };
+  if (user && typeof user === 'object' && user.role === 'customer') {
+    presented.content = redactNetworkDetails(String(presented.content || '').replace(/\s*\([^)]*\)/, ''));
+  }
+  return presented;
 }
 
 function buildAiInspectionAnalysis(category, metrics, realData = null) {
@@ -1175,13 +1423,33 @@ function buildAiInspectionAnalysis(category, metrics, realData = null) {
 }
 
 const ENCRYPTION_KEY = process.env.ENCRYPTION_KEY || '';
-const RUNTIME_ENCRYPTION_KEY = ENCRYPTION_KEY || crypto.randomBytes(32).toString('hex');
+function resolveRuntimeEncryptionKey() {
+  const fromEnv = String(process.env.ENCRYPTION_KEY || '').trim();
+  if (fromEnv) return fromEnv;
+  const keyPath = path.join(dataDir, 'encryption.key');
+  try {
+    if (fs.existsSync(keyPath)) {
+      const stored = String(fs.readFileSync(keyPath, 'utf8') || '').trim();
+      if (stored.length >= 32) return stored;
+    }
+  } catch (error) {
+    console.warn('读取 encryption.key 失败:', error.message);
+  }
+  const generated = crypto.randomBytes(32).toString('hex');
+  try {
+    fs.writeFileSync(keyPath, generated, { encoding: 'utf8', mode: 0o600 });
+  } catch (error) {
+    console.warn('写入 encryption.key 失败:', error.message);
+  }
+  return generated;
+}
+const RUNTIME_ENCRYPTION_KEY = resolveRuntimeEncryptionKey();
 const DOCUMENT_TOKEN_SECRET = process.env.DOCUMENT_TOKEN_SECRET || RUNTIME_ENCRYPTION_KEY;
 const DOCUMENT_TYPES = ['device', 'topology', 'layout', 'proposal', 'config', 'contract', 'acceptance'];
 const ENCRYPTION_ALGORITHM = 'aes-256-gcm';
 
 if (!ENCRYPTION_KEY) {
-  console.warn('WARNING: ENCRYPTION_KEY 环境变量未设置，本进程将使用随机临时密钥，重启后已加密凭据无法解密。请在生产环境中设置 ENCRYPTION_KEY。');
+  console.warn('WARNING: ENCRYPTION_KEY 环境变量未设置，已使用 data/encryption.key 持久化运行时密钥。生产环境请显式设置 ENCRYPTION_KEY。');
 }
 
 function getEncryptionKey() {
@@ -1225,7 +1493,23 @@ function ipv4ToInt(ip) {
   return ip.split('.').reduce((sum, part) => (sum << 8) + Number(part), 0) >>> 0;
 }
 
+function extractIpv4FromMapped(ip) {
+  const raw = String(ip || '').trim().toLowerCase();
+  if (!raw.startsWith('::ffff:')) return '';
+  const rest = raw.slice(7);
+  if (net.isIP(rest) === 4) return rest;
+  const parts = rest.split(':');
+  if (parts.length === 2 && parts.every(part => /^[0-9a-f]{1,4}$/.test(part))) {
+    const hi = parseInt(parts[0], 16);
+    const lo = parseInt(parts[1], 16);
+    return `${(hi >> 8) & 255}.${hi & 255}.${(lo >> 8) & 255}.${lo & 255}`;
+  }
+  return '';
+}
+
 function isPrivateOrReservedIp(ip) {
+  const mappedV4 = extractIpv4FromMapped(ip);
+  if (mappedV4) return isPrivateOrReservedIp(mappedV4);
   if (net.isIP(ip) === 4) {
     const value = ipv4ToInt(ip);
     const ranges = [
@@ -1305,37 +1589,274 @@ function probePortOpen(host, port) {
   });
 }
 
+function sshRuntimeDir() {
+  const dir = path.join(dataDir, 'ssh-runtime');
+  fs.mkdirSync(dir, { recursive: true, mode: 0o700 });
+  try { fs.chmodSync(dir, 0o700); } catch (_) {}
+  return dir;
+}
+
+function sshKnownHostsPath() {
+  return path.join(sshRuntimeDir(), 'known_hosts');
+}
+
+function hostKeyAlreadyKnown(host, port) {
+  try {
+    const text = fs.readFileSync(sshKnownHostsPath(), 'utf8');
+    const marker = Number(port) === 22 ? host : `[${host}]:${port}`;
+    return text.includes(marker);
+  } catch (_) {
+    return false;
+  }
+}
+
+function ensureSshKnownHost(host, port) {
+  return new Promise(resolve => {
+    if (hostKeyAlreadyKnown(host, port)) return resolve();
+    execFile('ssh-keyscan', ['-p', String(port), '-T', '4', host], { timeout: 8000, maxBuffer: 1024 * 1024 }, (error, stdout) => {
+      if (!error && stdout && String(stdout).trim()) {
+        fs.appendFileSync(sshKnownHostsPath(), stdout.endsWith('\n') ? stdout : `${stdout}\n`, { mode: 0o600 });
+      }
+      resolve();
+    });
+  });
+}
+
 function executeSSHCheck(host, port, username, secret, options = {}) {
   if (!validateHost(host) || !validatePort(port)) return Promise.resolve({ success: false, stdout: '', stderr: 'Invalid host or port' });
   if (!username || typeof username !== 'string' || !/^[a-zA-Z0-9_.-]+$/.test(username)) return Promise.resolve({ success: false, stdout: '', stderr: 'Invalid username' });
-  return new Promise((resolve) => {
-    const passFile = `/tmp/sshpass-${Date.now()}-${crypto.randomBytes(8).toString('hex')}`;
-    const keyFile = `/tmp/sshkey-${Date.now()}-${crypto.randomBytes(8).toString('hex')}`;
-    const args = [
-      'ssh',
-      '-o', 'StrictHostKeyChecking=accept-new',
-      '-o', 'ConnectTimeout=5',
-      '-o', 'BatchMode=yes',
-      '-p', String(port),
-      `${username}@${host}`
-    ];
-    let executable = 'ssh';
-    if (options.privateKey) {
-      fs.writeFileSync(keyFile, secret || '', { mode: 0o600 });
-      args.splice(4, 0, '-o', 'IdentitiesOnly=yes', '-i', keyFile);
-    } else {
-      fs.writeFileSync(passFile, secret || '', { mode: 0o600 });
-      executable = 'sshpass';
-      args.unshift('-f', passFile);
+  return new Promise(resolve => {
+    const keyFile = path.join(sshRuntimeDir(), `key-${Date.now()}-${crypto.randomBytes(8).toString('hex')}`);
+    const knownHosts = sshKnownHostsPath();
+    const cleanup = () => { fs.unlink(keyFile, () => {}); };
+    const run = () => {
+      const sshArgs = [
+        '-o', 'StrictHostKeyChecking=yes',
+        '-o', `UserKnownHostsFile=${knownHosts}`,
+        '-o', 'GlobalKnownHostsFile=/dev/null',
+        '-o', 'ConnectTimeout=5',
+        '-p', String(port),
+        `${username}@${host}`,
+        'uptime && df -h && free'
+      ];
+      let executable = 'ssh';
+      let args = sshArgs;
+      const execEnv = { ...process.env };
+      if (options.privateKey) {
+        fs.writeFileSync(keyFile, secret || '', { mode: 0o600 });
+        args = ['-o', 'BatchMode=yes', '-o', 'IdentitiesOnly=yes', '-i', keyFile, ...sshArgs];
+      } else {
+        executable = 'sshpass';
+        delete execEnv.SSHPASS;
+        execEnv.SSHPASS = secret || '';
+        args = ['-e', 'ssh', '-o', 'PreferredAuthentications=password', '-o', 'PubkeyAuthentication=no', ...sshArgs];
+      }
+      execFile(executable, args, { timeout: 15000, maxBuffer: 1024 * 1024, env: execEnv }, (error, stdout, stderr) => {
+        cleanup();
+        if (error) return resolve({ success: false, stdout: '', stderr: stderr || error.message });
+        resolve({ success: true, stdout: stdout || '', stderr: '' });
+      });
+    };
+    ensureSshKnownHost(host, port).then(run).catch(() => run());
+  });
+}
+
+let snmpNativeModule = undefined;
+function loadSnmpNative() {
+  if (snmpNativeModule !== undefined) return snmpNativeModule;
+  try {
+    snmpNativeModule = require('snmp-native');
+  } catch (_) {
+    snmpNativeModule = null;
+  }
+  return snmpNativeModule;
+}
+
+function berEncodeLength(len) {
+  if (len < 128) return Buffer.from([len]);
+  if (len < 256) return Buffer.from([0x81, len]);
+  return Buffer.from([0x82, (len >> 8) & 0xff, len & 0xff]);
+}
+
+function berTlv(tag, value) {
+  const v = Buffer.isBuffer(value) ? value : Buffer.from(value);
+  return Buffer.concat([Buffer.from([tag]), berEncodeLength(v.length), v]);
+}
+
+function berInt(n) {
+  let value = Number(n) || 0;
+  if (value === 0) return berTlv(0x02, Buffer.from([0]));
+  const bytes = [];
+  let remaining = value < 0 ? value >>> 0 : value;
+  do {
+    bytes.unshift(remaining & 0xff);
+    remaining = Math.floor(remaining / 256);
+  } while (remaining > 0);
+  if (bytes[0] & 0x80) bytes.unshift(0);
+  return berTlv(0x02, Buffer.from(bytes));
+}
+
+function berOid(oid) {
+  const ids = oid.map(n => Number(n));
+  const out = [40 * ids[0] + ids[1]];
+  for (let i = 2; i < ids.length; i += 1) {
+    let n = ids[i];
+    const stack = [n & 0x7f];
+    n = Math.floor(n / 128);
+    while (n > 0) {
+      stack.push((n & 0x7f) | 0x80);
+      n = Math.floor(n / 128);
     }
-    args.push('uptime && df -h && free');
-    execFile(executable, args, { timeout: 15000, maxBuffer: 1024 * 1024 }, (error, stdout, stderr) => {
-      fs.unlink(passFile, () => {});
-      fs.unlink(keyFile, () => {});
-      if (error) return resolve({ success: false, stdout: '', stderr: stderr || error.message });
-      resolve({ success: true, stdout: stdout || '', stderr: '' });
+    while (stack.length) out.push(stack.pop());
+  }
+  return berTlv(0x06, Buffer.from(out));
+}
+
+function encodeSnmpPdu(community, requestId, oid, pduTag) {
+  const varbind = berTlv(0x30, Buffer.concat([berOid(oid), Buffer.from([0x05, 0x00])]));
+  const varbindList = berTlv(0x30, varbind);
+  const pdu = berTlv(pduTag, Buffer.concat([berInt(requestId), berInt(0), berInt(0), varbindList]));
+  const body = Buffer.concat([berInt(1), berTlv(0x04, Buffer.from(String(community || 'public'), 'latin1')), pdu]);
+  return berTlv(0x30, body);
+}
+
+function encodeSnmpGetNext(community, requestId, oid) {
+  return encodeSnmpPdu(community, requestId, oid, 0xa1);
+}
+
+function encodeSnmpGet(community, requestId, oid) {
+  return encodeSnmpPdu(community, requestId, oid, 0xa0);
+}
+
+function decodeBerLength(buf, offset) {
+  const first = buf[offset];
+  if (first < 128) return { length: first, size: 1 };
+  const count = first & 0x7f;
+  let length = 0;
+  for (let i = 0; i < count; i += 1) length = (length << 8) + buf[offset + 1 + i];
+  return { length, size: 1 + count };
+}
+
+function decodeBerOid(buf) {
+  if (!buf.length) return [];
+  const first = buf[0];
+  const oid = [Math.floor(first / 40), first % 40];
+  let value = 0;
+  for (let i = 1; i < buf.length; i += 1) {
+    value = (value << 7) + (buf[i] & 0x7f);
+    if ((buf[i] & 0x80) === 0) {
+      oid.push(value);
+      value = 0;
+    }
+  }
+  return oid;
+}
+
+function oidStartsWith(oid, prefix) {
+  return prefix.every((part, index) => oid[index] === part);
+}
+
+function parseSnmpVarBind(buf) {
+  const result = { oid: [], value: undefined };
+  const walk = (offset, end) => {
+    while (offset < end) {
+      const tag = buf[offset];
+      const lenInfo = decodeBerLength(buf, offset + 1);
+      const start = offset + 1 + lenInfo.size;
+      const next = start + lenInfo.length;
+      if (tag === 0x06) result.oid = decodeBerOid(buf.slice(start, next));
+      else if (tag === 0x04 || tag === 0x44) result.value = buf.slice(start, next).toString('utf8');
+      else if (tag === 0x02) {
+        let n = 0;
+        for (let i = start; i < next; i += 1) n = (n << 8) + buf[i];
+        result.value = n;
+      } else if (tag === 0x30 || tag === 0xa2) walk(start, next);
+      offset = next;
+    }
+  };
+  walk(0, buf.length);
+  return result;
+}
+
+function snmpUdpRequest(host, port, community, oid, timeoutMs, encodeFn) {
+  return new Promise(resolve => {
+    const socket = dgram.createSocket('udp4');
+    const requestId = crypto.randomInt(1, 0x7fffffff);
+    const packet = encodeFn(community, requestId, oid);
+    let settled = false;
+    const finish = value => {
+      if (settled) return;
+      settled = true;
+      try { socket.close(); } catch (_) {}
+      resolve(value);
+    };
+    const timer = setTimeout(() => finish(null), timeoutMs);
+    socket.once('error', () => {
+      clearTimeout(timer);
+      finish(null);
+    });
+    socket.on('message', msg => {
+      clearTimeout(timer);
+      finish(parseSnmpVarBind(msg));
+    });
+    socket.send(packet, Number(port) || 161, host, error => {
+      if (error) {
+        clearTimeout(timer);
+        finish(null);
+      }
     });
   });
+}
+
+function snmpGetNextUdp(host, port, community, oid, timeoutMs = 3000) {
+  return snmpUdpRequest(host, port, community, oid, timeoutMs, encodeSnmpGetNext);
+}
+
+function snmpGetUdp(host, port, community, oid, timeoutMs = 3000) {
+  return snmpUdpRequest(host, port, community, oid, timeoutMs, encodeSnmpGet);
+}
+
+async function snmpWalkSubtreeUdp(host, port, community, baseOid, timeoutMs = 4000, maxItems = 128) {
+  const items = [];
+  let current = baseOid.slice();
+  for (let i = 0; i < maxItems; i += 1) {
+    const vb = await snmpGetNextUdp(host, port, community, current, timeoutMs);
+    if (!vb || !Array.isArray(vb.oid) || !oidStartsWith(vb.oid, baseOid)) break;
+    items.push({ oid: vb.oid, value: vb.value, index: vb.oid[vb.oid.length - 1] });
+    current = vb.oid;
+  }
+  return items;
+}
+
+function snmpWalkSubtreeNative(host, port, community, oid, timeoutMs = 4000) {
+  const snmp = loadSnmpNative();
+  if (!snmp) return Promise.reject(new Error('snmp-native unavailable'));
+  return new Promise((resolve, reject) => {
+    const session = new snmp.Session({ host, community, port: Number(port) || 161, timeouts: [Math.min(timeoutMs, 3000)] });
+    const timer = setTimeout(() => {
+      try { session.close(); } catch (_) {}
+      reject(new Error('SNMP timeout'));
+    }, timeoutMs + 1000);
+    session.getSubtree({ oid, communities: [community] }, (err, varbinds) => {
+      clearTimeout(timer);
+      try { session.close(); } catch (_) {}
+      if (err) return reject(err);
+      resolve((varbinds || []).filter(vb => vb && vb.value !== undefined && vb.value !== null).map(vb => ({
+        oid: vb.oid,
+        value: vb.value,
+        index: vb.oid[vb.oid.length - 1]
+      })));
+    });
+  });
+}
+
+async function snmpWalkSubtree(host, port, community, oid, timeoutMs = 4000) {
+  if (loadSnmpNative()) {
+    try {
+      return await snmpWalkSubtreeNative(host, port, community, oid, timeoutMs);
+    } catch (_) {}
+  }
+  return snmpWalkSubtreeUdp(host, port, community, oid, timeoutMs);
 }
 
 function normalizeDb(raw = {}) {
@@ -1370,6 +1891,20 @@ function normalizeDb(raw = {}) {
     createdAt: user.createdAt || now()
   }));
   const userProjectMap = new Map(users.map(user => [user.id, user.projectId || '']));
+  const resolveInspectionExecutionCreatedBy = item => {
+    const existing = String(item.createdBy || '').trim();
+    if (existing) return existing;
+    const executor = String(item.executor || '').trim();
+    if (executor) {
+      const idMatch = users.find(user => user.id === executor);
+      if (idMatch?.id) return idMatch.id;
+      const usernameMatches = users.filter(user => user.username === executor);
+      if (usernameMatches.length === 1) return usernameMatches[0].id;
+      const nameMatches = users.filter(user => user.name === executor);
+      if (nameMatches.length === 1) return nameMatches[0].id;
+    }
+    return '';
+  };
   return {
     users,
     projects,
@@ -1416,8 +1951,10 @@ function normalizeDb(raw = {}) {
       dispatcher: log.dispatcher || '',
       dispatchDepartment: log.dispatchDepartment || '',
       ticketType: log.ticketType || '',
+      workloadCategory: resolveWorkloadCategory(log.workloadCategory, log.ticketType),
       assignee: log.assignee || '',
       process: log.process || '',
+      result: log.result || '已完成',
       conclusion: log.conclusion || '',
       remark: log.remark || '',
       durationHours: Number(log.durationHours || 0),
@@ -1449,6 +1986,7 @@ function normalizeDb(raw = {}) {
       suggestion: item.suggestion || '',
       attachment: normalizeInspectionAttachment(item.attachment),
       nextDate: item.nextDate || '',
+      createdBy: resolveInspectionExecutionCreatedBy(item),
       createdAt: item.createdAt || now()
     })),
     spareParts: (raw.spareParts || []).map(item => ({
@@ -1581,6 +2119,29 @@ function normalizeDb(raw = {}) {
       createdAt: item.createdAt || now(),
       updatedAt: item.updatedAt || now()
     })),
+    workReports: (raw.workReports || []).map(item => ({
+      id: item.id || id('workReport'),
+      reportType: ['daily', 'weekly', 'monthly'].includes(item.reportType) ? item.reportType : 'daily',
+      projectId: item.projectId || '',
+      userId: item.userId || '',
+      periodKey: String(item.periodKey || '').trim(),
+      rangeStart: String(item.rangeStart || '').slice(0, 10),
+      rangeEnd: String(item.rangeEnd || '').slice(0, 10),
+      status: ['draft', 'submitted', 'returned', 'approved', 'locked'].includes(item.status) ? item.status : 'draft',
+      summary: item.summary || '',
+      completedWork: item.completedWork || '',
+      pendingWork: item.pendingWork || '',
+      risks: item.risks || '',
+      nextPlan: item.nextPlan || '',
+      metricsSnapshot: normalizeWorkMetricsSnapshot(item.metricsSnapshot),
+      submittedAt: item.submittedAt || '',
+      reviewedAt: item.reviewedAt || '',
+      reviewedBy: item.reviewedBy || '',
+      reviewComment: item.reviewComment || '',
+      lockedAt: item.lockedAt || '',
+      createdAt: item.createdAt || now(),
+      updatedAt: item.updatedAt || now()
+    })),
     aiInspectionTargets: (raw.aiInspectionTargets || []).map(item => ({
       id: item.id || id('aiTarget'),
       projectId: item.projectId || '',
@@ -1691,6 +2252,23 @@ function normalizeDb(raw = {}) {
   };
 }
 
+function normalizeWorkMetricsSnapshot(snapshot = {}) {
+  const categoryCounts = snapshot.categoryCounts && typeof snapshot.categoryCounts === 'object' ? snapshot.categoryCounts : {};
+  const categoryHours = snapshot.categoryHours && typeof snapshot.categoryHours === 'object' ? snapshot.categoryHours : {};
+  return {
+    logCount: Number(snapshot.logCount || 0),
+    totalHours: Number(Number(snapshot.totalHours || 0).toFixed(2)),
+    inspectionCount: Number(snapshot.inspectionCount || 0),
+    incidentCount: Number(snapshot.incidentCount || 0),
+    changeCount: Number(snapshot.changeCount || 0),
+    knowledgeCount: Number(snapshot.knowledgeCount || 0),
+    documentCount: Number(snapshot.documentCount || 0),
+    resolvedIncidentCount: Number(snapshot.resolvedIncidentCount || 0),
+    categoryCounts: Object.fromEntries(WORKLOAD_CATEGORY_ORDER.map(key => [key, Number(categoryCounts[key] || 0)])),
+    categoryHours: Object.fromEntries(WORKLOAD_CATEGORY_ORDER.map(key => [key, Number(Number(categoryHours[key] || 0).toFixed(2))]))
+  };
+}
+
 function normalizeInspectionAttachment(attachment) {
   if (!attachment) return '';
   if (typeof attachment === 'string') return attachment;
@@ -1713,8 +2291,54 @@ function serializeDbSnapshot(db) {
   };
 }
 
-function buildResetDbForNewEnvironment(currentUser, currentSessionToken, currentSession) {
-  const preservedUser = {
+function redactSnapshotSecrets(snapshot) {
+  const next = { ...(snapshot || {}) };
+  next.users = (snapshot.users || []).map(item => {
+    const { passwordHash, securityQuestion, securityAnswerHash, ...rest } = item || {};
+    return rest;
+  });
+  next.assets = (snapshot.assets || []).map(item => {
+    const { snmpCommunity, ...rest } = item || {};
+    return rest;
+  });
+  next.documents = (snapshot.documents || []).map(item => {
+    const copy = { ...(item || {}) };
+    DOCUMENT_SECRET_FIELDS.forEach(key => { delete copy[key]; });
+    return copy;
+  });
+    next.aiInspectionTargets = (snapshot.aiInspectionTargets || []).map(item => {
+      const { password, privateKey, accessToken, community, ...rest } = item || {};
+      return rest;
+    });
+    return next;
+  }
+
+function fillMissingSecretFields(incoming = [], current = [], fields = []) {
+  const byId = new Map((current || []).map(item => [item && item.id, item]));
+  return (incoming || []).map(item => {
+    const source = byId.get(item && item.id);
+    if (!source) return item;
+    const next = { ...item };
+    fields.forEach(field => {
+      if (next[field] == null || next[field] === '') {
+        if (source[field] != null && source[field] !== '') next[field] = source[field];
+      }
+    });
+    return next;
+  });
+}
+
+function fillMissingSnapshotSecrets(raw, currentDb) {
+  const next = { ...(raw || {}) };
+  next.users = fillMissingSecretFields(raw.users, currentDb.users, ['passwordHash', 'securityQuestion', 'securityAnswerHash']);
+  next.assets = fillMissingSecretFields(raw.assets, currentDb.assets, ['snmpCommunity']);
+  next.documents = fillMissingSecretFields(raw.documents, currentDb.documents, DOCUMENT_SECRET_FIELDS);
+  next.aiInspectionTargets = fillMissingSecretFields(raw.aiInspectionTargets, currentDb.aiInspectionTargets, ['password', 'privateKey', 'accessToken', 'community']);
+  return next;
+}
+
+  function buildResetDbForNewEnvironment(currentUser, currentSessionToken, currentSession) {
+    const preservedUser = {
     ...currentUser,
     projectId: '',
     startDate: '',
@@ -1818,6 +2442,18 @@ async function ensureMySqlReady() {
           updated_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP
         ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci
       `);
+      for (const key of dbCollectionKeys) {
+        const table = collectionTableName(key);
+        await mysqlPool.query(`
+          CREATE TABLE IF NOT EXISTS \`${table}\` (
+            id VARCHAR(191) NOT NULL,
+            payload LONGTEXT NOT NULL,
+            batch_id BIGINT NOT NULL DEFAULT 0,
+            updated_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+            PRIMARY KEY (id)
+          ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci
+        `);
+      }
     })();
   }
   return mysqlReadyPromise;
@@ -1840,8 +2476,10 @@ function readDbFromFile() {
 }
 
 function writeDbToFile(db) {
-  fs.writeFileSync(dbPath, JSON.stringify(db, null, 2));
-  latestFileDbCache = db;
+  rememberLiveDb(db);
+  if (allowFileDbFallback || fileDbNeedsSyncToMySql) {
+    fs.writeFileSync(dbPath, JSON.stringify(pickDbCollections(db), null, 2));
+  }
 }
 
 let latestFileDbCache = null;
@@ -1866,34 +2504,38 @@ async function readDb() {
   try {
     await ensureMySqlReady();
     await syncFileDbToMySqlIfNeeded();
-    const [rows] = await mysqlPool.query('SELECT state_key, state_json FROM app_state');
-    if (!rows.length) {
+    await migrateAppStateToCollectionTablesIfNeeded();
+    if (latestFileDbCache) {
+      const cached = cloneDbSnapshot(latestFileDbCache);
+      cached._seq = dbSequence;
+      cached._normalized = true;
+      return cached;
+    }
+    const raw = await readCollectionsFromMySql();
+    const hasCollectionData = dbCollectionKeys.some(key => {
+      const value = raw[key];
+      return Array.isArray(value) ? value.length > 0 : Boolean(value && Object.keys(value).length);
+    });
+    if (!hasCollectionData) {
       const initial = readDbFromFile();
       await writeDb(initial, { silent: true });
       fileDbNeedsSyncToMySql = false;
+      initial._seq = dbSequence;
+      initial._normalized = true;
       return initial;
     }
-    const raw = {};
-    for (const row of rows) {
-      try {
-        raw[row.state_key] = JSON.parse(row.state_json);
-      } catch (error) {
-        raw[row.state_key] = [];
-      }
-    }
     const normalized = normalizeDb(raw);
-    const current = JSON.stringify(Object.fromEntries(dbCollectionKeys.map(key => [key, raw[key] !== undefined ? raw[key] : (key === 'topologyLayouts' || key === 'systemConfig' || key === 'runtimeState' ? {} : [])])));
-    const next = JSON.stringify(Object.fromEntries(dbCollectionKeys.map(key => [key, normalized[key] !== undefined ? normalized[key] : (key === 'topologyLayouts' || key === 'systemConfig' || key === 'runtimeState' ? {} : [])])));
-    if (current !== next) {
-      await writeDb(normalized, { silent: true });
-    }
-    normalized._seq = dbSequence;
-    return normalized;
+    rememberLiveDb(normalized);
+    const snapshot = cloneDbSnapshot(normalized);
+    snapshot._seq = dbSequence;
+    snapshot._normalized = true;
+    return snapshot;
   } catch (error) {
     await resetMySqlConnection();
     if (allowFileDbFallback) {
       const fallback = readDbFromFile();
       fallback._seq = dbSequence;
+      fallback._normalized = true;
       return fallback;
     }
     throw error;
@@ -1917,16 +2559,82 @@ async function resetMySqlConnection() {
   }
 }
 
-async function writeNormalizedDbToMySql(normalized) {
+async function writeCollectionRows(connection, key, value) {
+  const table = collectionTableName(key);
+  const batchId = Date.now() * 1000 + Math.floor(Math.random() * 1000);
+  if (isObjectCollection(key)) {
+    await connection.query(
+      `INSERT INTO \`${table}\` (id, payload, batch_id) VALUES (?, ?, ?) ON DUPLICATE KEY UPDATE payload = VALUES(payload), batch_id = VALUES(batch_id)`,
+      [OBJECT_ROOT_ID, JSON.stringify(value && typeof value === 'object' ? value : {}), batchId]
+    );
+    await connection.query(`DELETE FROM \`${table}\` WHERE batch_id <> ?`, [batchId]);
+    return;
+  }
+  const items = Array.isArray(value) ? value : [];
+  if (!items.length) {
+    await connection.query(`DELETE FROM \`${table}\``);
+    return;
+  }
+  const chunkSize = 50;
+  for (let offset = 0; offset < items.length; offset += chunkSize) {
+    const chunk = items.slice(offset, offset + chunkSize);
+    const placeholders = chunk.map(() => '(?, ?, ?)').join(', ');
+    const params = [];
+    chunk.forEach((item, index) => {
+      const id = item && item.id ? String(item.id) : `__idx_${offset + index}`;
+      params.push(id, JSON.stringify(item), batchId);
+    });
+    await connection.query(
+      `INSERT INTO \`${table}\` (id, payload, batch_id) VALUES ${placeholders} ON DUPLICATE KEY UPDATE payload = VALUES(payload), batch_id = VALUES(batch_id)`,
+      params
+    );
+  }
+  await connection.query(`DELETE FROM \`${table}\` WHERE batch_id <> ?`, [batchId]);
+}
+
+async function readCollectionFromMySql(key) {
+  const table = collectionTableName(key);
+  const [rows] = await mysqlPool.query(`SELECT id, payload FROM \`${table}\``);
+  if (isObjectCollection(key)) {
+    const root = rows.find(row => row.id === OBJECT_ROOT_ID);
+    return root ? parseJsonPayload(root.payload, {}) : {};
+  }
+  return rows
+    .filter(row => row.id !== OBJECT_ROOT_ID)
+    .map(row => parseJsonPayload(row.payload, null))
+    .filter(item => item && typeof item === 'object');
+}
+
+async function readCollectionsFromMySql() {
+  const raw = {};
+  await Promise.all(dbCollectionKeys.map(async key => {
+    raw[key] = await readCollectionFromMySql(key);
+  }));
+  return raw;
+}
+
+async function migrateAppStateToCollectionTablesIfNeeded() {
+  const usersTable = collectionTableName('users');
+  const [countRows] = await mysqlPool.query(`SELECT COUNT(*) AS c FROM \`${usersTable}\``);
+  if (Number(countRows[0]?.c || 0) > 0) return;
+  const [stateRows] = await mysqlPool.query('SELECT state_key, state_json FROM app_state');
+  if (!stateRows.length) return;
+  const raw = {};
+  for (const row of stateRows) {
+    raw[row.state_key] = parseJsonPayload(row.state_json, isObjectCollection(row.state_key) ? {} : []);
+  }
+  const normalized = normalizeDb(raw);
+  await writeNormalizedDbToMySql(normalized, dbCollectionKeys);
+}
+
+async function writeNormalizedDbToMySql(normalized, keys = dbCollectionKeys) {
   const connection = await mysqlPool.getConnection();
   try {
     await connection.beginTransaction();
-    for (const key of dbCollectionKeys) {
-      const value = normalized[key] !== undefined ? normalized[key] : (key === 'topologyLayouts' || key === 'systemConfig' || key === 'runtimeState' ? {} : []);
-      await connection.query(
-        'INSERT INTO app_state (state_key, state_json) VALUES (?, ?) ON DUPLICATE KEY UPDATE state_json = VALUES(state_json)',
-        [key, JSON.stringify(value)]
-      );
+    const targetKeys = keys.length ? keys : dbCollectionKeys;
+    for (const key of targetKeys) {
+      const value = normalized[key] !== undefined ? normalized[key] : (isObjectCollection(key) ? {} : []);
+      await writeCollectionRows(connection, key, value);
     }
     await connection.commit();
   } catch (error) {
@@ -1969,6 +2677,9 @@ async function writeDb(db, options = {}) {
             const existing = latestById.get(item.id);
             if (existing) {
               Object.assign(existing, item);
+            } else if (item && item.id) {
+              latest[key].push(item);
+              latestById.set(item.id, item);
             }
           }
         }
@@ -1979,11 +2690,15 @@ async function writeDb(db, options = {}) {
     }
     dbSequence++;
     writeTarget._seq = dbSequence;
-    const normalized = normalizeDb(writeTarget);
+    const normalized = writeTarget._normalized ? pickDbCollections(writeTarget) : normalizeDb(writeTarget);
     try {
       await ensureMySqlReady();
       await syncFileDbToMySqlIfNeeded();
-      await writeNormalizedDbToMySql(normalized);
+      const dirtyKeys = changedCollectionKeys(latestFileDbCache, normalized);
+      if (dirtyKeys.length) {
+        await writeNormalizedDbToMySql(normalized, dirtyKeys);
+        dirtyKeys.forEach(key => clearCollectionDirtyFlags(normalized[key]));
+      }
       writeDbToFile(normalized);
       fileDbNeedsSyncToMySql = false;
     } catch (error) {
@@ -2208,7 +2923,7 @@ function buildNonceHeaderValue(nonce) {
 }
 
 function buildSecurityHeaders(extraHeaders = {}, nonce = '') {
-  const csp = nonce ? buildNonceHeaderValue(nonce) : "default-src 'self'; script-src 'self' 'unsafe-inline' https://cdn.sheetjs.com; style-src 'self' 'unsafe-inline'; img-src 'self' data: blob:; connect-src 'self' ws: wss:; font-src 'self' data:; object-src 'none'; base-uri 'self'; frame-ancestors 'none'; form-action 'self'";
+  const csp = nonce ? buildNonceHeaderValue(nonce) : "default-src 'self'; script-src 'self' 'unsafe-inline'; style-src 'self' 'unsafe-inline'; img-src 'self' data: blob:; connect-src 'self' ws: wss:; font-src 'self' data:; object-src 'none'; base-uri 'self'; frame-ancestors 'none'; form-action 'self'";
   const headers = {
     'X-Content-Type-Options': 'nosniff',
     'X-Frame-Options': 'DENY',
@@ -2232,6 +2947,11 @@ function text(res, status, data, extraHeaders = {}) {
 }
 
 function paginateResult(items, query) {
+  const unpaged = query.all === '1' || query.unpaged === '1' || String(query.pageSize || '').toLowerCase() === 'all';
+  if (unpaged) {
+    const data = Array.isArray(items) ? items : [];
+    return { data, page: 1, pageSize: data.length || 0, total: data.length, totalPages: 1, all: true };
+  }
   const page = Math.max(1, parseInt(query.page, 10) || 1);
   const pageSize = Math.min(100, Math.max(1, parseInt(query.pageSize, 10) || 50));
   const total = items.length;
@@ -2277,14 +2997,14 @@ function parseCookies(req) {
   );
 }
 
-function readBody(req) {
+function readBody(req, maxBytes = 10 * 1024 * 1024) {
   return new Promise((resolve, reject) => {
     let settled = false;
     let data = '';
     req.on('data', chunk => {
       if (settled) return;
       data += chunk;
-      if (data.length > 10 * 1024 * 1024) {
+      if (data.length > maxBytes) {
         settled = true;
         reject(new Error('请求体过大'));
         req.destroy();
@@ -2325,10 +3045,21 @@ function isCsrfExemptPath(pathname) {
 
 function validateCsrf(req, res, db, pathname) {
   if (!isUnsafeMethod(req.method) || isCsrfExemptPath(pathname)) return true;
-  const cookies = parseCookies(req);
-  const sessionToken = cookies.sessionToken || '';
+  const sessionToken = getSessionToken(req);
   const session = (db.sessions || []).find(item => item.token === sessionToken);
-  if (!session) return true;
+  if (!session) {
+    if (pathname === '/api/register' || pathname === '/api/auth/ldap') {
+      const captchaToken = String(req.headers['x-captcha-token'] || '').trim();
+      const expected = captchaToken ? getSessionCsrfToken(captchaToken) : '';
+      const received = String(req.headers['x-csrf-token'] || '');
+      const valid = expected && received.length === expected.length && crypto.timingSafeEqual(Buffer.from(received), Buffer.from(expected));
+      if (!valid) {
+        json(res, 403, { message: 'CSRF 校验失败，请刷新验证码后重试' });
+        return false;
+      }
+    }
+    return true;
+  }
   const expected = getSessionCsrfToken(sessionToken);
   const received = String(req.headers['x-csrf-token'] || '');
   const valid = received.length === expected.length && crypto.timingSafeEqual(Buffer.from(received), Buffer.from(expected));
@@ -2339,9 +3070,13 @@ function validateCsrf(req, res, db, pathname) {
   return true;
 }
 
-function getAuthUser(req, db) {
+function getSessionToken(req) {
   const cookies = parseCookies(req);
-  const token = cookies.sessionToken;
+  return String(cookies.sessionToken || '').trim();
+}
+
+function getAuthUser(req, db) {
+  const token = getSessionToken(req);
   if (!token) {
     return null;
   }
@@ -2354,7 +3089,7 @@ function getAuthUser(req, db) {
     return null;
   }
   const user = db.users.find(item => item.id === session.userId) || null;
-  if (!user || user.status === 'disabled' || user.status === 'pending') return null;
+  if (!user || user.status === 'disabled' || user.status === 'pending' || user.status === 'rejected') return null;
   return user;
 }
 
@@ -2388,11 +3123,20 @@ function requireEditor(req, res, db) {
 }
 
 function canViewProject(user, projectId) {
-  return user.role === 'admin' || user.projectId === projectId;
+  if (!user) return false;
+  if (user.role === 'admin') return true;
+  if (!user.projectId || !projectId) return false;
+  return user.projectId === projectId;
 }
 
 function filterByProjectScope(list, user, getProjectId) {
-  return user.role === 'admin' ? list : list.filter(item => getProjectId(item) === user.projectId);
+  if (!user) return [];
+  if (user.role === 'admin') return list;
+  if (!user.projectId) return [];
+  return list.filter(item => {
+    const projectId = getProjectId(item);
+    return Boolean(projectId) && projectId === user.projectId;
+  });
 }
 
 function appendAuditLog(db, user, action, targetType, targetId, detail, projectId = '') {
@@ -2426,9 +3170,195 @@ function createNotification(db, projectId, title, content, level = 'info', categ
     archivedAt: '',
     createdAt: now()
   };
-  db.notifications.unshift(notification);
-  db.notifications = db.notifications.slice(0, 200);
+      db.notifications.unshift(notification);
   return notification;
+}
+
+function getActiveProjectEngineers(db, projectId) {
+  return (db.users || []).filter(item => item.projectId === projectId && item.role === 'engineer' && item.status !== 'disabled' && item.status !== 'rejected');
+}
+
+function getWorkReportReminderSettings(db) {
+  const config = normalizeSystemConfig(db?.systemConfig || {});
+  return {
+    dailyReportReminderHour: config.dailyReportReminderHour,
+    weeklyReportReminderDays: config.weeklyReportReminderDays,
+    monthlyReportReminderDays: config.monthlyReportReminderDays,
+    dailyLowHoursThreshold: config.dailyLowHoursThreshold,
+    dailyHighHoursThreshold: config.dailyHighHoursThreshold,
+    noLogStreakDays: config.noLogStreakDays,
+    projectInactiveDays: config.projectInactiveDays
+  };
+}
+
+function getNotificationCreatedAtMs(item) {
+  const ts = Date.parse(String(item?.createdAt || ''));
+  return Number.isFinite(ts) ? ts : 0;
+}
+
+function hasRecentNotification(db, predicate, withinMs) {
+  const threshold = nowMs() - withinMs;
+  return (db.notifications || []).some(item => getNotificationCreatedAtMs(item) >= threshold && predicate(item));
+}
+
+function createNotificationOnce(db, { projectId, title, content, level = 'info', category = '', dedupeDays = 1 }) {
+  const withinMs = dedupeDays * 24 * 60 * 60 * 1000;
+  const exists = hasRecentNotification(db, item => item.category === category && item.projectId === projectId && item.content === content, withinMs);
+  if (!exists) {
+    createNotification(db, projectId, title, content, level, category);
+    return true;
+  }
+  return false;
+}
+
+function sumLogHoursForUserOnDate(db, userId, projectId, dateKey) {
+  return Number((db.logs || [])
+    .filter(item => item.userId === userId && item.projectId === projectId && String(item.date || '').slice(0, 10) === dateKey)
+    .reduce((sum, item) => sum + Number(item.durationHours || 0), 0)
+    .toFixed(2));
+}
+
+function hasSubmittedWorkReport(db, { userId, projectId, reportType, periodKey }) {
+  return (db.workReports || []).some(item => item.userId === userId
+    && item.projectId === projectId
+    && item.reportType === reportType
+    && item.periodKey === periodKey
+    && ['submitted', 'approved', 'locked'].includes(item.status));
+}
+
+function getRecentDateKeys(days) {
+  const keys = [];
+  const today = parseDateOnly(formatDateKey(new Date()));
+  if (!today) return keys;
+  for (let offset = 0; offset < days; offset += 1) {
+    keys.push(dateToKey(addDays(today, -offset)));
+  }
+  return keys;
+}
+
+function getConsecutiveNoLogDays(db, userId, projectId, maxDays) {
+  let streak = 0;
+  for (const dateKey of getRecentDateKeys(maxDays)) {
+    const hasLog = (db.logs || []).some(item => item.userId === userId && item.projectId === projectId && String(item.date || '').slice(0, 10) === dateKey);
+    if (hasLog) break;
+    streak += 1;
+  }
+  return streak;
+}
+
+function checkWorkReportReminderNotifications(db) {
+  let changed = false;
+  const settings = getWorkReportReminderSettings(db);
+  const currentTime = new Date(Date.now() + getSystemTimezoneOffsetMs());
+  const todayKey = currentTime.toISOString().slice(0, 10);
+  const currentHour = currentTime.getUTCHours();
+  const dailyMeta = getWorkReportPeriodMeta('daily', todayKey);
+  const weeklyMeta = getWorkReportPeriodMeta('weekly', todayKey);
+  const monthlyMeta = getWorkReportPeriodMeta('monthly', todayKey);
+  const weeklyDaysLeft = weeklyMeta ? getInclusiveDayCount(todayKey, weeklyMeta.rangeEnd) - 1 : Infinity;
+  const monthlyDaysLeft = monthlyMeta ? getInclusiveDayCount(todayKey, monthlyMeta.rangeEnd) - 1 : Infinity;
+
+  for (const project of db.projects || []) {
+    const engineers = getActiveProjectEngineers(db, project.id);
+    if (!engineers.length) continue;
+
+    if (currentHour >= settings.dailyReportReminderHour && dailyMeta) {
+      for (const engineer of engineers) {
+        const hasDailySubmitted = hasSubmittedWorkReport(db, { userId: engineer.id, projectId: project.id, reportType: 'daily', periodKey: dailyMeta.periodKey });
+        if (!hasDailySubmitted) {
+          changed = createNotificationOnce(db, {
+            projectId: project.id,
+            title: '日报漏填提醒',
+            content: `${engineer.name} 于 ${todayKey} 尚未提交日报，请及时补充。`,
+            level: 'warning',
+            category: 'work-report-daily-missing'
+          }) || changed;
+        }
+      }
+    }
+
+    if (weeklyMeta && weeklyDaysLeft >= 0 && weeklyDaysLeft <= settings.weeklyReportReminderDays) {
+      for (const engineer of engineers) {
+        const hasWeeklySubmitted = hasSubmittedWorkReport(db, { userId: engineer.id, projectId: project.id, reportType: 'weekly', periodKey: weeklyMeta.periodKey });
+        if (!hasWeeklySubmitted) {
+          changed = createNotificationOnce(db, {
+            projectId: project.id,
+            title: '周报截止提醒',
+            content: `${engineer.name} 的周报截止日期为 ${weeklyMeta.rangeEnd}，当前尚未提交，请及时处理。`,
+            level: weeklyDaysLeft <= 1 ? 'warning' : 'info',
+            category: 'work-report-weekly-deadline'
+          }) || changed;
+        }
+      }
+    }
+
+    if (monthlyMeta && monthlyDaysLeft >= 0 && monthlyDaysLeft <= settings.monthlyReportReminderDays) {
+      for (const engineer of engineers) {
+        const hasMonthlySubmitted = hasSubmittedWorkReport(db, { userId: engineer.id, projectId: project.id, reportType: 'monthly', periodKey: monthlyMeta.periodKey });
+        if (!hasMonthlySubmitted) {
+          changed = createNotificationOnce(db, {
+            projectId: project.id,
+            title: '月报截止提醒',
+            content: `${engineer.name} 的月报截止日期为 ${monthlyMeta.rangeEnd}，当前尚未提交，请及时处理。`,
+            level: monthlyDaysLeft <= 3 ? 'warning' : 'info',
+            category: 'work-report-monthly-deadline'
+          }) || changed;
+        }
+      }
+    }
+
+    if (currentHour >= settings.dailyReportReminderHour) {
+      for (const engineer of engineers) {
+        const totalHours = sumLogHoursForUserOnDate(db, engineer.id, project.id, todayKey);
+        if (totalHours > 0 && totalHours < settings.dailyLowHoursThreshold) {
+          changed = createNotificationOnce(db, {
+            projectId: project.id,
+            title: '工时偏低提醒',
+            content: `${engineer.name} 于 ${todayKey} 的工时为 ${totalHours} 小时，低于阈值 ${settings.dailyLowHoursThreshold} 小时。`,
+            level: 'warning',
+            category: 'work-log-hours-low'
+          }) || changed;
+        }
+        if (totalHours > settings.dailyHighHoursThreshold) {
+          changed = createNotificationOnce(db, {
+            projectId: project.id,
+            title: '工时偏高提醒',
+            content: `${engineer.name} 于 ${todayKey} 的工时为 ${totalHours} 小时，高于阈值 ${settings.dailyHighHoursThreshold} 小时。`,
+            level: 'warning',
+            category: 'work-log-hours-high'
+          }) || changed;
+        }
+      }
+    }
+
+    for (const engineer of engineers) {
+      const noLogStreak = getConsecutiveNoLogDays(db, engineer.id, project.id, settings.noLogStreakDays);
+      if (noLogStreak >= settings.noLogStreakDays) {
+        changed = createNotificationOnce(db, {
+          projectId: project.id,
+          title: '连续无记录提醒',
+          content: `${engineer.name} 已连续 ${noLogStreak} 天无日志记录，请尽快补充。`,
+          level: 'warning',
+          category: 'work-log-streak-missing'
+        }) || changed;
+      }
+    }
+
+    const recentDateKeys = new Set(getRecentDateKeys(settings.projectInactiveDays));
+    const hasRecentProjectLogs = (db.logs || []).some(item => item.projectId === project.id && recentDateKeys.has(String(item.date || '').slice(0, 10)));
+    const hasRecentProjectReports = (db.workReports || []).some(item => item.projectId === project.id && ['submitted', 'approved', 'locked'].includes(item.status) && recentDateKeys.has(String(item.rangeEnd || '').slice(0, 10)));
+    if (!hasRecentProjectLogs && !hasRecentProjectReports) {
+      changed = createNotificationOnce(db, {
+        projectId: project.id,
+        title: '项目长期无人填报提醒',
+        content: `${project.name} 已连续 ${settings.projectInactiveDays} 天无日志或已提交工作汇报，请尽快确认填报状态。`,
+        level: 'warning',
+        category: 'project-report-inactive'
+      }) || changed;
+    }
+  }
+
+  return changed;
 }
 
 function appendSystemAuditLog(db, action, targetType, targetId, detail, projectId = '') {
@@ -2603,17 +3533,27 @@ function recordForgotPasswordAttempt(db, rateKey) {
 
 function shouldUseSecureCookies(req, systemConfig = {}) {
   const forwardedProto = String(req.headers['x-forwarded-proto'] || '').trim().toLowerCase();
+  const host = String(req.headers.host || '').trim().toLowerCase();
   if (forwardedProto === 'https' || Boolean(req.socket?.encrypted)) return true;
+  if (host.endsWith('.monkeycode-ai.online')) return true;
   const httpsLoginEnabled = normalizeSystemConfig(systemConfig).httpsLoginEnabled;
   return httpsLoginEnabled;
 }
 
 function buildSessionCookie(req, token, systemConfig = {}, maxAgeSeconds = sessionMaxAgeSeconds) {
-  return `sessionToken=${token}; HttpOnly; Path=/; SameSite=Strict; Max-Age=${maxAgeSeconds}${shouldUseSecureCookies(req, systemConfig) ? '; Secure' : ''}`;
+  const secure = shouldUseSecureCookies(req, systemConfig);
+  const configured = String(process.env.COOKIE_SAMESITE || 'Lax').trim().toLowerCase();
+  const sameSite = configured === 'none' && secure ? 'None' : 'Lax';
+  const partitioned = sameSite === 'None' ? '; Partitioned' : '';
+  return `sessionToken=${token}; HttpOnly; Path=/; SameSite=${sameSite}; Max-Age=${maxAgeSeconds}${secure ? '; Secure' : ''}${partitioned}`;
 }
 
 function buildClearSessionCookie(req, systemConfig = {}) {
-  return `sessionToken=; HttpOnly; Path=/; Max-Age=0; SameSite=Strict${shouldUseSecureCookies(req, systemConfig) ? '; Secure' : ''}`;
+  const secure = shouldUseSecureCookies(req, systemConfig);
+  const configured = String(process.env.COOKIE_SAMESITE || 'Lax').trim().toLowerCase();
+  const sameSite = configured === 'none' && secure ? 'None' : 'Lax';
+  const partitioned = sameSite === 'None' ? '; Partitioned' : '';
+  return `sessionToken=; HttpOnly; Path=/; Max-Age=0; SameSite=${sameSite}${secure ? '; Secure' : ''}${partitioned}`;
 }
 
 function resolveSafeChildPath(baseDir, relativePath) {
@@ -2627,6 +3567,15 @@ function resolveSafeChildPath(baseDir, relativePath) {
     throw new Error(`检测到越界路径: ${relativePath}`);
   }
   return resolved;
+}
+
+function isPathInsideDirectory(parentDir, candidatePath) {
+  const parent = path.resolve(parentDir);
+  let resolved = path.resolve(candidatePath);
+  try {
+    resolved = fs.realpathSync(candidatePath);
+  } catch (_) {}
+  return resolved === parent || resolved.startsWith(`${parent}${path.sep}`);
 }
 
 function getSystemReadiness() {
@@ -2877,32 +3826,38 @@ function executeSSHCommand(host, port, username, secret, command, options = {}) 
   const commandValidation = validateBackupCommand(command);
   if (!commandValidation.ok) return Promise.resolve({ success: false, stdout: '', stderr: commandValidation.message });
   return new Promise((resolve) => {
-    const passFile = `/tmp/sshpass-${Date.now()}-${crypto.randomBytes(8).toString('hex')}`;
-    const keyFile = `/tmp/sshkey-${Date.now()}-${crypto.randomBytes(8).toString('hex')}`;
-    const args = [
-      'ssh',
-      '-o', 'StrictHostKeyChecking=accept-new',
-      '-o', 'ConnectTimeout=8',
-      '-o', 'BatchMode=yes',
-      '-p', String(port),
-      `${username}@${host}`
-    ];
-    let executable = 'ssh';
-    if (options.privateKey) {
-      fs.writeFileSync(keyFile, secret || '', { mode: 0o600 });
-      args.splice(4, 0, '-o', 'IdentitiesOnly=yes', '-i', keyFile);
-    } else {
-      fs.writeFileSync(passFile, secret || '', { mode: 0o600 });
-      executable = 'sshpass';
-      args.unshift('-f', passFile);
-    }
-    args.push(commandValidation.command);
-    execFile(executable, args, { timeout: 30000, maxBuffer: 1024 * 1024 }, (error, stdout, stderr) => {
-      fs.unlink(passFile, () => {});
-      fs.unlink(keyFile, () => {});
-      if (error) return resolve({ success: false, stdout: '', stderr: stderr || error.message });
-      resolve({ success: true, stdout: stdout || '', stderr: '' });
-    });
+    const keyFile = path.join(sshRuntimeDir(), `key-${Date.now()}-${crypto.randomBytes(8).toString('hex')}`);
+    const knownHosts = sshKnownHostsPath();
+    const cleanup = () => { fs.unlink(keyFile, () => {}); };
+    const run = () => {
+      const sshArgs = [
+        '-o', 'StrictHostKeyChecking=yes',
+        '-o', `UserKnownHostsFile=${knownHosts}`,
+        '-o', 'GlobalKnownHostsFile=/dev/null',
+        '-o', 'ConnectTimeout=8',
+        '-p', String(port),
+        `${username}@${host}`,
+        commandValidation.command
+      ];
+      let executable = 'ssh';
+      let args = sshArgs;
+      const execEnv = { ...process.env };
+      if (options.privateKey) {
+        fs.writeFileSync(keyFile, secret || '', { mode: 0o600 });
+        args = ['-o', 'BatchMode=yes', '-o', 'IdentitiesOnly=yes', '-i', keyFile, ...sshArgs];
+      } else {
+        executable = 'sshpass';
+        delete execEnv.SSHPASS;
+        execEnv.SSHPASS = secret || '';
+        args = ['-e', 'ssh', '-o', 'PreferredAuthentications=password', '-o', 'PubkeyAuthentication=no', ...sshArgs];
+      }
+      execFile(executable, args, { timeout: 30000, maxBuffer: 1024 * 1024, env: execEnv }, (error, stdout, stderr) => {
+        cleanup();
+        if (error) return resolve({ success: false, stdout: '', stderr: stderr || error.message });
+        resolve({ success: true, stdout: stdout || '', stderr: '' });
+      });
+    };
+    ensureSshKnownHost(host, port).then(run).catch(() => run());
   });
 }
 
@@ -3058,54 +4013,76 @@ async function processPendingAiInspectionTasks(db) {
   return changed;
 }
 
+function parseNotifyBeforeDays(value) {
+  const text = String(value || '').trim();
+  if (text === '提前2个月') return 60;
+  if (text === '提前3个月') return 90;
+  return 30;
+}
+
 function checkExpiryNotifications(db) {
+  let changed = false;
   const now = Date.now();
   const thirtyDaysMs = 30 * 24 * 60 * 60 * 1000;
 
   for (const project of db.projects || []) {
     if (!project.projectEndDate) continue;
-    const endTime = new Date(project.projectEndDate).getTime();
-    if (isNaN(endTime)) continue;
-    const daysLeft = Math.ceil((endTime - now) / (24 * 60 * 60 * 1000));
-    if (daysLeft <= 30 && daysLeft > 0) {
+    const todayKey = formatDateKey(new Date());
+    const endDate = parseDateOnly(project.projectEndDate);
+    const today = parseDateOnly(todayKey);
+    if (!endDate || !today) continue;
+    const daysLeft = Math.round((endDate.getTime() - today.getTime()) / 86400000);
+    const thresholdDays = parseNotifyBeforeDays(project.notifyBefore);
+    if (daysLeft <= thresholdDays) {
       const existingNotifications = (db.notifications || []).filter(
-        n => n.category === 'project-expiry' && n.projectId === project.id && n.createdAt > (now - thirtyDaysMs)
+        n => n.category === 'project-expiry' && n.projectId === project.id && getNotificationCreatedAtMs(n) > (now - thirtyDaysMs)
       );
       if (existingNotifications.length === 0) {
-        createNotification(db, project.id, '项目即将到期', `${project.name}（客户：${project.customerName || '未知'}）将于 ${project.projectEndDate} 到期，剩余 ${daysLeft} 天`, daysLeft <= 7 ? 'warning' : 'info', 'project-expiry');
+        const expiryText = daysLeft <= 0 ? `已到期 ${Math.abs(daysLeft)} 天` : `剩余 ${daysLeft} 天`;
+        createNotification(db, project.id, daysLeft <= 0 ? '项目已到期' : '项目即将到期', `${project.name}（客户：${project.customerName || '未知'}）将于 ${project.projectEndDate} 到期，${expiryText}`, daysLeft <= 7 ? 'warning' : 'info', 'project-expiry');
+        changed = true;
       }
     }
   }
 
   for (const asset of db.assets || []) {
     if (!asset.maintainExpiryDate) continue;
-    const expiryTime = new Date(asset.maintainExpiryDate).getTime();
-    if (isNaN(expiryTime)) continue;
-    const daysLeft = Math.ceil((expiryTime - now) / (24 * 60 * 60 * 1000));
-    if (daysLeft <= 30 && daysLeft > 0) {
+    const todayKey = formatDateKey(new Date());
+    const expiryDate = parseDateOnly(asset.maintainExpiryDate);
+    const today = parseDateOnly(todayKey);
+    if (!expiryDate || !today) continue;
+    const daysLeft = Math.round((expiryDate.getTime() - today.getTime()) / 86400000);
+    if (daysLeft <= 30) {
       const existingNotifications = (db.notifications || []).filter(
-        n => n.category === 'maintenance-expiry' && n.projectId === asset.projectId && String(n.content || '').includes(asset.name) && n.createdAt > (now - thirtyDaysMs)
+        n => n.category === 'maintenance-expiry' && n.projectId === asset.projectId && String(n.content || '').includes(asset.name) && getNotificationCreatedAtMs(n) > (now - thirtyDaysMs)
       );
       if (existingNotifications.length === 0) {
-        createNotification(db, asset.projectId, '维保即将到期', `资产 ${asset.name}（${asset.type || '-'}）维保将于 ${asset.maintainExpiryDate} 到期，剩余 ${daysLeft} 天`, daysLeft <= 7 ? 'warning' : 'info', 'maintenance-expiry');
+        const expiryText = daysLeft <= 0 ? `已到期 ${Math.abs(daysLeft)} 天` : `剩余 ${daysLeft} 天`;
+        createNotification(db, asset.projectId, daysLeft <= 0 ? '维保已到期' : '维保即将到期', `资产 ${asset.name}（${asset.type || '-'}）维保将于 ${asset.maintainExpiryDate} 到期，${expiryText}`, daysLeft <= 7 ? 'warning' : 'info', 'maintenance-expiry');
+        changed = true;
       }
     }
   }
 
   for (const plan of db.inspectionPlans || []) {
     if (!plan.nextDate || plan.status === '已完成') continue;
-    const nextTime = new Date(plan.nextDate).getTime();
-    if (isNaN(nextTime)) continue;
-    const daysLeft = Math.ceil((nextTime - now) / (24 * 60 * 60 * 1000));
+    const todayKey = formatDateKey(new Date());
+    const nextDate = parseDateOnly(plan.nextDate);
+    const today = parseDateOnly(todayKey);
+    if (!nextDate || !today) continue;
+    const daysLeft = Math.round((nextDate.getTime() - today.getTime()) / 86400000);
     if (daysLeft <= 7) {
       const existingNotifications = (db.notifications || []).filter(
-        n => n.category === 'inspection-overdue' && n.projectId === plan.projectId && String(n.content || '').includes(plan.title || '-') && n.createdAt > (now - thirtyDaysMs)
+        n => n.category === 'inspection-overdue' && n.projectId === plan.projectId && String(n.content || '').includes(plan.title || '-') && getNotificationCreatedAtMs(n) > (now - thirtyDaysMs)
       );
       if (existingNotifications.length === 0) {
         createNotification(db, plan.projectId, '巡检计划提醒', `巡检计划 ${plan.title || '-'} 将于 ${plan.nextDate} 到期（${daysLeft < 0 ? '已逾期 ' + Math.abs(daysLeft) + ' 天' : daysLeft === 0 ? '今日到期' : '剩余 ' + daysLeft + ' 天'}）`, daysLeft <= 0 ? 'warning' : 'info', 'inspection-overdue');
+        changed = true;
       }
     }
   }
+
+  return checkWorkReportReminderNotifications(db) || changed;
 }
 
 function requireExistingProject(projectId, db) {
@@ -3137,10 +4114,18 @@ function canDeleteOwnedRecord(user, item, creatorId) {
   return creatorId === user.id;
 }
 
+function canOperateInspectionRecord(user, item) {
+  if (!user || !item) return false;
+  if (user.role === 'admin') return true;
+  return Boolean(user.projectId) && item.projectId === user.projectId;
+}
+
 function canManageInspectionRecord(user, item) {
   if (!user || !item) return false;
   if (user.role === 'admin') return true;
-  return item.projectId === user.projectId;
+  if (item.projectId !== user.projectId) return false;
+  if (!item.createdBy) return true;
+  return item.createdBy === user.id;
 }
 
 function refreshInspectionPlanFromExecutions(db, planId) {
@@ -3162,21 +4147,857 @@ function refreshInspectionPlanFromExecutions(db, planId) {
 }
 
 function startOfWeek(date) {
-  const d = new Date(date);
-  const day = d.getDay() || 7;
-  d.setHours(0, 0, 0, 0);
-  d.setDate(d.getDate() - day + 1);
+  const d = new Date(Date.UTC(date.getUTCFullYear(), date.getUTCMonth(), date.getUTCDate()));
+  const day = d.getUTCDay() || 7;
+  d.setUTCDate(d.getUTCDate() - day + 1);
   return d;
 }
 
 function getPeriodKey(dateString, period) {
-  const normalized = String(dateString || '').slice(0, 10);
-  const d = new Date(`${normalized}T00:00:00`);
-  if (Number.isNaN(d.getTime())) return '';
-  if (period === 'year') return `${d.getFullYear()}`;
-  if (period === 'month') return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}`;
+  const d = parseDateOnly(dateString);
+  if (!d) return '';
+  if (period === 'year') return `${d.getUTCFullYear()}`;
+  if (period === 'month') return `${d.getUTCFullYear()}-${String(d.getUTCMonth() + 1).padStart(2, '0')}`;
   const w = startOfWeek(d);
-  return `${w.getFullYear()}-W${String(Math.ceil((((w - new Date(w.getFullYear(), 0, 1)) / 86400000) + 1) / 7)).padStart(2, '0')}`;
+  const yearStart = Date.UTC(w.getUTCFullYear(), 0, 1);
+  const weekNumber = Math.ceil((((w.getTime() - yearStart) / 86400000) + 1) / 7);
+  return `${w.getUTCFullYear()}-W${String(weekNumber).padStart(2, '0')}`;
+}
+
+function parseDateOnly(dateString) {
+  const match = String(dateString || '').trim().match(/^(\d{4})-(\d{2})-(\d{2})/);
+  if (!match) return null;
+  const year = Number(match[1]);
+  const month = Number(match[2]);
+  const day = Number(match[3]);
+  const date = new Date(Date.UTC(year, month - 1, day));
+  if (date.getUTCFullYear() !== year || date.getUTCMonth() !== month - 1 || date.getUTCDate() !== day) return null;
+  return date;
+}
+
+function getCalendarDateKey(dateString) {
+  const raw = String(dateString || '').trim();
+  if (!raw) return '';
+  const match = raw.match(/^(\d{4}-\d{2}-\d{2})(.*)$/);
+  if (!match) {
+    const parsed = new Date(raw);
+    return Number.isNaN(parsed.getTime()) ? '' : formatDateKey(parsed);
+  }
+  const datePart = match[1];
+  const rest = match[2] || '';
+  if (!rest || !/[zZ]|[+-]\d{2}:?\d{2}$/.test(rest)) return datePart;
+  const parsed = new Date(raw);
+  return Number.isNaN(parsed.getTime()) ? datePart : formatDateKey(parsed);
+}
+
+function addDays(date, days) {
+  const next = new Date(date.getTime());
+  next.setUTCDate(next.getUTCDate() + days);
+  return next;
+}
+
+function endOfMonth(date) {
+  return new Date(Date.UTC(date.getUTCFullYear(), date.getUTCMonth() + 1, 0));
+}
+
+function dateToKey(date) {
+  return `${date.getUTCFullYear()}-${String(date.getUTCMonth() + 1).padStart(2, '0')}-${String(date.getUTCDate()).padStart(2, '0')}`;
+}
+
+function computeRolledInspectionNextDate(plan, today) {
+  if (!plan || !plan.nextDate || plan.nextDate >= today) return plan && plan.nextDate ? plan.nextDate : '';
+  const cycleAdd = { daily: 1, weekly: 7, monthly: 30, quarterly: 91 }[plan.cycle] || 30;
+  let d = parseDateOnly(plan.nextDate);
+  if (!d) return plan.nextDate;
+  if (plan.cycle === 'monthly' || plan.cycle === 'quarterly') {
+    const incMonths = plan.cycle === 'quarterly' ? 3 : 1;
+    while (dateToKey(d) < today) {
+      d.setUTCMonth(d.getUTCMonth() + incMonths);
+    }
+  } else {
+    while (dateToKey(d) < today) {
+      d.setUTCDate(d.getUTCDate() + cycleAdd);
+    }
+  }
+  return dateToKey(d);
+}
+
+function getDateRangeFromPeriod(period, anchorDate = '', rangeStart = '', rangeEnd = '') {
+  if (period === 'custom') {
+    const start = parseDateOnly(rangeStart);
+    const end = parseDateOnly(rangeEnd);
+    if (!start || !end || start.getTime() > end.getTime()) return null;
+    return {
+      period: 'custom',
+      periodKey: `${dateToKey(start)}_${dateToKey(end)}`,
+      rangeStart: dateToKey(start),
+      rangeEnd: dateToKey(end),
+      label: `${dateToKey(start)} 至 ${dateToKey(end)}`
+    };
+  }
+  const baseDate = parseDateOnly(anchorDate) || parseDateOnly(formatDateKey(new Date()));
+  if (!baseDate) return null;
+  if (period === 'day') {
+    const key = dateToKey(baseDate);
+    return { period, periodKey: key, rangeStart: key, rangeEnd: key, label: key };
+  }
+  if (period === 'week') {
+    const start = startOfWeek(baseDate);
+    const end = addDays(start, 6);
+    return {
+      period,
+      periodKey: getPeriodKey(dateToKey(baseDate), 'week'),
+      rangeStart: dateToKey(start),
+      rangeEnd: dateToKey(end),
+      label: `${dateToKey(start)} 至 ${dateToKey(end)}`
+    };
+  }
+  const start = new Date(Date.UTC(baseDate.getUTCFullYear(), baseDate.getUTCMonth(), 1));
+  const end = endOfMonth(baseDate);
+  return {
+    period: 'month',
+    periodKey: getPeriodKey(dateToKey(baseDate), 'month'),
+    rangeStart: dateToKey(start),
+    rangeEnd: dateToKey(end),
+    label: `${dateToKey(start)} 至 ${dateToKey(end)}`
+  };
+}
+
+function getPreviousDateRange(range) {
+  if (!range) return null;
+  if (range.period === 'custom') {
+    const currentStart = parseDateOnly(range.rangeStart);
+    const currentEnd = parseDateOnly(range.rangeEnd);
+    if (!currentStart || !currentEnd) return null;
+    const dayCount = getInclusiveDayCount(range.rangeStart, range.rangeEnd);
+    const previousEnd = addDays(currentStart, -1);
+    const previousStart = addDays(previousEnd, -(dayCount - 1));
+    return {
+      period: 'custom',
+      periodKey: `${dateToKey(previousStart)}_${dateToKey(previousEnd)}`,
+      rangeStart: dateToKey(previousStart),
+      rangeEnd: dateToKey(previousEnd),
+      label: `${dateToKey(previousStart)} 至 ${dateToKey(previousEnd)}`
+    };
+  }
+  const currentStart = parseDateOnly(range.rangeStart);
+  if (!currentStart) return null;
+  if (range.period === 'day') return getDateRangeFromPeriod('day', dateToKey(addDays(currentStart, -1)));
+  if (range.period === 'week') return getDateRangeFromPeriod('week', dateToKey(addDays(currentStart, -7)));
+  return getDateRangeFromPeriod('month', dateToKey(addDays(currentStart, -1)));
+}
+
+function getWorkReportPeriodMeta(reportType, anchorDate = '') {
+  if (reportType === 'weekly') return getDateRangeFromPeriod('week', anchorDate);
+  if (reportType === 'monthly') return getDateRangeFromPeriod('month', anchorDate);
+  return getDateRangeFromPeriod('day', anchorDate);
+}
+
+function isDateInRange(dateString, rangeStart, rangeEnd) {
+  const current = getCalendarDateKey(dateString);
+  return Boolean(current) && current >= rangeStart && current <= rangeEnd;
+}
+
+function buildWorkloadMetrics(db, filters = {}) {
+  const rangeStart = String(filters.rangeStart || '');
+  const rangeEnd = String(filters.rangeEnd || '');
+  const userId = String(filters.userId || '');
+  const projectId = String(filters.projectId || '');
+  const matches = (itemProjectId, itemUserId, itemDate) => {
+    if (!isDateInRange(itemDate, rangeStart, rangeEnd)) return false;
+    if (projectId && itemProjectId !== projectId) return false;
+    if (userId && String(itemUserId || '') !== userId) return false;
+    return true;
+  };
+  const logs = db.logs.filter(item => matches(item.projectId, item.userId, item.date));
+  const inspectionCount = db.inspectionExecutions.filter(item => matches(item.projectId, item.createdBy, item.executedAt)).length;
+  const incidentCount = db.incidentRecords.filter(item => matches(item.projectId, item.createdBy, item.occurredAt || item.createdAt)).length;
+  const changeCount = db.changeRecords.filter(item => matches(item.projectId, item.createdBy, item.createdAt)).length;
+  const knowledgeCount = db.knowledgeBase.filter(item => matches(item.projectId || (db.users.find(user => user.id === item.createdBy)?.projectId || ''), item.createdBy, item.createdAt)).length;
+  const documentCount = db.documents.filter(item => matches(item.projectId, item.createdBy, item.createdAt)).length;
+  const resolvedIncidentCount = db.incidentRecords.filter(item => matches(item.projectId, item.createdBy, item.occurredAt || item.createdAt) && ['已关闭', '已恢复', '已解决'].includes(String(item.status || ''))).length;
+  const workloadCategories = summarizeWorkloadCategories(logs);
+  return normalizeWorkMetricsSnapshot({
+    logCount: logs.length,
+    totalHours: logs.reduce((sum, item) => sum + Number(item.durationHours || 0), 0),
+    inspectionCount,
+    incidentCount,
+    changeCount,
+    knowledgeCount,
+    documentCount,
+    resolvedIncidentCount,
+    categoryCounts: workloadCategories.categoryCounts,
+    categoryHours: workloadCategories.categoryHours
+  });
+}
+
+function getInclusiveDayCount(rangeStart, rangeEnd) {
+  const start = parseDateOnly(rangeStart);
+  const end = parseDateOnly(rangeEnd);
+  if (!start || !end || start.getTime() > end.getTime()) return 1;
+  return Math.max(1, Math.floor((end.getTime() - start.getTime()) / 86400000) + 1);
+}
+
+function isWorkReportInRange(report, rangeStart, rangeEnd) {
+  if (!report) return false;
+  return String(report.rangeStart || '') <= rangeEnd && String(report.rangeEnd || '') >= rangeStart;
+}
+
+function getWorkloadSpecialFilterLabel(value) {
+  if (value === 'no-daily') return '只看未提交日报人员';
+  if (value === 'hour-anomaly') return '只看工时异常人员';
+  if (value === 'low-output') return '只看本周低产出人员';
+  return '';
+}
+
+const WORKLOAD_CATEGORY_LABELS = {
+  inspection: '巡检类',
+  incident: '故障类',
+  change: '变更类',
+  document: '资料类',
+  task: '事务类',
+  support: '外围支撑类'
+};
+
+const WORKLOAD_CATEGORY_ORDER = ['inspection', 'incident', 'change', 'document', 'task', 'support'];
+
+function normalizeWorkloadCategory(value) {
+  const raw = String(value || '').trim();
+  if (!raw) return '';
+  if (WORKLOAD_CATEGORY_LABELS[raw]) return raw;
+  const normalized = raw.replace(/\s+/g, '');
+  const aliasMap = {
+    巡检类: 'inspection',
+    巡检: 'inspection',
+    故障类: 'incident',
+    故障: 'incident',
+    变更类: 'change',
+    变更: 'change',
+    资料类: 'document',
+    资料: 'document',
+    事务类: 'task',
+    事务: 'task',
+    外围支撑类: 'support',
+    外围支撑: 'support'
+  };
+  return aliasMap[normalized] || '';
+}
+
+function deriveWorkloadCategory(ticketType = '') {
+  const normalized = String(ticketType || '').trim();
+  const ticketTypeMap = {
+    '物理环境': 'inspection',
+    '软硬件维护': 'inspection',
+    '视频会议': 'support',
+    '桌面终端及周边': 'support',
+    '外围工作': 'support',
+    '故障排查': 'incident',
+    '网络安全告警': 'incident',
+    '网络安全事件': 'incident',
+    '设备变更': 'change',
+    '配置变更': 'change',
+    '资料管理': 'document',
+    '事务工作': 'task'
+  };
+  return ticketTypeMap[normalized] || 'task';
+}
+
+function resolveWorkloadCategory(category, ticketType = '') {
+  return normalizeWorkloadCategory(category) || deriveWorkloadCategory(ticketType);
+}
+
+function createWorkloadCategoryStats() {
+  return WORKLOAD_CATEGORY_ORDER.reduce((result, key) => {
+    result.counts[key] = 0;
+    result.hours[key] = 0;
+    return result;
+  }, { counts: {}, hours: {} });
+}
+
+function summarizeWorkloadCategories(logs) {
+  const stats = createWorkloadCategoryStats();
+  for (const log of logs) {
+    const category = resolveWorkloadCategory(log.workloadCategory, log.ticketType);
+    const durationHours = Number(log.durationHours || 0);
+    if (!(category in stats.counts)) continue;
+    stats.counts[category] += 1;
+    stats.hours[category] += durationHours;
+  }
+  return {
+    categoryCounts: Object.fromEntries(WORKLOAD_CATEGORY_ORDER.map(key => [key, stats.counts[key]])),
+    categoryHours: Object.fromEntries(WORKLOAD_CATEGORY_ORDER.map(key => [key, Number(stats.hours[key].toFixed(2))]))
+  };
+}
+
+function formatWorkloadCategorySummary(values = {}, suffix = '') {
+  return WORKLOAD_CATEGORY_ORDER.map(key => `${WORKLOAD_CATEGORY_LABELS[key]}${Number(values[key] || 0)}${suffix}`).join(' ｜ ');
+}
+
+const LOG_TICKET_TYPE_OPTIONS = [
+  '物理环境',
+  '设备变更',
+  '配置变更',
+  '网络安全告警',
+  '网络安全事件',
+  '故障排查',
+  '软硬件维护',
+  '桌面终端及周边',
+  '资料管理',
+  '事务工作',
+  '外围工作',
+  '视频会议'
+];
+
+const LOG_RESULT_OPTIONS = ['已完成', '处理中', '需跟进', '已转交', '异常待复盘'];
+const LOG_SINGLE_DURATION_LIMIT_HOURS = 24;
+const LOG_DAILY_DURATION_LIMIT_HOURS = 24;
+
+function parseLogDateTime(dateString = '') {
+  const raw = String(dateString || '').trim();
+  if (!raw) return null;
+  const value = raw.length === 10 ? `${raw}T00:00` : raw;
+  const date = new Date(value);
+  return Number.isNaN(date.getTime()) ? null : date;
+}
+
+function getLogDayKey(dateString = '') {
+  return getCalendarDateKey(dateString);
+}
+
+function normalizeLogResult(value = '') {
+  const normalized = String(value || '').trim();
+  return LOG_RESULT_OPTIONS.includes(normalized) ? normalized : '';
+}
+
+function normalizeLogText(value = '') {
+  return String(value || '').trim();
+}
+
+function validateLogPayload(db, user, body, existingLog = null) {
+  const projectId = user.role === 'admin'
+    ? String(body.projectId !== undefined ? body.projectId : (existingLog?.projectId || '')).trim()
+    : String(user.projectId || '').trim();
+  if (!projectId) return { error: '请选择关联项目' };
+  if (!requireExistingProject(projectId, db)) return { error: '关联项目不存在' };
+  const assetId = String(body.assetId !== undefined ? body.assetId : (existingLog?.assetId || '')).trim();
+  const asset = requireExistingAsset(assetId || '', db);
+  if (assetId && (!asset || asset.projectId !== projectId)) return { error: '关联资产不存在或不属于当前项目' };
+  const date = String(body.date !== undefined ? body.date : (existingLog?.date || '')).trim();
+  if (!date) return { error: '请选择派单时间' };
+  if (!parseLogDateTime(date)) return { error: '派单时间格式无效' };
+  const ticketType = String(body.ticketType !== undefined ? body.ticketType : (existingLog?.ticketType || '')).trim();
+  if (!ticketType) return { error: '请选择工单类型' };
+  if (!LOG_TICKET_TYPE_OPTIONS.includes(ticketType)) return { error: '工单类型不在标准字典内' };
+  const event = normalizeLogText(body.event !== undefined ? body.event : (existingLog?.event || ''));
+  if (!event) return { error: '请输入工单内容' };
+  const process = normalizeLogText(body.process !== undefined ? body.process : (existingLog?.process || ''));
+  if (!process) return { error: '请输入处理过程' };
+  const result = normalizeLogResult(body.result !== undefined ? body.result : (existingLog?.result || ''));
+  if (!result) return { error: '请选择处理结果' };
+  const conclusion = normalizeLogText(body.conclusion !== undefined ? body.conclusion : (existingLog?.conclusion || ''));
+  if (!conclusion) return { error: '请输入结论' };
+  if (body.durationHours === undefined && !existingLog) return { error: '请输入工单用时' };
+  const durationHours = Number(body.durationHours !== undefined ? body.durationHours : (existingLog?.durationHours || 0));
+  if (!Number.isFinite(durationHours) || durationHours <= 0) return { error: '工单用时必须大于 0' };
+  if (durationHours > LOG_SINGLE_DURATION_LIMIT_HOURS) return { error: `单条日志工时不能超过 ${LOG_SINGLE_DURATION_LIMIT_HOURS} 小时` };
+  const dayKey = getLogDayKey(date);
+  const totalHours = (db.logs || [])
+    .filter(item => item.userId === (existingLog?.userId || user.id) && getLogDayKey(item.date) === dayKey && item.id !== existingLog?.id)
+    .reduce((sum, item) => sum + Number(item.durationHours || 0), 0) + durationHours;
+  if (totalHours > LOG_DAILY_DURATION_LIMIT_HOURS) return { error: `当日累计工时不能超过 ${LOG_DAILY_DURATION_LIMIT_HOURS} 小时` };
+  return {
+    payload: {
+      projectId,
+      assetId,
+      date,
+      event,
+      relatedTarget: normalizeLogText(body.relatedTarget !== undefined ? body.relatedTarget : (existingLog?.relatedTarget || '')),
+      dispatcher: normalizeLogText(body.dispatcher !== undefined ? body.dispatcher : (existingLog?.dispatcher || '')),
+      dispatchDepartment: normalizeLogText(body.dispatchDepartment !== undefined ? body.dispatchDepartment : (existingLog?.dispatchDepartment || '')),
+      ticketType,
+      workloadCategory: resolveWorkloadCategory(body.workloadCategory !== undefined ? body.workloadCategory : (existingLog?.workloadCategory || ''), ticketType),
+      assignee: normalizeLogText(body.assignee !== undefined ? body.assignee : (existingLog?.assignee || user.name || '')) || user.name,
+      process,
+      result,
+      conclusion,
+      remark: normalizeLogText(body.remark !== undefined ? body.remark : (existingLog?.remark || '')),
+      durationHours
+    }
+  };
+}
+
+function buildLogQualityWarnings(db, userId, payload, existingLog = null) {
+  const warnings = [];
+  const logs = (db.logs || []).filter(item => item.userId === userId && item.id !== existingLog?.id);
+  const duplicateItems = logs.filter(item => {
+    return getLogDayKey(item.date) === getLogDayKey(payload.date)
+      && String(item.projectId || '') === payload.projectId
+      && String(item.ticketType || '') === payload.ticketType
+      && normalizeLogText(item.event) === payload.event;
+  });
+  if (duplicateItems.length) {
+    warnings.push(`发现 ${duplicateItems.length} 条同日、同项目、同工单类型且工单内容相同的日志，请确认是否重复记录。`);
+  }
+  const startTime = parseLogDateTime(payload.date);
+  if (!startTime) return warnings;
+  const endTime = new Date(startTime.getTime() + payload.durationHours * 3600000);
+  const overlapItems = logs.filter(item => {
+    const otherStart = parseLogDateTime(item.date);
+    const otherDuration = Number(item.durationHours || 0);
+    if (!otherStart || otherDuration <= 0) return false;
+    const otherEnd = new Date(otherStart.getTime() + otherDuration * 3600000);
+    return startTime < otherEnd && endTime > otherStart;
+  });
+  if (overlapItems.length) {
+    warnings.push(`发现 ${overlapItems.length} 条同时间段重叠日志，请确认时间安排是否重复。`);
+  }
+  return warnings;
+}
+
+function buildWorkloadBoardSummary(rows = []) {
+  return rows.reduce((totals, item) => {
+    totals.logCount += Number(item.logCount || 0);
+    totals.totalHours += Number(item.totalHours || 0);
+    totals.inspectionCount += Number(item.inspectionCount || 0);
+    totals.incidentCount += Number(item.incidentCount || 0);
+    totals.resolvedIncidentCount += Number(item.resolvedIncidentCount || 0);
+    totals.changeCount += Number(item.changeCount || 0);
+    totals.knowledgeCount += Number(item.knowledgeCount || 0);
+    totals.documentCount += Number(item.documentCount || 0);
+    WORKLOAD_CATEGORY_ORDER.forEach(key => {
+      totals.categoryCounts[key] += Number(item.categoryCounts?.[key] || 0);
+      totals.categoryHours[key] += Number(item.categoryHours?.[key] || 0);
+    });
+    return totals;
+  }, {
+    logCount: 0,
+    totalHours: 0,
+    inspectionCount: 0,
+    incidentCount: 0,
+    resolvedIncidentCount: 0,
+    changeCount: 0,
+    knowledgeCount: 0,
+    documentCount: 0,
+    categoryCounts: Object.fromEntries(WORKLOAD_CATEGORY_ORDER.map(key => [key, 0])),
+    categoryHours: Object.fromEntries(WORKLOAD_CATEGORY_ORDER.map(key => [key, 0]))
+  });
+}
+
+function roundMetricValue(value) {
+  return Number(Number(value || 0).toFixed(2));
+}
+
+function buildMetricDelta(currentValue, previousValue) {
+  const current = roundMetricValue(currentValue);
+  const previous = roundMetricValue(previousValue);
+  const change = roundMetricValue(current - previous);
+  const changeRate = previous === 0 ? (current === 0 ? 0 : null) : roundMetricValue((change / previous) * 100);
+  return {
+    current,
+    previous,
+    change,
+    changeRate,
+    baselineZero: previous === 0
+  };
+}
+
+function buildWorkloadSummaryComparison(currentSummary, previousSummary) {
+  return {
+    logCount: buildMetricDelta(currentSummary.logCount, previousSummary.logCount),
+    totalHours: buildMetricDelta(currentSummary.totalHours, previousSummary.totalHours),
+    inspectionCount: buildMetricDelta(currentSummary.inspectionCount, previousSummary.inspectionCount),
+    incidentCount: buildMetricDelta(currentSummary.incidentCount, previousSummary.incidentCount),
+    resolvedIncidentCount: buildMetricDelta(currentSummary.resolvedIncidentCount, previousSummary.resolvedIncidentCount),
+    changeCount: buildMetricDelta(currentSummary.changeCount, previousSummary.changeCount),
+    knowledgeCount: buildMetricDelta(currentSummary.knowledgeCount, previousSummary.knowledgeCount),
+    documentCount: buildMetricDelta(currentSummary.documentCount, previousSummary.documentCount),
+    categoryCounts: Object.fromEntries(WORKLOAD_CATEGORY_ORDER.map(key => [key, buildMetricDelta(currentSummary.categoryCounts?.[key] || 0, previousSummary.categoryCounts?.[key] || 0)])),
+    categoryHours: Object.fromEntries(WORKLOAD_CATEGORY_ORDER.map(key => [key, buildMetricDelta(currentSummary.categoryHours?.[key] || 0, previousSummary.categoryHours?.[key] || 0)]))
+  };
+}
+
+function buildWorkReportTotals(reports = []) {
+  const totals = reports.reduce((result, item) => {
+    result.reportCount += 1;
+    result.totalHours += Number(item.metricsSnapshot?.totalHours || 0);
+    if (item.status === 'submitted') result.submitted += 1;
+    if (item.status === 'locked') result.locked += 1;
+    return result;
+  }, { reportCount: 0, totalHours: 0, submitted: 0, locked: 0 });
+  totals.totalHours = roundMetricValue(totals.totalHours);
+  return totals;
+}
+
+function buildWorkReportTotalsComparison(currentTotals, previousTotals) {
+  return {
+    reportCount: buildMetricDelta(currentTotals.reportCount, previousTotals.reportCount),
+    totalHours: buildMetricDelta(currentTotals.totalHours, previousTotals.totalHours),
+    submitted: buildMetricDelta(currentTotals.submitted, previousTotals.submitted),
+    locked: buildMetricDelta(currentTotals.locked, previousTotals.locked)
+  };
+}
+
+function buildWorkloadRows(db, currentUser, filters = {}) {
+  const specialFilter = String(filters.specialFilter || '').trim();
+  const scopedUsers = currentUser.role === 'admin'
+    ? db.users.filter(item => item.role !== 'customer')
+    : db.users.filter(item => item.id === currentUser.id);
+  const rangeStart = String(filters.rangeStart || '');
+  const rangeEnd = String(filters.rangeEnd || '');
+  const workDays = getInclusiveDayCount(rangeStart, rangeEnd);
+  const reportRows = (db.workReports || []).filter(report => {
+    if (!isWorkReportInRange(report, rangeStart, rangeEnd)) return false;
+    if (currentUser.role !== 'admin' && report.projectId !== currentUser.projectId) return false;
+    return true;
+  });
+  const reportStatsByUser = new Map();
+  for (const report of reportRows) {
+    const key = report.userId;
+    const current = reportStatsByUser.get(key) || {
+      dailySubmittedCount: 0,
+      submittedCount: 0,
+      reportCount: 0
+    };
+    if (report.status !== 'draft') {
+      current.submittedCount += 1;
+      if (report.reportType === 'daily') current.dailySubmittedCount += 1;
+    }
+    current.reportCount += 1;
+    reportStatsByUser.set(key, current);
+  }
+  return scopedUsers
+    .filter(item => !filters.projectId || item.projectId === filters.projectId)
+    .map(item => {
+      const metrics = buildWorkloadMetrics(db, {
+        rangeStart: filters.rangeStart,
+        rangeEnd: filters.rangeEnd,
+        userId: item.id,
+        projectId: filters.projectId || item.projectId || ''
+      });
+      const project = db.projects.find(projectItem => projectItem.id === item.projectId);
+      const reportStats = reportStatsByUser.get(item.id) || { dailySubmittedCount: 0, submittedCount: 0, reportCount: 0 };
+      const workOrderCount = metrics.logCount;
+      return {
+        userId: item.id,
+        userName: item.name,
+        projectId: item.projectId || '',
+        projectName: project?.name || '-',
+        workOrderCount,
+        ...metrics,
+        workContentSummary: formatWorkloadCategorySummary(metrics.categoryCounts, '项'),
+        workloadHoursSummary: formatWorkloadCategorySummary(metrics.categoryHours, 'h'),
+        workEffectSummary: [`巡检${metrics.inspectionCount}`, `故障${metrics.incidentCount}`, `已解决${metrics.resolvedIncidentCount}`, `变更${metrics.changeCount}`, `知识${metrics.knowledgeCount}`, `资料${metrics.documentCount}`].join(' ｜ '),
+        dailySubmittedCount: reportStats.dailySubmittedCount,
+        submittedWorkReportCount: reportStats.submittedCount,
+        workReportCount: reportStats.reportCount
+      };
+    })
+    .filter(item => {
+      if (!specialFilter) return true;
+      if (specialFilter === 'no-daily') return item.dailySubmittedCount === 0;
+      if (specialFilter === 'hour-anomaly') return item.totalHours >= Math.max(workDays * 8 * 1.5, 12);
+      if (specialFilter === 'low-output') return item.totalHours < Math.max(workDays * 2, 4) && item.workOrderCount <= Math.max(workDays, 1);
+      return true;
+    })
+    .sort((a, b) => {
+      if (b.totalHours !== a.totalHours) return b.totalHours - a.totalHours;
+      return a.userName.localeCompare(b.userName, 'zh-CN');
+    });
+}
+
+function buildWorkloadCsv(rows) {
+  const lines = [
+    ['人员', '项目', '工单数', '累计工时', '巡检类工单', '故障类工单', '变更类工单', '资料类工单', '事务类工单', '外围支撑类工单', '巡检类工时', '故障类工时', '变更类工时', '资料类工时', '事务类工时', '外围支撑类工时', '巡检数', '故障数', '已解决故障数', '变更数', '知识数', '资料数', '日报数', '已提交汇报数'].join(',')
+  ];
+  rows.forEach(item => {
+    lines.push([
+      item.userName,
+      item.projectName,
+      item.workOrderCount ?? item.logCount,
+      item.totalHours,
+      item.categoryCounts?.inspection || 0,
+      item.categoryCounts?.incident || 0,
+      item.categoryCounts?.change || 0,
+      item.categoryCounts?.document || 0,
+      item.categoryCounts?.task || 0,
+      item.categoryCounts?.support || 0,
+      item.categoryHours?.inspection || 0,
+      item.categoryHours?.incident || 0,
+      item.categoryHours?.change || 0,
+      item.categoryHours?.document || 0,
+      item.categoryHours?.task || 0,
+      item.categoryHours?.support || 0,
+      item.inspectionCount,
+      item.incidentCount,
+      item.resolvedIncidentCount || 0,
+      item.changeCount,
+      item.knowledgeCount,
+      item.documentCount || 0,
+      item.dailySubmittedCount ?? 0,
+      item.submittedWorkReportCount ?? 0
+    ].map(value => `"${String(value ?? '').replace(/"/g, '""')}"`).join(','));
+  });
+  return `\ufeff${lines.join('\n')}`;
+}
+
+function canManageWorkReport(user, report) {
+  if (user.role === 'admin') return true;
+  return user.id === report.userId && user.projectId === report.projectId;
+}
+
+function canEditWorkReportContent(report) {
+  return report.status === 'draft' || report.status === 'returned';
+}
+
+function canSubmitWorkReport(report) {
+  return report.status === 'draft' || report.status === 'returned';
+}
+
+function canAccessWorkReport(user, report) {
+  if (user.role === 'admin') return true;
+  if (user.role === 'customer') {
+    return user.projectId === report.projectId && ['submitted', 'approved', 'locked'].includes(report.status);
+  }
+  return user.projectId === report.projectId && user.id === report.userId;
+}
+
+function buildWorkReportResponse(db, report) {
+  const owner = db.users.find(item => item.id === report.userId);
+  const reviewer = db.users.find(item => item.id === report.reviewedBy);
+  const project = db.projects.find(item => item.id === report.projectId);
+  return {
+    ...report,
+    userName: owner?.name || '-',
+    projectName: project?.name || '-',
+    reviewerName: reviewer?.name || (report.reviewedBy ? '管理员' : '')
+  };
+}
+
+function quoteCsvValue(value) {
+  return `"${String(value ?? '').replace(/"/g, '""')}"`;
+}
+
+function listScopedWorkReports(db, user, filters = {}) {
+  const status = String(filters.status || '').trim();
+  const reportType = String(filters.reportType || '').trim();
+  const projectId = String(filters.projectId || '').trim();
+  const userId = String(filters.userId || '').trim();
+  return (db.workReports || []).filter(item => {
+    if (!canAccessWorkReport(user, item)) return false;
+    if (status && item.status !== status) return false;
+    if (reportType && item.reportType !== reportType) return false;
+    if (projectId && item.projectId !== projectId) return false;
+    if (userId && item.userId !== userId) return false;
+    return true;
+  });
+}
+
+function buildWorkReportOverview(db, user, filters = {}) {
+  const rangeStart = String(filters.rangeStart || '');
+  const rangeEnd = String(filters.rangeEnd || '');
+  const trendUnit = ['day', 'week', 'month'].includes(String(filters.trendUnit || '').trim())
+    ? String(filters.trendUnit || '').trim()
+    : 'week';
+  const reports = listScopedWorkReports(db, user, filters)
+    .filter(item => String(item.rangeStart || '') <= rangeEnd && String(item.rangeEnd || '') >= rangeStart)
+    .map(item => buildWorkReportResponse(db, item));
+  const totals = buildWorkReportTotals(reports);
+  const previousRange = getPreviousDateRange({
+    period: String(filters.period || ''),
+    periodKey: String(filters.periodKey || ''),
+    rangeStart,
+    rangeEnd,
+    label: String(filters.label || `${rangeStart} 至 ${rangeEnd}`)
+  });
+  const previousReports = previousRange
+    ? listScopedWorkReports(db, user, filters)
+      .filter(item => String(item.rangeStart || '') <= previousRange.rangeEnd && String(item.rangeEnd || '') >= previousRange.rangeStart)
+      .map(item => buildWorkReportResponse(db, item))
+    : [];
+  const previousTotals = buildWorkReportTotals(previousReports);
+
+  const trendMap = new Map();
+  reports.forEach(item => {
+    const bucket = getDateRangeFromPeriod(trendUnit, item.rangeStart);
+    if (!bucket) return;
+    const current = trendMap.get(bucket.periodKey) || {
+      key: bucket.periodKey,
+      label: bucket.label,
+      rangeStart: bucket.rangeStart,
+      rangeEnd: bucket.rangeEnd,
+      reportCount: 0,
+      totalHours: 0,
+      logCount: 0,
+      pendingCount: 0,
+      submittedCount: 0,
+      approvedCount: 0,
+      lockedCount: 0
+    };
+    current.reportCount += 1;
+    current.totalHours += Number(item.metricsSnapshot?.totalHours || 0);
+    current.logCount += Number(item.metricsSnapshot?.logCount || 0);
+    if (item.status === 'submitted') current.pendingCount += 1;
+    if (item.status === 'submitted') current.submittedCount += 1;
+    if (item.status === 'approved') current.approvedCount += 1;
+    if (item.status === 'locked') current.lockedCount += 1;
+    trendMap.set(bucket.periodKey, current);
+  });
+  const trend = [...trendMap.values()]
+    .sort((a, b) => String(a.rangeStart).localeCompare(String(b.rangeStart)))
+    .map(item => ({
+      label: item.label,
+      reportCount: item.reportCount,
+      totalHours: Number(item.totalHours.toFixed(2)),
+      logCount: item.logCount,
+      pendingCount: item.pendingCount,
+      submittedCount: item.submittedCount,
+      approvedCount: item.approvedCount,
+      lockedCount: item.lockedCount
+    }));
+
+  const buildRanking = field => [...reports.reduce((map, item) => {
+    const key = String(item[field] || '');
+    const current = map.get(key) || {
+      id: key,
+      name: field === 'userId' ? item.userName : item.projectName,
+      reportCount: 0,
+      totalHours: 0,
+      logCount: 0,
+      pendingCount: 0
+    };
+    current.reportCount += 1;
+    current.totalHours += Number(item.metricsSnapshot?.totalHours || 0);
+    current.logCount += Number(item.metricsSnapshot?.logCount || 0);
+    if (item.status === 'submitted') current.pendingCount += 1;
+    map.set(key, current);
+    return map;
+  }, new Map()).values()]
+    .map(item => ({ ...item, totalHours: Number(item.totalHours.toFixed(2)) }))
+    .sort((a, b) => b.reportCount - a.reportCount || b.totalHours - a.totalHours || String(a.name).localeCompare(String(b.name), 'zh-CN'));
+
+  const pendingItems = reports
+    .filter(item => item.status === 'submitted')
+    .sort((a, b) => String(a.submittedAt || '').localeCompare(String(b.submittedAt || '')) || String(a.rangeStart).localeCompare(String(b.rangeStart)));
+  const rankings = {
+    users: buildRanking('userId'),
+    projects: buildRanking('projectId')
+  };
+  const pendingSummary = {
+    total: pendingItems.length,
+    byType: ['daily', 'weekly', 'monthly']
+      .map(type => ({ reportType: type, count: pendingItems.filter(item => item.reportType === type).length }))
+      .filter(item => item.count > 0),
+    byUsers: rankings.users.filter(item => Number(item.pendingCount) > 0),
+    byProjects: rankings.projects.filter(item => Number(item.pendingCount) > 0),
+    oldestSubmittedAt: pendingItems[0]?.submittedAt || '',
+    items: pendingItems
+  };
+
+  return {
+    range: {
+      period: String(filters.period || ''),
+      periodKey: String(filters.periodKey || ''),
+      trendUnit,
+      rangeStart,
+      rangeEnd,
+      label: String(filters.label || `${rangeStart} 至 ${rangeEnd}`)
+    },
+    previousRange,
+    totals,
+    totalsComparison: buildWorkReportTotalsComparison(totals, previousTotals),
+    trend,
+    rankings,
+    pendingSummary
+  };
+}
+
+function buildWorkReportListCsv(reports) {
+  const lines = [
+    ['导出时间', new Date().toISOString()].map(quoteCsvValue).join(','),
+    [
+    '周期开始', '周期结束', '汇报类型', '人员', '项目', '日志数', '累计工时', '巡检数', '故障数', '已解决故障数', '变更数', '知识数', '资料数',
+    '巡检类工单', '故障类工单', '变更类工单', '资料类工单', '事务类工单', '外围支撑类工单',
+    '状态', '工作总结', '已完成事项', '未完成事项', '风险阻塞', '下一步计划', '审核人', '审核意见', '提交时间', '审核时间', '锁定时间'
+  ].join(',')];
+  reports.forEach(item => {
+    lines.push([
+      item.rangeStart,
+      item.rangeEnd,
+      item.reportType === 'daily' ? '日报' : item.reportType === 'weekly' ? '周报' : '月报',
+      item.userName,
+      item.projectName,
+      item.metricsSnapshot?.logCount || 0,
+      item.metricsSnapshot?.totalHours || 0,
+      item.metricsSnapshot?.inspectionCount || 0,
+      item.metricsSnapshot?.incidentCount || 0,
+      item.metricsSnapshot?.resolvedIncidentCount || 0,
+      item.metricsSnapshot?.changeCount || 0,
+      item.metricsSnapshot?.knowledgeCount || 0,
+      item.metricsSnapshot?.documentCount || 0,
+      item.metricsSnapshot?.categoryCounts?.inspection || 0,
+      item.metricsSnapshot?.categoryCounts?.incident || 0,
+      item.metricsSnapshot?.categoryCounts?.change || 0,
+      item.metricsSnapshot?.categoryCounts?.document || 0,
+      item.metricsSnapshot?.categoryCounts?.task || 0,
+      item.metricsSnapshot?.categoryCounts?.support || 0,
+      item.status === 'draft' ? '草稿' : item.status === 'submitted' ? '已提交' : item.status === 'returned' ? '已退回' : item.status === 'approved' ? '已确认' : '已锁定',
+      item.summary,
+      item.completedWork,
+      item.pendingWork,
+      item.risks,
+      item.nextPlan,
+      item.reviewerName,
+      item.reviewComment,
+      item.submittedAt,
+      item.reviewedAt,
+      item.lockedAt
+    ].map(quoteCsvValue).join(','));
+  });
+  return `\ufeff${lines.join('\n')}`;
+}
+
+function buildWorkReportOverviewCsv(overview) {
+  const lines = [];
+  lines.push('汇总指标');
+  lines.push(['统计范围', overview.range?.rangeStart || '', overview.range?.rangeEnd || ''].map(quoteCsvValue).join(','));
+  lines.push(['统计口径', overview.range?.period || '', overview.range?.trendUnit || ''].map(quoteCsvValue).join(','));
+  lines.push(['导出时间', new Date().toISOString()].map(quoteCsvValue).join(','));
+  lines.push(['汇报总数', overview.totals?.reportCount || 0].map(quoteCsvValue).join(','));
+  lines.push(['累计工时', overview.totals?.totalHours || 0].map(quoteCsvValue).join(','));
+  lines.push(['待审核', overview.totals?.submitted || 0].map(quoteCsvValue).join(','));
+  lines.push(['已锁定', overview.totals?.locked || 0].map(quoteCsvValue).join(','));
+  lines.push('');
+  lines.push('趋势');
+  lines.push(['周期', '汇报数', '已提交', '已确认', '已锁定', '工时', '日志数', '待审核'].join(','));
+  (overview.trend || []).forEach(item => {
+    lines.push([item.label, item.reportCount, item.submittedCount || 0, item.approvedCount || 0, item.lockedCount || 0, item.totalHours, item.logCount, item.pendingCount].map(quoteCsvValue).join(','));
+  });
+  lines.push('');
+  lines.push('待审核汇报');
+  lines.push(['类型', '人员', '项目', '周期开始', '周期结束', '提交时间'].join(','));
+  (overview.pendingSummary?.items || []).forEach(item => {
+    lines.push([
+      item.reportType === 'daily' ? '日报' : item.reportType === 'weekly' ? '周报' : '月报',
+      item.userName,
+      item.projectName,
+      item.rangeStart,
+      item.rangeEnd,
+      item.submittedAt
+    ].map(quoteCsvValue).join(','));
+  });
+  lines.push('');
+  lines.push('人员排行');
+  lines.push(['人员', '汇报数', '工时', '日志数', '待审核'].join(','));
+  (overview.rankings?.users || []).forEach(item => {
+    lines.push([item.name, item.reportCount, item.totalHours, item.logCount, item.pendingCount].map(quoteCsvValue).join(','));
+  });
+  lines.push('');
+  lines.push('项目排行');
+  lines.push(['项目', '汇报数', '工时', '日志数', '待审核'].join(','));
+  (overview.rankings?.projects || []).forEach(item => {
+    lines.push([item.name, item.reportCount, item.totalHours, item.logCount, item.pendingCount].map(quoteCsvValue).join(','));
+  });
+  return `\ufeff${lines.join('\n')}`;
 }
 
 function buildSummary(db, period, userId, projectId = '') {
@@ -3536,6 +5357,9 @@ function buildOperationalReportData(db, scope, targetId, period) {
   const spareParts = (db.spareParts || []).filter(item => item.projectId === project.id);
   const users = (db.users || []).filter(item => item.projectId === project.id);
   const totalHours = Number(logs.reduce((sum, item) => sum + Number(item.durationHours || 0), 0).toFixed(2));
+  const sparePartStock = spareParts.reduce((sum, item) => sum + Number(item.quantity ?? item.stock ?? 0), 0);
+  const projectStateSummary = `资产 ${assets.length} 项，巡检计划 ${plans.length} 个，资料 ${documents.length} 份，备件 ${spareParts.length} 类 / 库存 ${sparePartStock} 件。`;
+  const periodOutputSummary = `本周期产出日志 ${logs.length} 条、工时 ${totalHours} 小时、巡检 ${executions.length} 次、变更 ${changes.length} 条、故障 ${incidents.length} 条、知识 ${kb.length} 条。`;
   return {
     scope,
     targetUser,
@@ -3557,9 +5381,12 @@ function buildOperationalReportData(db, scope, targetId, period) {
     documents,
     spareParts,
     totalHours,
+    sparePartStock,
     abnormalInspectionCount: executions.filter(item => item.result === '异常').length,
     normalInspectionCount: executions.filter(item => item.result === '正常').length,
-    openIncidentCount: incidents.filter(item => item.status !== '已关闭' && item.status !== '已解决').length
+    openIncidentCount: incidents.filter(item => item.status !== '已关闭' && item.status !== '已解决').length,
+    projectStateSummary,
+    periodOutputSummary
   };
 }
 
@@ -3586,31 +5413,47 @@ function createReportCoverSlide(report) {
 }
 
 function createReportOverviewSlide(report) {
-  const metrics = [
+  const projectStateMetrics = [
+    ['资产台账', `${report.assets.length} 项`, 'F59E0B'],
+    ['巡检计划', `${report.plans.length} 个`, '0EA5E9'],
+    ['项目资料', `${report.documents.length} 份`, '475569'],
+    ['备件库存', `${report.spareParts.length} 类`, '84CC16']
+  ];
+  const periodOutputMetrics = [
     ['运维日志', `${report.logs.length} 条`, '2563EB'],
     ['累计工时', `${report.totalHours} 小时`, '16A34A'],
-    ['资产数量', `${report.assets.length} 项`, 'F59E0B'],
-    ['知识沉淀', `${report.kb.length} 条`, '7C3AED'],
     ['巡检执行', `${report.executions.length} 次`, '0891B2'],
-    ['变更记录', `${report.changes.length} 条`, 'EA580C'],
-    ['故障记录', `${report.incidents.length} 条`, 'DC2626'],
-    ['资料文档', `${report.documents.length} 份`, '475569']
+    ['变更故障', `${report.changes.length + report.incidents.length} 条`, 'DC2626']
   ];
-  const shapes = createReportHeaderShapes('运营总览', `${report.projectName} · ${report.periodLabel} · ${report.currentPeriod}`);
-  metrics.forEach((metric, index) => {
-    const col = index % 4;
-    const row = Math.floor(index / 4);
-    const left = 0.7 + col * 3.15;
-    const top = 1.45 + row * 1.35;
+  const shapes = createReportHeaderShapes('运维综合总览', `${report.projectName} · ${report.periodLabel} · ${report.currentPeriod}`);
+  shapes.push(createShape({ id: 10, x: emu(0.7), y: emu(1.15), cx: emu(5.7), cy: emu(0.28), textLines: ['项目现状'], textOptions: { size: 1600, color: '0F172A', bold: true } }));
+  shapes.push(createShape({ id: 11, x: emu(6.75), y: emu(1.15), cx: emu(5.7), cy: emu(0.28), textLines: ['周期产出'], textOptions: { size: 1600, color: '0F172A', bold: true } }));
+  projectStateMetrics.forEach((metric, index) => {
+    const col = index % 2;
+    const row = Math.floor(index / 2);
+    const left = 0.7 + col * 2.95;
+    const top = 1.55 + row * 1.25;
     const baseId = 20 + index * 5;
     shapes.push(createShape({ id: baseId, x: emu(left), y: emu(top), cx: emu(2.75), cy: emu(1.0), fill: 'FFFFFF', line: 'E2E8F0', preset: 'roundRect' }));
     shapes.push(createShape({ id: baseId + 1, x: emu(left), y: emu(top), cx: emu(0.08), cy: emu(1.0), fill: metric[2], preset: 'roundRect' }));
     shapes.push(createShape({ id: baseId + 2, x: emu(left + 0.25), y: emu(top + 0.18), cx: emu(2.2), cy: emu(0.16), textLines: [metric[0]], textOptions: { size: 1050, color: '64748B' } }));
     shapes.push(createShape({ id: baseId + 3, x: emu(left + 0.25), y: emu(top + 0.48), cx: emu(2.2), cy: emu(0.28), textLines: [metric[1]], textOptions: { size: 2100, color: '0F172A', bold: true } }));
   });
-  const summary = `本周期围绕 ${report.projectName} 完成 ${report.logs.length} 条运维日志、${report.executions.length} 次巡检、${report.changes.length} 条变更与 ${report.incidents.length} 条故障记录；当前资产 ${report.assets.length} 项，沉淀知识 ${report.kb.length} 条、文档 ${report.documents.length} 份、备件 ${report.spareParts.length} 类。`;
-  shapes.push(createShape({ id: 90, x: emu(0.7), y: emu(4.35), cx: emu(11.9), cy: emu(1.45), fill: 'EFF6FF', line: 'BFDBFE', preset: 'roundRect' }));
-  shapes.push(createShape({ id: 91, x: emu(1.0), y: emu(4.7), cx: emu(11.1), cy: emu(0.7), textLines: [summary], textOptions: { size: 1500, color: '0F172A' } }));
+  periodOutputMetrics.forEach((metric, index) => {
+    const col = index % 2;
+    const row = Math.floor(index / 2);
+    const left = 6.75 + col * 2.95;
+    const top = 1.55 + row * 1.25;
+    const baseId = 60 + index * 5;
+    shapes.push(createShape({ id: baseId, x: emu(left), y: emu(top), cx: emu(2.75), cy: emu(1.0), fill: 'FFFFFF', line: 'E2E8F0', preset: 'roundRect' }));
+    shapes.push(createShape({ id: baseId + 1, x: emu(left), y: emu(top), cx: emu(0.08), cy: emu(1.0), fill: metric[2], preset: 'roundRect' }));
+    shapes.push(createShape({ id: baseId + 2, x: emu(left + 0.25), y: emu(top + 0.18), cx: emu(2.2), cy: emu(0.16), textLines: [metric[0]], textOptions: { size: 1050, color: '64748B' } }));
+    shapes.push(createShape({ id: baseId + 3, x: emu(left + 0.25), y: emu(top + 0.48), cx: emu(2.2), cy: emu(0.28), textLines: [metric[1]], textOptions: { size: 2100, color: '0F172A', bold: true } }));
+  });
+  shapes.push(createShape({ id: 90, x: emu(0.7), y: emu(4.35), cx: emu(5.8), cy: emu(1.45), fill: 'FFF7ED', line: 'FED7AA', preset: 'roundRect' }));
+  shapes.push(createShape({ id: 91, x: emu(1.0), y: emu(4.62), cx: emu(5.1), cy: emu(0.82), textLines: [report.projectStateSummary], textOptions: { size: 1450, color: '0F172A' } }));
+  shapes.push(createShape({ id: 92, x: emu(6.75), y: emu(4.35), cx: emu(5.85), cy: emu(1.45), fill: 'EFF6FF', line: 'BFDBFE', preset: 'roundRect' }));
+  shapes.push(createShape({ id: 93, x: emu(7.05), y: emu(4.62), cx: emu(5.1), cy: emu(0.82), textLines: [report.periodOutputSummary], textOptions: { size: 1450, color: '0F172A' } }));
   return createBaseSlide(shapes);
 }
 
@@ -3647,29 +5490,29 @@ function buildDetailedPptxBufferFromReport(report) {
   const slides = [
     createReportCoverSlide(report),
     createReportOverviewSlide(report),
-    createReportListSlide('运维日志明细', '事件、人员、位置、处理过程与结论', report.logs.map(item => [
+    createReportListSlide('周期产出 / 运维日志', '事件、人员、位置、处理过程与结论', report.logs.map(item => [
       item.date || '-', item.event || '-', item.relatedTarget || item.location || '-', item.conclusion || '-', `${Number(item.durationHours || 0)}h`, item.process || '-'
     ]), [
       { label: '日期', width: 1.15, max: 12 }, { label: '事件', width: 2.0, max: 18 }, { label: '资产/位置', width: 1.7, max: 16 }, { label: '结论', width: 2.0, max: 20 }, { label: '工时', width: 0.75, max: 8 }, { label: '处理过程', width: 4.0, max: 40 }
     ]),
-    createReportListSlide('资产清单概览', '设备类型、品牌型号、位置、维保与状态', report.assets.map(item => [
+    createReportListSlide('项目现状 / 资产台账', '设备类型、品牌型号、位置、维保与状态', report.assets.map(item => [
       item.name || '-', item.type || '-', [item.brand, item.model].filter(Boolean).join(' / ') || '-', item.installationLocation || item.location || '-', item.maintainExpiryDate || '-', item.status || '-'
     ]), [
       { label: '名称', width: 2.0, max: 18 }, { label: '类型', width: 1.2, max: 10 }, { label: '品牌型号', width: 2.2, max: 22 }, { label: '位置', width: 2.0, max: 18 }, { label: '维保到期', width: 1.3, max: 12 }, { label: '状态', width: 1.2, max: 10 }
     ]),
-    createReportListSlide('巡检计划与执行', '周期计划、执行结果、异常说明和整改建议', report.plans.map(plan => {
+    createReportListSlide('项目现状 / 巡检计划', '周期计划、执行结果、异常说明和整改建议', report.plans.map(plan => {
       const exec = report.executions.find(item => item.planId === plan.id);
       return [plan.title || '-', plan.cycle || '-', plan.nextDate || '-', exec?.executedAt || '-', exec?.result || '-', exec?.issue || exec?.suggestion || '-'];
     }), [
       { label: '计划', width: 2.1, max: 18 }, { label: '周期', width: 0.9, max: 8 }, { label: '下次巡检', width: 1.25, max: 12 }, { label: '执行时间', width: 1.45, max: 16 }, { label: '结果', width: 0.9, max: 8 }, { label: '异常/建议', width: 4.4, max: 42 }
     ]),
-    createReportListSlide('变更与故障记录', '变更审批、故障处理与当前状态', [
+    createReportListSlide('周期产出 / 变更与故障', '变更审批、故障处理与当前状态', [
       ...report.changes.map(item => ['变更', item.title || '-', item.riskLevel || '-', item.status || '-', item.createdAt || '-', item.content || '-']),
       ...report.incidents.map(item => ['故障', item.title || '-', item.faultType || item.severity || '-', item.status || '-', item.occurredAt || item.createdAt || '-', item.resolution || '-'])
     ], [
       { label: '类型', width: 0.85, max: 8 }, { label: '标题', width: 2.2, max: 22 }, { label: '级别/类型', width: 1.2, max: 12 }, { label: '状态', width: 1.1, max: 10 }, { label: '时间', width: 1.5, max: 16 }, { label: '说明', width: 4.1, max: 42 }
     ]),
-    createReportListSlide('知识文档与备件', '知识沉淀、项目资料与备件库存', [
+    createReportListSlide('项目现状 / 资料与备件', '项目资料、备件库存与知识沉淀', [
       ...report.kb.map(item => ['知识库', item.title || '-', item.keywords || '-', item.solution || '-', item.createdAt || '-']),
       ...report.documents.map(item => ['资料', item.title || '-', item.type || '-', item.attachmentName || '-', item.createdAt || '-']),
       ...report.spareParts.map(item => ['备件', item.name || '-', item.model || '-', `库存 ${item.quantity ?? 0}`, item.createdAt || '-'])
@@ -3742,40 +5585,11 @@ function buildProjectPptxBuffer(db, projectId, period) {
 }
 
 function buildOperationalReportHtml(db, scope, targetId, period) {
-  const currentPeriod = getPeriodKey(formatDateKey(new Date()), period);
-  const periodLabel = ({ week: '每周', month: '每月', year: '每年' }[period] || period);
-  const targetUser = scope === 'user' ? db.users.find(item => item.id === targetId) : null;
-  const project = scope === 'project'
-    ? db.projects.find(item => item.id === targetId)
-    : db.projects.find(item => item.id === targetUser?.projectId);
-  if (!project || (scope === 'user' && !targetUser)) return null;
-  const projectUserIds = (db.users || []).filter(item => item.projectId === project.id).map(item => item.id);
-  const logs = (db.logs || [])
-    .filter(item => scope === 'user' ? item.userId === targetId : item.projectId === project.id)
-    .filter(item => getPeriodKey(item.date, period) === currentPeriod)
-    .sort((a, b) => String(b.date || '').localeCompare(String(a.date || '')));
-  const assets = (db.assets || []).filter(item => item.projectId === project.id);
-  const kb = (db.knowledgeBase || []).filter(item => scope === 'user' ? item.createdBy === targetId : item.projectId === project.id || projectUserIds.includes(item.createdBy));
-  const plans = (db.inspectionPlans || []).filter(item => item.projectId === project.id);
-  const executions = (db.inspectionExecutions || [])
-    .filter(item => item.projectId === project.id)
-    .filter(item => getPeriodKey(item.executedAt, period) === currentPeriod)
-    .sort((a, b) => String(b.executedAt || '').localeCompare(String(a.executedAt || '')));
-  const changes = (db.changeRecords || [])
-    .filter(item => item.projectId === project.id)
-    .filter(item => getPeriodKey(item.createdAt, period) === currentPeriod)
-    .sort((a, b) => String(b.createdAt || '').localeCompare(String(a.createdAt || '')));
-  const incidents = (db.incidentRecords || [])
-    .filter(item => item.projectId === project.id)
-    .filter(item => getPeriodKey(item.occurredAt || item.createdAt, period) === currentPeriod)
-    .sort((a, b) => String(b.occurredAt || b.createdAt || '').localeCompare(String(a.occurredAt || a.createdAt || '')));
-  const documents = (db.documents || []).filter(item => item.projectId === project.id);
-  const spareParts = (db.spareParts || []).filter(item => item.projectId === project.id);
-  const totalHours = Number(logs.reduce((sum, item) => sum + Number(item.durationHours || 0), 0).toFixed(2));
-  const abnormalInspectionCount = executions.filter(item => item.result === '异常').length;
-  const openIncidentCount = incidents.filter(item => item.status !== '已关闭' && item.status !== '已解决').length;
+  const report = buildOperationalReportData(db, scope, targetId, period);
+  if (!report) return null;
   const tableRows = (items, emptyColspan, mapper) => items.map(mapper).join('') || `<tr><td colspan="${emptyColspan}">暂无数据</td></tr>`;
-  const reportTitle = scope === 'user' ? `${targetUser.name} 驻场运维完整报表` : `${project.customerName || '-'} / ${project.name || '-'} 运维完整报表`;
+  const reportTitle = report.title;
+  const renderSectionTitle = (group, title, tone) => `<div class="section-title ${tone}"><span class="section-group">${escapeHtml(group)}</span><span class="section-name">${escapeHtml(title)}</span></div>`;
   return `<!DOCTYPE html>
 <html lang="zh-CN">
 <head>
@@ -3784,44 +5598,62 @@ function buildOperationalReportHtml(db, scope, targetId, period) {
   <title>${escapeHtml(reportTitle)}</title>
   <style>
     body { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; margin: 24px; background: #f8fafc; color: #0f172a; }
-    .card { background:#fff; border:1px solid #e2e8f0; border-radius:16px; padding:20px; margin-bottom:16px; }
+    .card { background:#fff; border:1px solid #e2e8f0; border-radius:16px; padding:20px; margin-bottom:16px; box-shadow:0 10px 30px rgba(15,23,42,.04); }
     .title { font-size:28px; font-weight:700; margin-bottom:8px; }
     .muted { color:#64748b; font-size:14px; }
     .stats { display:grid; grid-template-columns:repeat(4,minmax(0,1fr)); gap:12px; margin-top:16px; }
-    .stat { background:#eff6ff; border-radius:12px; padding:16px; }
+    .stat { background:#eff6ff; border-radius:12px; padding:16px; border:1px solid #dbeafe; }
+    .stat.state { background:#fff7ed; border-color:#fed7aa; }
+    .stat.output { background:#eff6ff; border-color:#bfdbfe; }
     .stat strong { display:block; font-size:24px; margin-top:6px; }
     h2 { margin:0 0 12px; font-size:20px; }
     table { width:100%; border-collapse:collapse; font-size:13px; }
     th, td { border-bottom:1px solid #e2e8f0; padding:9px 8px; text-align:left; vertical-align:top; }
     th { background:#f8fafc; white-space:nowrap; }
+    .summary-grid { display:grid; grid-template-columns:repeat(2,minmax(0,1fr)); gap:16px; }
+    .summary-panel { border-radius:14px; padding:16px 18px; border:1px solid #e2e8f0; }
+    .summary-panel.state { background:#fff7ed; border-color:#fed7aa; }
+    .summary-panel.output { background:#eff6ff; border-color:#bfdbfe; }
+    .summary-panel h2 { font-size:18px; margin-bottom:8px; }
+    .section-title { display:flex; align-items:center; gap:10px; margin-bottom:12px; }
+    .section-group { font-size:12px; font-weight:700; border-radius:999px; padding:4px 10px; }
+    .section-name { font-size:20px; font-weight:700; color:#0f172a; }
+    .tone-state .section-group { background:#ffedd5; color:#9a3412; }
+    .tone-output .section-group { background:#dbeafe; color:#1d4ed8; }
   </style>
 </head>
 <body>
   <div class="card">
     <div class="title">${escapeHtml(reportTitle)}</div>
-    <div class="muted">项目：${escapeHtml(project.customerName || '-')} / ${escapeHtml(project.name || '-')}</div>
-    <div class="muted">统计周期：${escapeHtml(periodLabel)}（${escapeHtml(currentPeriod)}）</div>
+    <div class="muted">项目：${escapeHtml(report.project.customerName || '-')} / ${escapeHtml(report.project.name || '-')}</div>
+    <div class="muted">统计周期：${escapeHtml(report.periodLabel)}（${escapeHtml(report.currentPeriod)}）</div>
     <div class="muted">生成时间：${escapeHtml(now())}</div>
     <div class="stats">
-      <div class="stat"><span class="muted">运维日志</span><strong>${logs.length}</strong></div>
-      <div class="stat"><span class="muted">累计工时</span><strong>${totalHours}</strong></div>
-      <div class="stat"><span class="muted">资产数量</span><strong>${assets.length}</strong></div>
-      <div class="stat"><span class="muted">知识沉淀</span><strong>${kb.length}</strong></div>
-      <div class="stat"><span class="muted">巡检执行</span><strong>${executions.length}</strong></div>
-      <div class="stat"><span class="muted">异常巡检</span><strong>${abnormalInspectionCount}</strong></div>
-      <div class="stat"><span class="muted">变更记录</span><strong>${changes.length}</strong></div>
-      <div class="stat"><span class="muted">未关闭故障</span><strong>${openIncidentCount}</strong></div>
+      <div class="stat state"><span class="muted">资产台账</span><strong>${report.assets.length}</strong></div>
+      <div class="stat state"><span class="muted">巡检计划</span><strong>${report.plans.length}</strong></div>
+      <div class="stat state"><span class="muted">项目资料</span><strong>${report.documents.length}</strong></div>
+      <div class="stat state"><span class="muted">备件种类</span><strong>${report.spareParts.length}</strong></div>
+      <div class="stat output"><span class="muted">运维日志</span><strong>${report.logs.length}</strong></div>
+      <div class="stat output"><span class="muted">累计工时</span><strong>${report.totalHours}</strong></div>
+      <div class="stat output"><span class="muted">巡检执行</span><strong>${report.executions.length}</strong></div>
+      <div class="stat output"><span class="muted">未关闭故障</span><strong>${report.openIncidentCount}</strong></div>
     </div>
   </div>
-  <div class="card"><h2>项目与人员信息</h2><table><tbody>
-    <tr><th>客户/项目</th><td>${escapeHtml(project.customerName || '-')} / ${escapeHtml(project.name || '-')}</td><th>项目周期</th><td>${escapeHtml(project.projectStartDate || '-')} 至 ${escapeHtml(project.projectEndDate || '-')}</td></tr>
-    <tr><th>统计对象</th><td>${escapeHtml(scope === 'user' ? targetUser.name : '项目整体')}</td><th>项目人员</th><td>${escapeHtml((db.users || []).filter(item => item.projectId === project.id).map(item => item.name).join('、') || '-')}</td></tr>
+  <div class="card"><h2>项目基本信息</h2><table><tbody>
+    <tr><th>客户/项目</th><td>${escapeHtml(report.project.customerName || '-')} / ${escapeHtml(report.project.name || '-')}</td><th>项目周期</th><td>${escapeHtml(report.project.projectStartDate || '-')} 至 ${escapeHtml(report.project.projectEndDate || '-')}</td></tr>
+    <tr><th>统计对象</th><td>${escapeHtml(report.scope === 'user' ? report.targetUser.name : '项目整体')}</td><th>项目人员</th><td>${escapeHtml(report.users.map(item => item.name).join('、') || '-')}</td></tr>
   </tbody></table></div>
-  <div class="card"><h2>运维日志明细</h2><table><thead><tr><th>日期</th><th>事件</th><th>人员</th><th>资产/位置</th><th>处理过程</th><th>结论</th><th>工时</th></tr></thead><tbody>${tableRows(logs, 7, item => `<tr><td>${escapeHtml(item.date || '-')}</td><td>${escapeHtml(item.event || '-')}</td><td>${escapeHtml((db.users || []).find(user => user.id === item.userId)?.name || '-')}</td><td>${escapeHtml(item.relatedTarget || item.location || '-')}</td><td>${escapeHtml(item.process || '-')}</td><td>${escapeHtml(item.conclusion || '-')}</td><td>${escapeHtml(item.durationHours || 0)}</td></tr>`)}</tbody></table></div>
-  <div class="card"><h2>资产清单</h2><table><thead><tr><th>名称</th><th>类型</th><th>品牌型号</th><th>位置</th><th>维保到期</th><th>状态</th></tr></thead><tbody>${tableRows(assets, 6, item => `<tr><td>${escapeHtml(item.name || '-')}</td><td>${escapeHtml(item.type || '-')}</td><td>${escapeHtml([item.brand, item.model].filter(Boolean).join(' / ') || '-')}</td><td>${escapeHtml(item.installationLocation || item.location || '-')}</td><td>${escapeHtml(item.maintainExpiryDate || '-')}</td><td>${escapeHtml(item.status || '-')}</td></tr>`)}</tbody></table></div>
-  <div class="card"><h2>巡检计划与执行</h2><table><thead><tr><th>计划</th><th>周期</th><th>下次巡检</th><th>状态</th><th>本周期执行时间</th><th>结果</th><th>异常说明</th><th>整改建议</th></tr></thead><tbody>${tableRows(plans, 8, plan => { const exec = executions.find(item => item.planId === plan.id); return `<tr><td>${escapeHtml(plan.title || '-')}</td><td>${escapeHtml(plan.cycle || '-')}</td><td>${escapeHtml(plan.nextDate || '-')}</td><td>${escapeHtml(plan.status || '-')}</td><td>${escapeHtml(exec?.executedAt || '-')}</td><td>${escapeHtml(exec?.result || '-')}</td><td>${escapeHtml(exec?.issue || '-')}</td><td>${escapeHtml(exec?.suggestion || '-')}</td></tr>`; })}</tbody></table></div>
-  <div class="card"><h2>变更与故障</h2><table><thead><tr><th>类型</th><th>标题</th><th>级别/类型</th><th>状态</th><th>时间</th><th>说明</th></tr></thead><tbody>${tableRows([...changes.map(item => ({ kind: '变更', title: item.title, type: item.riskLevel, status: item.status, time: item.createdAt, note: item.content })), ...incidents.map(item => ({ kind: '故障', title: item.title, type: item.faultType || item.severity, status: item.status, time: item.occurredAt || item.createdAt, note: item.resolution }))], 6, item => `<tr><td>${escapeHtml(item.kind)}</td><td>${escapeHtml(item.title || '-')}</td><td>${escapeHtml(item.type || '-')}</td><td>${escapeHtml(item.status || '-')}</td><td>${escapeHtml(item.time || '-')}</td><td>${escapeHtml(item.note || '-')}</td></tr>`)}</tbody></table></div>
-  <div class="card"><h2>知识库、文档与备件</h2><table><thead><tr><th>类别</th><th>名称</th><th>关键字段</th><th>状态/数量</th><th>创建时间</th></tr></thead><tbody>${tableRows([...kb.map(item => ({ kind: '知识库', name: item.title, key: item.keywords, status: item.solution, createdAt: item.createdAt })), ...documents.map(item => ({ kind: '资料文档', name: item.title, key: item.type, status: item.attachmentName || '-', createdAt: item.createdAt })), ...spareParts.map(item => ({ kind: '备件', name: item.name, key: item.model || item.spec || '-', status: item.quantity ?? item.stock ?? '-', createdAt: item.createdAt }))], 5, item => `<tr><td>${escapeHtml(item.kind)}</td><td>${escapeHtml(item.name || '-')}</td><td>${escapeHtml(item.key || '-')}</td><td>${escapeHtml(item.status || '-')}</td><td>${escapeHtml(item.createdAt || '-')}</td></tr>`)}</tbody></table></div>
+  <div class="summary-grid">
+    <div class="summary-panel state"><h2>项目现状摘要</h2><div class="muted">${escapeHtml(report.projectStateSummary)}</div></div>
+    <div class="summary-panel output"><h2>周期产出摘要</h2><div class="muted">${escapeHtml(report.periodOutputSummary)}</div></div>
+  </div>
+  <div class="card tone-state">${renderSectionTitle('项目现状', '资产台账', 'tone-state')}<table><thead><tr><th>名称</th><th>类型</th><th>品牌型号</th><th>位置</th><th>维保到期</th><th>状态</th></tr></thead><tbody>${tableRows(report.assets, 6, item => `<tr><td>${escapeHtml(item.name || '-')}</td><td>${escapeHtml(item.type || '-')}</td><td>${escapeHtml([item.brand, item.model].filter(Boolean).join(' / ') || '-')}</td><td>${escapeHtml(item.installationLocation || item.location || '-')}</td><td>${escapeHtml(item.maintainExpiryDate || '-')}</td><td>${escapeHtml(item.status || '-')}</td></tr>`)}</tbody></table></div>
+  <div class="card tone-state">${renderSectionTitle('项目现状', '巡检计划', 'tone-state')}<table><thead><tr><th>计划名称</th><th>周期</th><th>下次巡检</th><th>计划状态</th><th>本周期执行时间</th><th>执行结果</th><th>异常说明</th><th>整改建议</th></tr></thead><tbody>${tableRows(report.plans, 8, plan => { const exec = report.executions.find(item => item.planId === plan.id); return `<tr><td>${escapeHtml(plan.title || '-')}</td><td>${escapeHtml(plan.cycle || '-')}</td><td>${escapeHtml(plan.nextDate || '-')}</td><td>${escapeHtml(plan.status || '-')}</td><td>${escapeHtml(exec?.executedAt || '-')}</td><td>${escapeHtml(exec?.result || '-')}</td><td>${escapeHtml(exec?.issue || '-')}</td><td>${escapeHtml(exec?.suggestion || '-')}</td></tr>`; })}</tbody></table></div>
+  <div class="card tone-state">${renderSectionTitle('项目现状', '资料与备件', 'tone-state')}<table><thead><tr><th>类别</th><th>名称</th><th>关键字段</th><th>状态/数量</th><th>创建时间</th></tr></thead><tbody>${tableRows([...report.documents.map(item => ({ kind: '资料文档', name: item.title, key: item.type, status: item.attachmentName || '-', createdAt: item.createdAt })), ...report.spareParts.map(item => ({ kind: '备件', name: item.name, key: item.model || item.spec || '-', status: item.quantity ?? item.stock ?? '-', createdAt: item.createdAt }))], 5, item => `<tr><td>${escapeHtml(item.kind)}</td><td>${escapeHtml(item.name || '-')}</td><td>${escapeHtml(item.key || '-')}</td><td>${escapeHtml(item.status || '-')}</td><td>${escapeHtml(item.createdAt || '-')}</td></tr>`)}</tbody></table></div>
+  <div class="card tone-output">${renderSectionTitle('周期产出', '运维日志', 'tone-output')}<table><thead><tr><th>日期</th><th>事件</th><th>人员</th><th>资产/位置</th><th>处理过程</th><th>结论</th><th>工时</th></tr></thead><tbody>${tableRows(report.logs, 7, item => `<tr><td>${escapeHtml(item.date || '-')}</td><td>${escapeHtml(item.event || '-')}</td><td>${escapeHtml((db.users || []).find(user => user.id === item.userId)?.name || '-')}</td><td>${escapeHtml(item.relatedTarget || item.location || '-')}</td><td>${escapeHtml(item.process || '-')}</td><td>${escapeHtml(item.conclusion || '-')}</td><td>${escapeHtml(item.durationHours || 0)}</td></tr>`)}</tbody></table></div>
+  <div class="card tone-output">${renderSectionTitle('周期产出', '巡检执行', 'tone-output')}<table><thead><tr><th>执行时间</th><th>计划名称</th><th>执行结果</th><th>执行人</th><th>异常说明</th><th>整改建议</th></tr></thead><tbody>${tableRows(report.executions, 6, item => `<tr><td>${escapeHtml(item.executedAt || '-')}</td><td>${escapeHtml(report.plans.find(plan => plan.id === item.planId)?.title || '-')}</td><td>${escapeHtml(item.result || '-')}</td><td>${escapeHtml(item.executor || '-')}</td><td>${escapeHtml(item.issue || '-')}</td><td>${escapeHtml(item.suggestion || '-')}</td></tr>`)}</tbody></table></div>
+  <div class="card tone-output">${renderSectionTitle('周期产出', '变更与故障', 'tone-output')}<table><thead><tr><th>类型</th><th>标题</th><th>级别/类型</th><th>状态</th><th>时间</th><th>说明</th></tr></thead><tbody>${tableRows([...report.changes.map(item => ({ kind: '变更', title: item.title, type: item.riskLevel, status: item.status, time: item.createdAt, note: item.content })), ...report.incidents.map(item => ({ kind: '故障', title: item.title, type: item.faultType || item.severity, status: item.status, time: item.occurredAt || item.createdAt, note: item.resolution }))], 6, item => `<tr><td>${escapeHtml(item.kind)}</td><td>${escapeHtml(item.title || '-')}</td><td>${escapeHtml(item.type || '-')}</td><td>${escapeHtml(item.status || '-')}</td><td>${escapeHtml(item.time || '-')}</td><td>${escapeHtml(item.note || '-')}</td></tr>`)}</tbody></table></div>
+  <div class="card tone-output">${renderSectionTitle('周期产出', '知识沉淀', 'tone-output')}<table><thead><tr><th>名称</th><th>关键词</th><th>问题描述</th><th>解决方案</th><th>创建时间</th></tr></thead><tbody>${tableRows(report.kb, 5, item => `<tr><td>${escapeHtml(item.title || '-')}</td><td>${escapeHtml(item.keywords || '-')}</td><td>${escapeHtml(item.problem || '-')}</td><td>${escapeHtml(item.solution || '-')}</td><td>${escapeHtml(item.createdAt || '-')}</td></tr>`)}</tbody></table></div>
 </body>
 </html>`;
 }
@@ -3907,14 +5739,14 @@ function buildInspectionExecutionHtml(db, projectId, period) {
 <head>
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-  <title>巡检执行完整报表</title>
+  <title>巡检执行报表</title>
   <style>
     body { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; margin: 24px; background: #f8fafc; color: #0f172a; }
-    .card { background: #fff; border: 1px solid #e2e8f0; border-radius: 16px; padding: 20px; margin-bottom: 16px; }
+    .card { background: #fff; border: 1px solid #e2e8f0; border-radius: 16px; padding: 20px; margin-bottom: 16px; box-shadow:0 10px 30px rgba(15,23,42,.04); }
     .title { font-size: 28px; font-weight: 700; margin-bottom: 8px; }
     .muted { color: #64748b; font-size: 14px; }
     .stats { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 12px; margin-top: 16px; }
-    .stat { background: #eff6ff; border-radius: 12px; padding: 16px; }
+    .stat { background: #eff6ff; border:1px solid #bfdbfe; border-radius: 12px; padding: 16px; }
     .stat strong { display: block; font-size: 24px; margin-top: 6px; }
     h2 { margin: 0 0 12px; font-size: 20px; }
     table { width: 100%; border-collapse: collapse; font-size: 13px; }
@@ -3923,12 +5755,12 @@ function buildInspectionExecutionHtml(db, projectId, period) {
     .badge { display: inline-block; padding: 3px 8px; border-radius: 999px; font-size: 12px; font-weight: 600; }
     .success { background: #dcfce7; color: #166534; }
     .danger { background: #fee2e2; color: #991b1b; }
-    .summary { line-height: 1.8; }
+    .summary { line-height: 1.8; background:linear-gradient(135deg,#eff6ff 0%,#f8fafc 100%); }
   </style>
 </head>
 <body>
   <div class="card">
-    <div class="title">巡检执行完整报表</div>
+    <div class="title">巡检执行报表</div>
     <div class="muted">项目：${escapeHtml(project.customerName || '-')} / ${escapeHtml(project.name || '-')}</div>
     <div class="muted">统计周期：${escapeHtml(periodLabel)}（${escapeHtml(currentPeriod)}）</div>
     <div class="muted">生成时间：${escapeHtml(now())}</div>
@@ -3977,10 +5809,12 @@ function getAiInspectionReportPayload(db, resultId) {
   return { result, task, target, template, project, metrics };
 }
 
-function buildAiInspectionResultHtml(db, resultId) {
+function buildAiInspectionResultHtml(db, resultId, viewer) {
   const payload = getAiInspectionReportPayload(db, resultId);
   if (!payload) return null;
-  const { result, task, target, template, project, metrics } = payload;
+  const { result: rawResult, task, target, template, project, metrics } = payload;
+  const result = sanitizeAiInspectionResultForViewer(rawResult, viewer);
+  const hideNetwork = viewer && viewer.role === 'customer';
   const templateMetrics = (template?.metrics || []).filter(m => m.enabled);
   const hasReal = m => result.realData && result.realData[m.label] !== undefined && Number.isFinite(Number(result.realData[m.label]));
   const abnormalCount = metrics.filter(item => hasReal(item) && (item.status === '异常' || item.status === '严重')).length;
@@ -4016,7 +5850,7 @@ function buildAiInspectionResultHtml(db, resultId) {
     const advice = getMetricAdvice(item, hasRealData);
     return `<tr><td>${escapeHtml(item.label || '-')}</td><td>${escapeHtml(item.unit || '-')}</td><td>${valueDisplay}</td><td>${escapeHtml(Number.isFinite(Number(item.warn)) ? item.warn : '-')}</td><td>${escapeHtml(Number.isFinite(Number(item.critical)) ? item.critical : '-')}</td><td>${escapeHtml(advice)}</td><td style="color:${color};font-weight:600;">${escapeHtml(displayStatus)}</td><td>${escapeHtml(item.description || '-')}</td></tr>`;
   }).join('') || '<tr><td colspan="8">暂无指标</td></tr>';
-  const abnormalRows = (result.abnormalItems || []).map(item => `<li>${escapeHtml(item)}</li>`).join('') || '<li>本次巡检未发现异常项</li>';
+  const abnormalRows = (result.abnormalItems || []).map(item => `<li>${escapeHtml(hideNetwork ? redactNetworkDetails(item) : item)}</li>`).join('') || '<li>本次巡检未发现异常项</li>';
   const templateMetricText = templateMetrics.length
     ? templateMetrics.map(m => `${escapeHtml(m.label)}（阈值: ${m.warn ?? '-'}/${m.critical ?? '-'} ${m.unit || ''}，${m.direction === 'low' ? '越低越好' : m.direction === 'high' ? '越高越好' : '无方向'}）`).join('<br />')
     : '无模板指标';
@@ -4050,7 +5884,7 @@ function buildAiInspectionResultHtml(db, resultId) {
   <div class="card">
     <div class="title">自动化巡检报告</div>
     <div class="muted">项目：${escapeHtml(project.customerName || '-')} / ${escapeHtml(project.name || '-')}</div>
-    <div class="muted">巡检对象：${escapeHtml(target.name || '-')} | 地址：${escapeHtml(target.address || '-')}:${escapeHtml(String(target.port || '-'))}</div>
+    <div class="muted">巡检对象：${escapeHtml(target.name || '-')}${hideNetwork ? '' : ` | 地址：${escapeHtml(target.address || '-')}:${escapeHtml(String(target.port || '-'))}`}</div>
     <div class="muted">任务名称：${escapeHtml(task.title || '-')} | 执行人：${escapeHtml(task.executor || '-')}</div>
     <div class="muted">执行时间：${escapeHtml(task.executedAt || result.createdAt || '-')} | 生成时间：${escapeHtml(now())}</div>
     <div class="stats">
@@ -4181,7 +6015,9 @@ function canonicalizeJson(value) {
 
 function validateUpgradePackageIntegrity(pendingDir) {
   const manifestPath = path.join(pendingDir, 'manifest.json');
-  if (!fs.existsSync(manifestPath)) return null;
+  if (!fs.existsSync(manifestPath)) {
+    throw new Error('升级包缺少 manifest.json');
+  }
 
   let manifest;
   try {
@@ -4233,24 +6069,25 @@ function validateUpgradePackageIntegrity(pendingDir) {
     throw new Error(`升级包存在未声明文件：${unlistedFiles[0]}`);
   }
 
-  if (manifest.signature !== undefined && manifest.signature !== null && String(manifest.signature).trim()) {
-    if (!upgradeSigningKey || upgradeSigningKey.length < 32) {
-      throw new Error('系统未配置升级签名密钥');
-    }
-    const normalizedChecksums = files.reduce((result, file) => {
-      result[file] = String(checksumMap[file] || '').trim().toLowerCase();
-      return result;
-    }, {});
-    const payload = JSON.stringify(canonicalizeJson({
-      version: manifest.version || '',
-      files,
-      sha256: normalizedChecksums
-    }));
-    const expectedSignature = crypto.createHmac('sha256', upgradeSigningKey).update(payload).digest('hex');
-    const receivedSignature = String(manifest.signature).trim().toLowerCase();
-    if (receivedSignature.length !== expectedSignature.length || !crypto.timingSafeEqual(Buffer.from(receivedSignature), Buffer.from(expectedSignature))) {
-      throw new Error('升级包签名校验失败');
-    }
+  if (!upgradeSigningKey || upgradeSigningKey.length < 32) {
+    throw new Error('系统未配置升级签名密钥');
+  }
+  if (!manifest.signature || !String(manifest.signature).trim()) {
+    throw new Error('升级包缺少签名');
+  }
+  const normalizedChecksums = files.reduce((result, file) => {
+    result[file] = String(checksumMap[file] || '').trim().toLowerCase();
+    return result;
+  }, {});
+  const payload = JSON.stringify(canonicalizeJson({
+    version: manifest.version || '',
+    files,
+    sha256: normalizedChecksums
+  }));
+  const expectedSignature = crypto.createHmac('sha256', upgradeSigningKey).update(payload).digest('hex');
+  const receivedSignature = String(manifest.signature).trim().toLowerCase();
+  if (receivedSignature.length !== expectedSignature.length || !crypto.timingSafeEqual(Buffer.from(receivedSignature), Buffer.from(expectedSignature))) {
+    throw new Error('升级包签名校验失败');
   }
 
   return {
@@ -4278,7 +6115,13 @@ function serveStatic(req, res, pathname) {
     '.json': 'application/json; charset=utf-8'
   };
   const contentType = types[ext] || 'application/octet-stream';
-  res.writeHead(200, buildSecurityHeaders({ 'Content-Type': contentType }));
+  const extraHeaders = { 'Content-Type': contentType };
+  if (pathname === '/' || ext === '.html') {
+    extraHeaders['Cache-Control'] = 'no-store, no-cache, must-revalidate';
+    extraHeaders.Pragma = 'no-cache';
+    extraHeaders.Expires = '0';
+  }
+  res.writeHead(200, buildSecurityHeaders(extraHeaders));
   fs.createReadStream(normalized).pipe(res);
 }
 
@@ -4312,7 +6155,16 @@ const requestHandler = async (req, res) => {
       const code = generateCaptchaCode();
       const token = createCaptchaToken(code);
       const svg = renderCaptchaSvg(code);
-      return json(res, 200, { token, svg: `data:image/svg+xml;utf8,${encodeURIComponent(svg)}` });
+      return json(res, 200, {
+        token,
+        svg: `data:image/svg+xml;charset=UTF-8,${encodeURIComponent(svg)}`,
+        svgMarkup: svg,
+        csrfToken: getSessionCsrfToken(token)
+      }, {
+        'Cache-Control': 'no-store, no-cache, must-revalidate',
+        Pragma: 'no-cache',
+        Expires: '0'
+      });
     }
 
     if (req.method === 'POST' && pathname === '/api/login') {
@@ -4325,8 +6177,8 @@ const requestHandler = async (req, res) => {
       if (rateLimitState.blocked) {
         return json(res, 429, { message: loginBlockedMessage(rateLimitState.retryAfterMs) }, rateLimitResponseHeaders(rateLimitState.retryAfterMs));
       }
-      const user = db.users.find(item => item.username === username && verifyPassword(body.password, item.passwordHash));
-      if (!user) {
+      const user = db.users.find(item => item.username === username);
+      if (!user || !verifyPassword(body.password, user.passwordHash)) {
         const failedState = registerLoginFailure(db, req, username);
         await writeDb(db, { silent: true });
         if (failedState.lockedUntil > nowMs()) {
@@ -4340,6 +6192,9 @@ const requestHandler = async (req, res) => {
       if (user.status === 'disabled') {
         return json(res, 403, { message: '账号已被禁用，请联系管理员' });
       }
+      if (user.status === 'rejected') {
+        return json(res, 403, { message: '账号注册申请未通过，请联系管理员' });
+      }
       clearLoginFailures(db, req, username);
       if (!String(user.passwordHash).startsWith('$scrypt$')) {
         user.passwordHash = hash(body.password);
@@ -4349,7 +6204,7 @@ const requestHandler = async (req, res) => {
       db.sessions = (db.sessions || []).filter(item => item.userId !== user.id && Date.parse(item.expiresAt) > nowMs());
       db.sessions.push({ token, userId: user.id, createdAt: now(), expiresAt });
       await writeDb(db, { silent: true, replaceCollections: ['sessions'] });
-      return json(res, 200, { user: sanitizeUser(user), systemConfig: db.systemConfig, csrfToken: getSessionCsrfToken(token) }, { 'Set-Cookie': buildSessionCookie(req, token, db.systemConfig) });
+      return json(res, 200, { user: sanitizeUser(user), systemConfig: presentSystemConfig(user, db.systemConfig), csrfToken: getSessionCsrfToken(token) }, { 'Set-Cookie': buildSessionCookie(req, token, db.systemConfig) });
     }
 
     if (req.method === 'POST' && pathname === '/api/change-password') {
@@ -4388,11 +6243,7 @@ const requestHandler = async (req, res) => {
         return json(res, 429, { message: `尝试次数过多，请在 ${Math.max(1, Math.ceil(rateState.retryAfterMs / 60000))} 分钟后重试` }, rateLimitResponseHeaders(rateState.retryAfterMs));
       }
       recordForgotPasswordAttempt(db, rateKey);
-      const user = db.users.find(item => item.username === username && item.status !== 'disabled');
-      if (!user || !user.securityQuestion) {
-        return json(res, 200, { question: '', message: '如账号存在且已设置安全问题，将返回对应验证问题' });
-      }
-      return json(res, 200, { question: user.securityQuestion });
+      return json(res, 200, { question: '请输入您设置的安全问题答案', message: '如账号存在且已设置安全问题，请继续验证' });
     }
 
     if (req.method === 'POST' && pathname === '/api/forgot-password/reset') {
@@ -4410,7 +6261,7 @@ const requestHandler = async (req, res) => {
         return json(res, 200, { message: '如验证信息正确，密码将被重置' });
       }
       if (!user.securityAnswerHash || !verifyPassword(body.securityAnswer, user.securityAnswerHash)) {
-        return json(res, 401, { message: '验证信息错误' });
+        return json(res, 200, { message: '如验证信息正确，密码将被重置' });
       }
       if (!body.newPassword || String(body.newPassword).length < 8) {
         return json(res, 400, { message: '密码长度不能少于 8 位' });
@@ -4422,7 +6273,7 @@ const requestHandler = async (req, res) => {
       db.sessions = (db.sessions || []).filter(item => item.userId !== user.id);
       appendAuditLog(db, user, 'update', 'user', user.id, '通过安全问题重置密码');
       await writeDb(db, { replaceCollections: ['sessions'] });
-      return json(res, 200, { message: '密码重置成功，请使用新密码登录' });
+      return json(res, 200, { reset: true, message: '密码重置成功，请使用新密码登录' });
     }
 
     if (req.method === 'POST' && pathname === '/api/register') {
@@ -4437,14 +6288,14 @@ const requestHandler = async (req, res) => {
       if (!db.systemConfig.allowRegistration) {
         return json(res, 403, { message: '管理员已关闭自主注册功能' });
       }
-      if (db.users.some(item => item.username === username)) {
-        return json(res, 400, { message: '账号已存在' });
-      }
       if (!body.password || String(body.password).length < 8) {
         return json(res, 400, { message: '密码长度不能少于 8 位' });
       }
       if (!/[a-zA-Z]/.test(body.password) || !/[0-9]/.test(body.password) || !/[^a-zA-Z0-9]/.test(body.password)) {
         return json(res, 400, { message: '密码必须包含字母、数字和特殊字符' });
+      }
+      if (db.users.some(item => item.username === username)) {
+        return json(res, 201, { message: '提交成功，请等待管理员审批' });
       }
       const created = {
         id: id('user'),
@@ -4467,7 +6318,7 @@ const requestHandler = async (req, res) => {
       db.users.push(created);
       appendAuditLog(db, created, 'create', 'user', created.id, `自注册账号 ${created.name}`);
       await writeDb(db);
-      return json(res, 201, { message: '注册成功，请等待管理员审批' });
+      return json(res, 201, { message: '提交成功，请等待管理员审批' });
     }
 
     if (req.method === 'GET' && pathname === '/api/auth/oidc/login') {
@@ -4557,10 +6408,15 @@ const requestHandler = async (req, res) => {
             endDate: '',
             securityQuestion: '',
             securityAnswerHash: '',
-            status: 'active',
+            status: 'pending',
             createdAt: now()
           };
           db.users.push(localUser);
+        }
+        if (localUser.status === 'pending' || localUser.status === 'disabled' || localUser.status === 'rejected') {
+          await writeDb(db);
+          res.writeHead(302, buildSecurityHeaders({ Location: '/?auth=pending' }));
+          return res.end();
         }
         const token = crypto.randomBytes(24).toString('hex');
         const expiresAt = new Date(nowMs() + sessionMaxAgeSeconds * 1000).toISOString();
@@ -4624,27 +6480,41 @@ const requestHandler = async (req, res) => {
             endDate: '',
             securityQuestion: '',
             securityAnswerHash: '',
-            status: 'active',
+            status: 'pending',
             createdAt: now()
           };
           db.users.push(localUser);
           createdLocalUser = true;
+        }
+        if (localUser.status === 'pending') {
+          if (createdLocalUser) await writeDb(db);
+          return json(res, 403, { message: '账号尚未通过管理员审批，请联系管理员' });
+        }
+        if (localUser.status === 'disabled') {
+          return json(res, 403, { message: '账号已被禁用，请联系管理员' });
+        }
+        if (localUser.status === 'rejected') {
+          return json(res, 403, { message: '账号注册申请未通过，请联系管理员' });
         }
         const token = crypto.randomBytes(24).toString('hex');
         const expiresAt = new Date(nowMs() + sessionMaxAgeSeconds * 1000).toISOString();
         db.sessions = (db.sessions || []).filter(item => item.userId !== localUser.id && Date.parse(item.expiresAt) > nowMs());
         db.sessions.push({ token, userId: localUser.id, createdAt: now(), expiresAt });
         await writeDb(db, { silent: !createdLocalUser, replaceCollections: ['sessions'] });
-        return json(res, 200, { user: sanitizeUser(localUser), csrfToken: getSessionCsrfToken(token) }, { 'Set-Cookie': buildSessionCookie(req, token, db.systemConfig) });
+        return json(res, 200, {
+          user: sanitizeUser(localUser),
+          systemConfig: presentSystemConfig(localUser, db.systemConfig),
+          csrfToken: getSessionCsrfToken(token)
+        }, { 'Set-Cookie': buildSessionCookie(req, token, db.systemConfig) });
       } catch (err) {
         return json(res, 502, { message: 'LDAP 认证服务不可用' });
       }
     }
 
     if (req.method === 'POST' && pathname === '/api/logout') {
-      const cookies = parseCookies(req);
-      if (cookies.sessionToken) {
-        db.sessions = (db.sessions || []).filter(item => item.token !== cookies.sessionToken);
+      const sessionToken = getSessionToken(req);
+      if (sessionToken) {
+        db.sessions = (db.sessions || []).filter(item => item.token !== sessionToken);
         await writeDb(db, { silent: true, replaceCollections: ['sessions'] });
       }
       return json(res, 200, { ok: true }, { 'Set-Cookie': buildClearSessionCookie(req, db.systemConfig) });
@@ -4652,8 +6522,8 @@ const requestHandler = async (req, res) => {
 
     if (req.method === 'GET' && pathname === '/api/session') {
       const user = getAuthUser(req, db);
-      const cookies = parseCookies(req);
-      return json(res, 200, { user: sanitizeUser(user), systemConfig: user ? db.systemConfig : {}, csrfToken: user ? getSessionCsrfToken(cookies.sessionToken) : '' });
+      const sessionToken = getSessionToken(req);
+      return json(res, 200, { user: sanitizeUser(user), systemConfig: user ? presentSystemConfig(user, db.systemConfig) : {}, csrfToken: user && sessionToken ? getSessionCsrfToken(sessionToken) : '' });
     }
 
     if (req.method === 'GET' && pathname === '/api/sessions/online') {
@@ -4668,7 +6538,9 @@ const requestHandler = async (req, res) => {
         const u = (db.users || []).find(x => x.id === s.userId);
         if (u && u.status === 'active') {
           seenUserIds.add(s.userId);
-          onlineUsers.push({ id: u.id, username: u.username, name: u.name, role: u.role });
+          if (user.role === 'admin' || u.projectId === user.projectId || u.id === user.id) {
+            onlineUsers.push({ id: u.id, username: u.username, name: u.name, role: u.role });
+          }
         }
       }
       return json(res, 200, { count: onlineUsers.length, users: onlineUsers });
@@ -4749,10 +6621,10 @@ const requestHandler = async (req, res) => {
       const user = requireAuth(req, res, db);
       if (!user) return;
       const list = user.role === 'admin'
-        ? db.users.map(sanitizeUser)
-        : user.role === 'customer'
-          ? db.users.filter(item => item.projectId === user.projectId).map(sanitizeUser)
-          : db.users.filter(item => item.projectId === user.projectId).map(sanitizeUser);
+        ? db.users.map(item => sanitizeUserForViewer(item, user))
+        : user.projectId
+          ? db.users.filter(item => item.projectId === user.projectId).map(item => sanitizeUserForViewer(item, user))
+          : [];
       const query = Object.fromEntries(reqUrl.searchParams);
       const sorted = parseSortQuery(query, list, 'createdAt');
       return json(res, 200, paginateResult(sorted, query));
@@ -4793,6 +6665,8 @@ const requestHandler = async (req, res) => {
         status: 'active',
         createdAt: now()
       };
+      created.securityQuestion = String(body.securityQuestion || '').trim();
+      created.securityAnswerHash = body.securityAnswer ? hash(body.securityAnswer) : '';
       db.users.push(created);
       appendAuditLog(db, user, 'create', 'user', created.id, `创建人员 ${created.name}`, created.projectId);
       await writeDb(db);
@@ -4810,8 +6684,19 @@ const requestHandler = async (req, res) => {
       if (target.status !== 'pending') {
         return json(res, 400, { message: '该账号无需审批' });
       }
+      const body = await readBody(req);
+      const allowedRoles = ['admin', 'engineer', 'customer', 'viewer'];
+      const nextRole = String(body.role || 'viewer').trim();
+      if (!allowedRoles.includes(nextRole)) {
+        return json(res, 400, { message: '无效的角色' });
+      }
+      if (body.projectId && !requireExistingProject(body.projectId, db)) {
+        return json(res, 400, { message: '关联项目不存在' });
+      }
+      target.role = nextRole;
+      if (body.projectId) target.projectId = body.projectId;
       target.status = 'active';
-      appendAuditLog(db, approver, 'update', 'user', target.id, `审批通过自注册账号 ${target.name}`, target.projectId);
+      appendAuditLog(db, approver, 'update', 'user', target.id, `审批通过账号 ${target.name}，角色 ${nextRole}`, target.projectId);
       await writeDb(db);
       return json(res, 200, { message: '已审批通过', user: sanitizeUser(target) });
     }
@@ -4828,8 +6713,9 @@ const requestHandler = async (req, res) => {
         return json(res, 400, { message: '该账号无需审批' });
       }
       target.status = 'rejected';
+      db.sessions = (db.sessions || []).filter(item => item.userId !== target.id);
       appendAuditLog(db, approver, 'update', 'user', target.id, `拒绝自注册账号 ${target.name}`, target.projectId);
-      await writeDb(db);
+      await writeDb(db, { replaceCollections: ['sessions'] });
       return json(res, 200, { message: '已拒绝该注册申请', user: sanitizeUser(target) });
     }
 
@@ -4896,6 +6782,12 @@ const requestHandler = async (req, res) => {
       target.projectId = body.projectId || '';
       target.startDate = body.startDate || '';
       target.endDate = body.endDate || '';
+      if (body.securityQuestion !== undefined) {
+        target.securityQuestion = String(body.securityQuestion || '').trim();
+      }
+      if (body.securityAnswer) {
+        target.securityAnswerHash = hash(body.securityAnswer);
+      }
       if (body.password) {
         if (String(body.password).length < 8) {
           return json(res, 400, { message: '密码长度不能少于 8 位' });
@@ -4906,8 +6798,13 @@ const requestHandler = async (req, res) => {
         target.passwordHash = hash(body.password);
       }
       appendAuditLog(db, user, 'update', 'user', target.id, `修改人员 ${target.name}`, target.projectId);
-      await writeDb(db);
-      return json(res, 200, sanitizeUser(target));
+      if (body.password) {
+        db.sessions = (db.sessions || []).filter(item => item.userId !== target.id);
+        await writeDb(db, { replaceCollections: ['sessions'] });
+      } else {
+        await writeDb(db);
+      }
+      return json(res, 200, sanitizeUserForViewer(target, user));
     }
 
     if (req.method === 'DELETE' && pathname.startsWith('/api/users/')) {
@@ -4927,8 +6824,9 @@ const requestHandler = async (req, res) => {
         return json(res, 404, { message: '人员不存在' });
       }
       db.users.splice(index, 1);
+      db.sessions = (db.sessions || []).filter(item => item.userId !== targetUserId);
       appendAuditLog(db, user, 'delete', 'user', targetUserId, '删除人员');
-      await writeDb(db);
+      await writeDb(db, { replaceCollections: ['sessions'] });
       return json(res, 200, { ok: true });
     }
 
@@ -4938,7 +6836,7 @@ const requestHandler = async (req, res) => {
       const list = filterByProjectScope(db.assets, user, item => item.projectId);
       const query = Object.fromEntries(reqUrl.searchParams);
       const sorted = parseSortQuery(query, list, 'createdAt');
-      return json(res, 200, paginateResult(sorted, query));
+      return json(res, 200, paginateResult(sorted.map(item => sanitizeAssetForApi(item, user)), query));
     }
 
     if (req.method === 'POST' && pathname === '/api/assets') {
@@ -4973,7 +6871,7 @@ const requestHandler = async (req, res) => {
       db.assets.push(item);
       appendAuditLog(db, user, 'create', 'asset', item.id, `创建资产 ${item.name}`, projectId);
       await writeDb(db);
-      return json(res, 201, item);
+      return json(res, 201, sanitizeAssetForApi(item));
     }
 
     if (req.method === 'POST' && pathname === '/api/assets/import') {
@@ -5077,11 +6975,16 @@ const requestHandler = async (req, res) => {
       target.monitorType = body.monitorType || target.monitorType || 'ping';
       target.monitorHost = body.monitorHost !== undefined ? body.monitorHost : target.monitorHost || '';
       target.monitorPort = body.monitorPort !== undefined ? body.monitorPort : target.monitorPort || '';
-      target.snmpCommunity = body.snmpCommunity !== undefined ? body.snmpCommunity : target.snmpCommunity || 'public';
+      if (body.snmpCommunity !== undefined) {
+        const nextCommunity = String(body.snmpCommunity || '').trim();
+        if (nextCommunity) target.snmpCommunity = nextCommunity;
+      } else if (!target.snmpCommunity) {
+        target.snmpCommunity = 'public';
+      }
       target.snmpPort = body.snmpPort !== undefined ? body.snmpPort : target.snmpPort || '161';
       appendAuditLog(db, user, 'update', 'asset', target.id, `修改资产 ${target.name}`, projectId);
       await writeDb(db);
-      return json(res, 200, target);
+      return json(res, 200, sanitizeAssetForApi(target));
     }
 
     if (req.method === 'DELETE' && pathname.startsWith('/api/assets/')) {
@@ -5235,45 +7138,14 @@ const requestHandler = async (req, res) => {
       const assetId = parts[3];
       const asset = db.assets.find(a => a.id === assetId);
       if (!asset) return json(res, 404, { message: '资产不存在' });
+      if (!canViewProject(user, asset.projectId)) return json(res, 403, { message: '无权访问该资产' });
       const host = asset.monitorHost || asset.installationLocation || '';
       if (!host) return json(res, 200, { interfaces: [] });
 
       try {
-        const snmp = require('snmp-native');
-        let session = null;
-        try {
-          session = new snmp.Session({
-            host,
-            community: asset.snmpCommunity || 'public',
-            port: parseInt(asset.snmpPort || '161', 10),
-            timeouts: [3000]
-          });
-          const ifList = [];
-          await new Promise((resolve, reject) => {
-            const oid = [1, 3, 6, 1, 2, 1, 2, 2, 1, 2];
-            const timer = setTimeout(() => { reject(new Error('SNMP timeout')); }, 5000);
-            let done = false;
-            function walk(oids) {
-              if (done) return;
-              session.getSubtree({ oid: oids, communities: [asset.snmpCommunity || 'public'] }, (err, varbinds) => {
-                if (err) { done = true; clearTimeout(timer); reject(err); return; }
-                for (const vb of varbinds) {
-                  if (vb && vb.value !== undefined && vb.value !== null) {
-                    ifList.push({ index: vb.oid[vb.oid.length - 1], name: String(vb.value) });
-                  }
-                }
-                done = true;
-                clearTimeout(timer);
-                resolve();
-              });
-            }
-            walk(oid);
-          });
-          ifList.sort((a, b) => a.index - b.index);
-          return json(res, 200, { interfaces: ifList.map(i => i.name) });
-        } finally {
-          if (session) try { session.close(); } catch (_) {}
-        }
+        const ifList = await snmpWalkSubtree(host, parseInt(asset.snmpPort || '161', 10), asset.snmpCommunity || 'public', [1, 3, 6, 1, 2, 1, 2, 2, 1, 2], 5000);
+        ifList.sort((a, b) => a.index - b.index);
+        return json(res, 200, { interfaces: ifList.map(i => String(i.value)) });
       } catch (e) {
         return json(res, 200, { interfaces: [], error: e.message });
       }
@@ -5286,7 +7158,7 @@ const requestHandler = async (req, res) => {
       if (user.role !== 'admin') assets = assets.filter(a => a.projectId === user.projectId);
       const assetIds = new Set(assets.map(a => a.id));
       const relations = (db.assetRelations || []).filter(r => assetIds.has(r.sourceAssetId) && assetIds.has(r.targetAssetId));
-      return json(res, 200, { assets, relations });
+      return json(res, 200, { assets: assets.map(item => sanitizeAssetForApi(item, user)), relations });
     }
 
     if (req.method === 'GET' && pathname === '/api/assets/monitor-status') {
@@ -5308,45 +7180,57 @@ const requestHandler = async (req, res) => {
     if (req.method === 'GET' && pathname === '/api/logs') {
       const user = requireAuth(req, res, db);
       if (!user) return;
-      let list = filterByProjectScope(db.logs || [], user, item => item.projectId);
       const query = Object.fromEntries(reqUrl.searchParams);
+      if (user.role === 'customer') {
+        return json(res, 200, paginateResult([], query));
+      }
+      let list = filterByProjectScope(db.logs || [], user, item => item.projectId);
       if (query.projectId) list = list.filter(item => item.projectId === query.projectId);
       if (query.userId) list = list.filter(item => item.userId === query.userId);
       const sorted = parseSortQuery(query, list, 'createdAt');
       return json(res, 200, paginateResult(sorted, query));
     }
 
+    if (req.method === 'GET' && pathname === '/api/logs/dictionaries') {
+      const user = requireAuth(req, res, db);
+      if (!user) return;
+      return json(res, 200, {
+        ticketTypes: LOG_TICKET_TYPE_OPTIONS,
+        results: LOG_RESULT_OPTIONS
+      });
+    }
+
+    if (req.method === 'POST' && pathname === '/api/logs/quality-check') {
+      const user = requireEditor(req, res, db);
+      if (!user) return;
+      const body = await readBody(req);
+      const existingLog = body.id ? (db.logs || []).find(item => item.id === body.id) : null;
+      if (body.id && !existingLog) return json(res, 404, { message: '日志不存在' });
+      if (existingLog && user.role !== 'admin' && existingLog.userId !== user.id) return json(res, 403, { message: '仅日志创建者或管理员可以校验' });
+      const validation = validateLogPayload(db, user, body, existingLog);
+      if (validation.error) return json(res, 400, { message: validation.error });
+      return json(res, 200, {
+        warnings: buildLogQualityWarnings(db, existingLog?.userId || user.id, validation.payload, existingLog)
+      });
+    }
+
     if (req.method === 'POST' && pathname === '/api/logs') {
       const user = requireEditor(req, res, db);
       if (!user) return;
       const body = await readBody(req);
-      if (body.durationHours !== undefined && Number(body.durationHours) < 0) return json(res, 400, { message: '工单用时不能为负数' });
-      const projectId = user.role === 'admin' ? body.projectId : user.projectId;
-      if (!requireExistingProject(projectId, db)) return json(res, 400, { message: '关联项目不存在' });
-      const asset = requireExistingAsset(body.assetId || '', db);
-      if (body.assetId && (!asset || asset.projectId !== projectId)) return json(res, 400, { message: '关联资产不存在或不属于当前项目' });
+      const validation = validateLogPayload(db, user, body);
+      if (validation.error) return json(res, 400, { message: validation.error });
+      const warnings = buildLogQualityWarnings(db, user.id, validation.payload);
       const item = {
         id: id('log'),
         userId: user.id,
-        projectId,
-        assetId: body.assetId || '',
-        date: body.date || '',
-        event: body.event || '',
-        relatedTarget: body.relatedTarget || '',
-        dispatcher: body.dispatcher || '',
-        dispatchDepartment: body.dispatchDepartment || '',
-        ticketType: body.ticketType || '',
-        assignee: body.assignee || user.name,
-        process: body.process || '',
-        conclusion: body.conclusion || '',
-        remark: body.remark || '',
-        durationHours: Number(body.durationHours || 0),
+        ...validation.payload,
         createdAt: now()
       };
       db.logs.push(item);
-      appendAuditLog(db, user, 'create', 'log', item.id, `创建日志 ${item.event}`, projectId);
+      appendAuditLog(db, user, 'create', 'log', item.id, `创建日志 ${item.event}`, item.projectId);
       await writeDb(db);
-      return json(res, 201, item);
+      return json(res, 201, { ...item, warnings });
     }
 
     if (req.method === 'PUT' && pathname.startsWith('/api/logs/')) {
@@ -5357,23 +7241,14 @@ const requestHandler = async (req, res) => {
       if (!target) return json(res, 404, { message: '日志不存在' });
       if (user.role !== 'admin' && target.userId !== user.id) return json(res, 403, { message: '仅日志创建者或管理员可以编辑' });
       const body = await readBody(req);
-      if (body.durationHours !== undefined && Number(body.durationHours) < 0) return json(res, 400, { message: '工单用时不能为负数' });
+      const validation = validateLogPayload(db, user, body, target);
+      if (validation.error) return json(res, 400, { message: validation.error });
+      const warnings = buildLogQualityWarnings(db, target.userId || user.id, validation.payload, target);
       if (body.title !== undefined) target.title = String(body.title || '').trim() || target.title;
-      if (body.event !== undefined) target.event = String(body.event || '').trim();
-      if (body.process !== undefined) target.process = String(body.process || '').trim();
-      if (body.conclusion !== undefined) target.conclusion = String(body.conclusion || '').trim();
-      if (body.remark !== undefined) target.remark = String(body.remark || '').trim();
-      if (body.durationHours !== undefined) target.durationHours = Number(body.durationHours || 0);
-      if (body.projectId !== undefined) target.projectId = body.projectId;
-      if (body.ticketType !== undefined) target.ticketType = String(body.ticketType || '').trim();
-      if (body.relatedTarget !== undefined) target.relatedTarget = String(body.relatedTarget || '').trim();
-      if (body.dispatchDepartment !== undefined) target.dispatchDepartment = String(body.dispatchDepartment || '').trim();
-      if (body.dispatcher !== undefined) target.dispatcher = String(body.dispatcher || '').trim();
-      if (body.assignee !== undefined) target.assignee = String(body.assignee || '').trim();
-      if (body.date !== undefined) target.date = body.date;
+      Object.assign(target, validation.payload);
       appendAuditLog(db, user, 'update', 'log', logId, `编辑日志 ${target.event || target.title || logId}`, target.projectId);
       await writeDb(db);
-      return json(res, 200, target);
+      return json(res, 200, { ...target, warnings });
     }
 
     if (req.method === 'DELETE' && pathname.startsWith('/api/logs/')) {
@@ -5475,10 +7350,7 @@ const requestHandler = async (req, res) => {
       }
       const query = Object.fromEntries(reqUrl.searchParams);
       const sorted = parseSortQuery(query, list, 'createdAt');
-      const sanitized = sorted.map(item => {
-        const { accessPasswordHash, loginPasswordHash, loginPasswordEncrypted, attachmentPath, serialNumber, managementIp, managementPort, loginAccount, managementMethod, ...rest } = item;
-        return rest;
-      });
+      const sanitized = sorted.map(item => sanitizeDocumentForApi(item, false));
       return json(res, 200, paginateResult(sanitized, query));
     }
 
@@ -5507,12 +7379,7 @@ const requestHandler = async (req, res) => {
           return json(res, 403, { message: '访问令牌无效' });
         }
       }
-      const sanitized = { ...target };
-      delete sanitized.accessPasswordHash;
-      delete sanitized.loginPasswordHash;
-      delete sanitized.loginPasswordEncrypted;
-      delete sanitized.attachmentPath;
-      return json(res, 200, sanitized);
+      return json(res, 200, sanitizeDocumentForApi(target, Boolean(target.accessPasswordHash)));
     }
 
     if (req.method === 'POST' && pathname === '/api/documents') {
@@ -5584,11 +7451,7 @@ const requestHandler = async (req, res) => {
       db.documents.push(item);
       appendAuditLog(db, user, 'create', 'document', docId, `新增资料 ${title}`, projectId);
       await writeDb(db);
-      const sanitized = { ...item };
-      delete sanitized.accessPasswordHash;
-      delete sanitized.loginPasswordHash;
-      delete sanitized.loginPasswordEncrypted;
-      return json(res, 201, sanitized);
+      return json(res, 201, sanitizeDocumentForApi(item, true));
     }
 
     if (req.method === 'PUT' && pathname.startsWith('/api/documents/')) {
@@ -5664,11 +7527,7 @@ const requestHandler = async (req, res) => {
         target.updatedAt = now();
         appendAuditLog(db, user, 'update', 'document', docId, `修改资料 ${target.title}`, target.projectId);
         await writeDb(db);
-        const sanitized = { ...target };
-        delete sanitized.accessPasswordHash;
-        delete sanitized.loginPasswordHash;
-        delete sanitized.loginPasswordEncrypted;
-        return json(res, 200, sanitized);
+        return json(res, 200, sanitizeDocumentForApi(target, true));
       }
       const body = await readBody(req);
       const newType = body.type !== undefined ? body.type : target.type;
@@ -5703,11 +7562,7 @@ const requestHandler = async (req, res) => {
       target.updatedAt = now();
       appendAuditLog(db, user, 'update', 'document', docId, `修改资料 ${target.title}`, target.projectId);
       await writeDb(db);
-      const sanitized = { ...target };
-      delete sanitized.accessPasswordHash;
-      delete sanitized.loginPasswordHash;
-      delete sanitized.loginPasswordEncrypted;
-      return json(res, 200, sanitized);
+      return json(res, 200, sanitizeDocumentForApi(target, true));
     }
 
     if (req.method === 'DELETE' && pathname.startsWith('/api/documents/')) {
@@ -5772,7 +7627,18 @@ const requestHandler = async (req, res) => {
       const payload = `${docId}:${user.id}:${nowMsVal}`;
       const sig = crypto.createHmac('sha256', DOCUMENT_TOKEN_SECRET).update(payload).digest('hex');
       const token = Buffer.from(`${payload}:${sig}`).toString('base64url');
-      return json(res, 200, { ok: true, token, hasLoginPassword: Boolean(target.loginPasswordEncrypted) });
+      let loginPassword = '';
+      try {
+        loginPassword = decryptLoginPassword(target.loginPasswordEncrypted, password) || '';
+      } catch (_) {
+        loginPassword = '';
+      }
+      return json(res, 200, {
+        ok: true,
+        token,
+        hasLoginPassword: Boolean(target.loginPasswordEncrypted),
+        loginPassword
+      });
     }
 
     if (req.method === 'GET' && pathname.match(/^\/api\/documents\/([^/]+)\/download$/)) {
@@ -5801,6 +7667,9 @@ const requestHandler = async (req, res) => {
       if (!target.attachmentPath || !fs.existsSync(target.attachmentPath)) {
         return json(res, 404, { message: '附件文件不存在' });
       }
+      if (!isPathInsideDirectory(documentsUploadDir, target.attachmentPath)) {
+        return json(res, 404, { message: '附件文件不存在' });
+      }
       appendAuditLog(db, user, 'access', 'document', docId, `下载资料附件 ${target.title}`, target.projectId);
       await writeDb(db);
       res.writeHead(200, buildSecurityHeaders({
@@ -5808,30 +7677,23 @@ const requestHandler = async (req, res) => {
         'Content-Disposition': `attachment; filename*=UTF-8''${encodeURIComponent(target.attachmentName || 'download')}`,
         'Content-Length': target.attachmentSize || fs.statSync(target.attachmentPath).size
       }));
-      return fs.createReadStream(target.attachmentPath).pipe(res);
+      const stream = fs.createReadStream(target.attachmentPath);
+      stream.on('error', () => {
+        if (!res.headersSent) {
+          json(res, 404, { message: '附件文件不存在' });
+          return;
+        }
+        if (!res.writableEnded) res.end();
+      });
+      return stream.pipe(res);
     }
 
     if (req.method === 'GET' && pathname === '/api/inspection-plans') {
       const user = requireAuth(req, res, db);
       if (!user) return;
       const today = formatDateKey(new Date());
-      (db.inspectionPlans || []).forEach(plan => {
-        if (!plan.nextDate || plan.nextDate >= today) return;
-        const cycleAdd = { daily: 1, weekly: 7, monthly: 30, quarterly: 91 }[plan.cycle] || 30;
-        let d = new Date(plan.nextDate + 'T00:00:00');
-        if (plan.cycle === 'monthly' || plan.cycle === 'quarterly') {
-          const incMonths = plan.cycle === 'quarterly' ? 3 : 1;
-          while (formatDateKey(d) < today) {
-            d.setMonth(d.getMonth() + incMonths);
-          }
-        } else {
-          while (formatDateKey(d) < today) {
-            d.setDate(d.getDate() + cycleAdd);
-          }
-        }
-        plan.nextDate = formatDateKey(d);
-      });
-      const list = filterByProjectScope(db.inspectionPlans || [], user, item => item.projectId);
+      const list = filterByProjectScope(db.inspectionPlans || [], user, item => item.projectId)
+        .map(plan => ({ ...plan, nextDate: computeRolledInspectionNextDate(plan, today) }));
       const query = Object.fromEntries(reqUrl.searchParams);
       const sorted = parseSortQuery(query, list, 'createdAt');
       return json(res, 200, paginateResult(sorted, query));
@@ -6370,7 +8232,7 @@ const requestHandler = async (req, res) => {
       if (!user) return;
       const assetVersionMap = new Map((db.assets || []).map(item => [item.id, item.version || '']));
       const list = filterByProjectScope(db.aiInspectionTargets || [], user, item => item.projectId)
-        .map(item => sanitizeAiInspectionTarget({ ...item, systemVersion: item.assetId && assetVersionMap.has(item.assetId) ? assetVersionMap.get(item.assetId) : item.systemVersion }));
+        .map(item => sanitizeAiInspectionTargetForViewer({ ...item, systemVersion: item.assetId && assetVersionMap.has(item.assetId) ? assetVersionMap.get(item.assetId) : item.systemVersion }, user));
       const query = Object.fromEntries(reqUrl.searchParams);
       const sorted = parseSortQuery(query, list, 'createdAt');
       return json(res, 200, paginateResult(sorted, query));
@@ -6440,7 +8302,7 @@ const requestHandler = async (req, res) => {
       db.aiInspectionTargets.push(item);
       appendAuditLog(db, user, 'create', 'aiInspectionTarget', item.id, `创建智能巡检对象 ${item.name}`, projectId);
       await writeDb(db);
-      return json(res, 201, sanitizeAiInspectionTarget(item));
+      return json(res, 201, sanitizeAiInspectionTargetForViewer(item, user));
     }
 
     if (req.method === 'DELETE' && pathname.startsWith('/api/ai-inspection/targets/')) {
@@ -6537,7 +8399,7 @@ const requestHandler = async (req, res) => {
       if (body.location !== undefined) target.location = String(body.location || '').trim();
       appendAuditLog(db, user, 'update', 'aiInspectionTarget', targetId, `修改智能巡检对象 ${target.name}`, target.projectId);
       await writeDb(db);
-      return json(res, 200, sanitizeAiInspectionTarget(target));
+      return json(res, 200, sanitizeAiInspectionTargetForViewer(target, user));
     }
 
     if (req.method === 'GET' && pathname === '/api/ai-inspection/templates') {
@@ -6617,7 +8479,10 @@ const requestHandler = async (req, res) => {
       const referenceMs = Date.now();
       const resultMap = new Map();
       let changed = false;
-      (db.aiInspectionResults || []).forEach(r => resultMap.set(r.taskId, r));
+      (db.aiInspectionResults || []).forEach(r => {
+        const current = resultMap.get(r.taskId);
+        if (!current || String(r.createdAt || '') >= String(current.createdAt || '')) resultMap.set(r.taskId, r);
+      });
       (db.aiInspectionTasks || []).forEach(task => {
         if (!task.cycle) return;
         if (task.status === '已停用' || task.status === '执行中') return;
@@ -6630,7 +8495,11 @@ const requestHandler = async (req, res) => {
         if (task.status === '已完成' || task.status === '失败') task.status = '待执行';
       });
       if (changed) await writeDb(db, { silent: true });
-      const list = filterByProjectScope(db.aiInspectionTasks || [], user, item => item.projectId);
+      const list = filterByProjectScope(db.aiInspectionTasks || [], user, item => item.projectId).map(task => {
+        const result = resultMap.get(task.id);
+        if (!result || result.probeError) return task;
+        return { ...task, latestResultId: result.id };
+      });
       const query = Object.fromEntries(reqUrl.searchParams);
       const sorted = parseSortQuery(query, list, 'createdAt');
       return json(res, 200, paginateResult(sorted, query));
@@ -6685,7 +8554,7 @@ const requestHandler = async (req, res) => {
       const taskId = pathname.split('/')[4];
       const task = (db.aiInspectionTasks || []).find(item => item.id === taskId);
       if (!task) return json(res, 404, { message: '巡检任务不存在' });
-      if (!canManageInspectionRecord(user, task)) return json(res, 403, { message: '无权执行该巡检任务' });
+      if (!canOperateInspectionRecord(user, task)) return json(res, 403, { message: '无权执行该巡检任务' });
       if (task.status === '已完成' || task.status === '失败') {
         db.aiInspectionResults = (db.aiInspectionResults || []).filter(item => item.taskId !== taskId);
         task.status = '待执行';
@@ -6764,7 +8633,7 @@ const requestHandler = async (req, res) => {
       const body = await readBody(req);
       const target = (db.aiInspectionTargets || []).find(item => item.id === body.targetId);
       if (!target) return json(res, 404, { message: '巡检对象不存在' });
-      if (!canManageInspectionRecord(user, target)) return json(res, 403, { message: '无权操作该巡检对象' });
+      if (!canOperateInspectionRecord(user, target)) return json(res, 403, { message: '无权操作该巡检对象' });
       if (!target.assetId || !requireExistingAsset(target.assetId, db)) return json(res, 400, { message: '巡检对象必须关联有效资产' });
       const cycle = String(body.cycle || '').trim();
       if (!['daily', 'weekly', 'monthly', 'quarterly'].includes(cycle)) return json(res, 400, { message: '请选择备份周期' });
@@ -6795,7 +8664,7 @@ const requestHandler = async (req, res) => {
       const planId = pathname.split('/')[5];
       const plan = (db.configBackupPlans || []).find(item => item.id === planId);
       if (!plan) return json(res, 404, { message: '配置备份计划不存在' });
-      if (!canManageInspectionRecord(user, plan)) return json(res, 403, { message: '无权执行该配置备份计划' });
+      if (!canOperateInspectionRecord(user, plan)) return json(res, 403, { message: '无权执行该配置备份计划' });
       plan.status = '执行中';
       const record = await executeConfigBackupPlan(db, plan, { operatorId: user.id });
       plan.status = plan.cycle ? '待执行' : '已完成';
@@ -6849,8 +8718,8 @@ const requestHandler = async (req, res) => {
       return json(res, 200, paginateResult(sorted, query));
     }
 
-    if (req.method === 'GET' && pathname.startsWith('/api/ai-inspection/config-backup/records/') && pathname.endsWith('/download')) {
-      const user = requireAuth(req, res, db);
+    if (req.method === 'POST' && pathname.startsWith('/api/ai-inspection/config-backup/records/') && pathname.endsWith('/download')) {
+      const user = requireEditor(req, res, db);
       if (!user) return;
       const recordId = pathname.split('/')[5];
       const record = (db.configBackupRecords || []).find(item => item.id === recordId);
@@ -6864,11 +8733,12 @@ const requestHandler = async (req, res) => {
       return res.end(record.content);
     }
 
-    if (req.method === 'GET' && pathname === '/api/ai-inspection/config-backup/records/diff') {
-      const user = requireAuth(req, res, db);
+    if (req.method === 'POST' && pathname === '/api/ai-inspection/config-backup/records/diff') {
+      const user = requireEditor(req, res, db);
       if (!user) return;
-      const id1 = reqUrl.searchParams.get('id1') || '';
-      const id2 = reqUrl.searchParams.get('id2') || '';
+      const body = await readBody(req);
+      const id1 = body.id1 || reqUrl.searchParams.get('id1') || '';
+      const id2 = body.id2 || reqUrl.searchParams.get('id2') || '';
       if (!id1 || !id2) return json(res, 400, { message: '请提供两个备份记录ID' });
       const record1 = (db.configBackupRecords || []).find(item => item.id === id1);
       const record2 = (db.configBackupRecords || []).find(item => item.id === id2);
@@ -6917,13 +8787,26 @@ const requestHandler = async (req, res) => {
       return json(res, 200, { ok: true });
     }
 
-      if (req.method === 'GET' && pathname === '/api/ai-inspection/results') {
+    if (req.method === 'GET' && pathname === '/api/ai-inspection/results') {
         const user = requireAuth(req, res, db);
         if (!user) return;
-        const list = filterByProjectScope(db.aiInspectionResults || [], user, item => item.projectId);
       const query = Object.fromEntries(reqUrl.searchParams);
+      let list = filterByProjectScope(db.aiInspectionResults || [], user, item => item.projectId);
+      if (query.excludeProbeError === '1') list = list.filter(item => !item.probeError);
+      if (query.level) list = list.filter(item => item.level === query.level);
+      if (query.q) {
+        const keyword = String(query.q).toLowerCase();
+        list = list.filter(item => {
+          const target = (db.aiInspectionTargets || []).find(entry => entry.id === item.targetId);
+          return String(item.summary || '').toLowerCase().includes(keyword)
+            || String(item.risk || '').toLowerCase().includes(keyword)
+            || String(item.suggestion || '').toLowerCase().includes(keyword)
+            || String(target?.name || '').toLowerCase().includes(keyword);
+        });
+      }
+      if (!query.sortDirection) query.sortDirection = 'desc';
       const sorted = parseSortQuery(query, list, 'createdAt');
-      return json(res, 200, paginateResult(sorted, query));
+      return json(res, 200, paginateResult(sorted.map(item => sanitizeAiInspectionResultForViewer(item, user)), query));
     }
 
     if (req.method === 'GET' && pathname.startsWith('/api/ai-inspection/results/')) {
@@ -6933,7 +8816,7 @@ const requestHandler = async (req, res) => {
       const result = (db.aiInspectionResults || []).find(item => item.id === resultId);
       if (!result) return json(res, 404, { message: '巡检结果不存在' });
       if (user.role !== 'admin' && result.projectId !== user.projectId) return json(res, 403, { message: '无权查看该巡检结果' });
-      return json(res, 200, result);
+      return json(res, 200, sanitizeAiInspectionResultForViewer(result, user));
     }
 
     if (req.method === 'DELETE' && pathname.startsWith('/api/ai-inspection/results/')) {
@@ -6945,7 +8828,6 @@ const requestHandler = async (req, res) => {
       const target = db.aiInspectionResults[index];
       if (!canManageInspectionRecord(user, target)) return json(res, 403, { message: '无权删除该巡检结果' });
       db.aiInspectionResults.splice(index, 1);
-      db.aiInspectionTasks = (db.aiInspectionTasks || []).filter(item => item.id !== target.taskId);
       appendAuditLog(db, user, 'delete', 'aiInspectionResult', resultId, `删除智能巡检结果 ${target.level}`, target.projectId);
       await writeDb(db);
       return json(res, 200, { ok: true });
@@ -6954,11 +8836,30 @@ const requestHandler = async (req, res) => {
     if (req.method === 'GET' && pathname === '/api/notifications') {
       const user = requireAuth(req, res, db);
       if (!user) return;
-      const list = filterByProjectScope(db.notifications || [], user, item => item.projectId);
+      if (checkExpiryNotifications(db)) await writeDb(db);
+      const list = filterByProjectScope(db.notifications || [], user, item => item.projectId)
+        .filter(item => !(item.hiddenBy && item.hiddenBy[user.id]));
       const query = Object.fromEntries(reqUrl.searchParams);
       if (!query.sortDirection) query.sortDirection = 'desc';
       const sorted = parseSortQuery(query, list, 'createdAt');
-      return json(res, 200, paginateResult(sorted, query));
+      const unreadTotal = list.filter(item => !getNotificationReadAtForUser(item, user.id)).length;
+      const presented = sorted.map(item => presentNotification(item, user));
+      return json(res, 200, { ...paginateResult(presented, query), unreadTotal });
+    }
+
+    if (req.method === 'POST' && pathname === '/api/notifications/read-all') {
+      const user = requireAuth(req, res, db);
+      if (!user) return;
+      const list = filterByProjectScope(db.notifications || [], user, item => item.projectId);
+      let marked = 0;
+      for (const item of list) {
+        if (!getNotificationReadAtForUser(item, user.id) && !(item.hiddenBy && item.hiddenBy[user.id])) {
+          markNotificationReadForUser(item, user.id);
+          marked += 1;
+        }
+      }
+      if (marked) await writeDb(db);
+      return json(res, 200, { message: marked ? `已标记 ${marked} 条通知为已读` : '当前没有未读通知', marked });
     }
 
     if (req.method === 'POST' && pathname.startsWith('/api/notifications/') && pathname.endsWith('/read')) {
@@ -6968,22 +8869,25 @@ const requestHandler = async (req, res) => {
       const notification = (db.notifications || []).find(item => item.id === notificationId);
       if (!notification) return json(res, 404, { message: '通知不存在' });
       if (user.role !== 'admin' && notification.projectId !== user.projectId) return json(res, 403, { message: '无权处理该通知' });
-      notification.readAt = notification.readAt || now();
+      markNotificationReadForUser(notification, user.id);
       await writeDb(db);
-      return json(res, 200, notification);
+      return json(res, 200, presentNotification(notification, user));
     }
 
     if (req.method === 'DELETE' && pathname === '/api/notifications/read') {
       const user = requireAuth(req, res, db);
       if (!user) return;
-      const before = (db.notifications || []).length;
-      if (user.role === 'admin') {
-        db.notifications = (db.notifications || []).filter(item => !item.readAt);
-      } else {
-        db.notifications = (db.notifications || []).filter(item => !item.readAt || item.projectId !== user.projectId);
+      const list = filterByProjectScope(db.notifications || [], user, item => item.projectId);
+      let removed = 0;
+      for (const item of list) {
+        if (!getNotificationReadAtForUser(item, user.id)) continue;
+        if (item.hiddenBy && item.hiddenBy[user.id]) continue;
+        item.hiddenBy = item.hiddenBy && typeof item.hiddenBy === 'object' ? item.hiddenBy : {};
+        item.hiddenBy[user.id] = now();
+        item._dirty = true;
+        removed += 1;
       }
-      const removed = before - (db.notifications || []).length;
-      await writeDb(db);
+      if (removed) await writeDb(db);
       return json(res, 200, { message: `已清除 ${removed} 条已读通知`, removed });
     }
 
@@ -6999,18 +8903,309 @@ const requestHandler = async (req, res) => {
     }
 
     if (req.method === 'GET' && pathname === '/api/audit-logs') {
-      const user = requireAuth(req, res, db);
+      const user = requireAdmin(req, res, db);
       if (!user) return;
-      const list = user.role === 'admin' ? (db.auditLogs || []) : filterByProjectScope(db.auditLogs || [], user, item => item.projectId);
+      const list = db.auditLogs || [];
       const query = Object.fromEntries(reqUrl.searchParams);
       if (!query.sortDirection) query.sortDirection = 'desc';
       const sorted = parseSortQuery(query, list, 'createdAt');
       return json(res, 200, paginateResult(sorted, query));
     }
 
+    if (req.method === 'GET' && pathname === '/api/work-reports') {
+      const user = requireAuth(req, res, db);
+      if (!user) return;
+      const list = listScopedWorkReports(db, user, {
+        status: reqUrl.searchParams.get('status') || '',
+        reportType: reqUrl.searchParams.get('reportType') || '',
+        projectId: reqUrl.searchParams.get('projectId') || '',
+        userId: reqUrl.searchParams.get('userId') || ''
+      })
+        .sort((a, b) => String(b.rangeStart).localeCompare(String(a.rangeStart)) || String(b.createdAt).localeCompare(String(a.createdAt)))
+        .map(item => buildWorkReportResponse(db, item));
+      return json(res, 200, { data: list });
+    }
+
+    if (req.method === 'GET' && pathname === '/api/reports/work-reports/overview') {
+      const user = requireAdmin(req, res, db);
+      if (!user) return;
+      const period = String(reqUrl.searchParams.get('period') || 'month').trim();
+      const range = getDateRangeFromPeriod(period, reqUrl.searchParams.get('anchorDate') || '', reqUrl.searchParams.get('startDate') || '', reqUrl.searchParams.get('endDate') || '');
+      if (!range) return json(res, 400, { message: '无效的统计范围' });
+      const overview = buildWorkReportOverview(db, user, {
+        ...range,
+        status: reqUrl.searchParams.get('status') || '',
+        reportType: reqUrl.searchParams.get('reportType') || '',
+        projectId: reqUrl.searchParams.get('projectId') || '',
+        userId: reqUrl.searchParams.get('userId') || '',
+        trendUnit: reqUrl.searchParams.get('trendUnit') || ''
+      });
+      return json(res, 200, overview);
+    }
+
+    if (req.method === 'POST' && pathname === '/api/reports/work-reports/export') {
+      const user = requireAuth(req, res, db);
+      if (!user) return;
+      const reports = listScopedWorkReports(db, user, {
+        status: reqUrl.searchParams.get('status') || '',
+        reportType: reqUrl.searchParams.get('reportType') || '',
+        projectId: reqUrl.searchParams.get('projectId') || '',
+        userId: reqUrl.searchParams.get('userId') || ''
+      })
+        .sort((a, b) => String(b.rangeStart).localeCompare(String(a.rangeStart)) || String(b.createdAt).localeCompare(String(a.createdAt)))
+        .map(item => buildWorkReportResponse(db, item));
+      appendAuditLog(db, user, 'export', 'workReport', 'work-report-list', '导出工作汇报列表', user.projectId || '');
+      await writeDb(db);
+      res.writeHead(200, buildSecurityHeaders({
+        'Content-Type': 'text/csv; charset=utf-8',
+        'Content-Disposition': `attachment; filename="work-reports-${formatDateKey(new Date())}.csv"`
+      }));
+      return res.end(buildWorkReportListCsv(reports));
+    }
+
+    if (req.method === 'POST' && pathname === '/api/reports/work-reports/overview/export') {
+      const user = requireAdmin(req, res, db);
+      if (!user) return;
+      const period = String(reqUrl.searchParams.get('period') || 'month').trim();
+      const range = getDateRangeFromPeriod(period, reqUrl.searchParams.get('anchorDate') || '', reqUrl.searchParams.get('startDate') || '', reqUrl.searchParams.get('endDate') || '');
+      if (!range) return json(res, 400, { message: '无效的统计范围' });
+      const overview = buildWorkReportOverview(db, user, {
+        ...range,
+        status: reqUrl.searchParams.get('status') || '',
+        reportType: reqUrl.searchParams.get('reportType') || '',
+        projectId: reqUrl.searchParams.get('projectId') || '',
+        userId: reqUrl.searchParams.get('userId') || '',
+        trendUnit: reqUrl.searchParams.get('trendUnit') || ''
+      });
+      appendAuditLog(db, user, 'export', 'workReport', 'work-report-overview', '导出工作汇报管理汇总看板', user.projectId || '');
+      await writeDb(db);
+      res.writeHead(200, buildSecurityHeaders({
+        'Content-Type': 'text/csv; charset=utf-8',
+        'Content-Disposition': `attachment; filename="work-report-overview-${range.rangeStart}-${range.rangeEnd}.csv"`
+      }));
+      return res.end(buildWorkReportOverviewCsv(overview));
+    }
+
+    if (req.method === 'POST' && pathname === '/api/work-reports') {
+      const user = requireEditor(req, res, db);
+      if (!user) return;
+      const body = await readBody(req);
+      const reportType = ['daily', 'weekly', 'monthly'].includes(body.reportType) ? body.reportType : 'daily';
+      const targetUserId = user.role === 'admin' && body.userId ? String(body.userId) : user.id;
+      const targetUser = requireExistingUser(targetUserId, db);
+      if (!targetUser) return json(res, 404, { message: '汇报人员不存在' });
+      const projectId = user.role === 'admin' ? String(body.projectId || targetUser.projectId || '').trim() : user.projectId;
+      if (!projectId) return json(res, 400, { message: '请选择关联项目' });
+      if (user.role !== 'admin' && targetUserId !== user.id) return json(res, 403, { message: '仅支持创建本人的工作汇报' });
+      const periodMeta = getWorkReportPeriodMeta(reportType, body.anchorDate || body.rangeStart || formatDateKey(new Date()));
+      if (!periodMeta) return json(res, 400, { message: '无效的汇报周期' });
+      const existing = (db.workReports || []).find(item => item.userId === targetUserId && item.projectId === projectId && item.reportType === reportType && item.periodKey === periodMeta.periodKey);
+      if (existing && !canEditWorkReportContent(existing)) {
+        return json(res, 400, { message: existing.status === 'locked' ? '该周期汇报已锁定' : '该周期汇报已提交，仅退回后可修改' });
+      }
+      const metricsSnapshot = buildWorkloadMetrics(db, { rangeStart: periodMeta.rangeStart, rangeEnd: periodMeta.rangeEnd, userId: targetUserId, projectId });
+      const target = existing || {
+        id: id('workReport'),
+        reportType,
+        projectId,
+        userId: targetUserId,
+        periodKey: periodMeta.periodKey,
+        rangeStart: periodMeta.rangeStart,
+        rangeEnd: periodMeta.rangeEnd,
+        status: 'draft',
+        submittedAt: '',
+        reviewedAt: '',
+        reviewedBy: '',
+        reviewComment: '',
+        lockedAt: '',
+        createdAt: now(),
+        updatedAt: now()
+      };
+      target.reportType = reportType;
+      target.projectId = projectId;
+      target.userId = targetUserId;
+      target.periodKey = periodMeta.periodKey;
+      target.rangeStart = periodMeta.rangeStart;
+      target.rangeEnd = periodMeta.rangeEnd;
+      target.summary = String(body.summary || target.summary || '').trim();
+      target.completedWork = String(body.completedWork || target.completedWork || '').trim();
+      target.pendingWork = String(body.pendingWork || target.pendingWork || '').trim();
+      target.risks = String(body.risks || target.risks || '').trim();
+      target.nextPlan = String(body.nextPlan || target.nextPlan || '').trim();
+      target.metricsSnapshot = metricsSnapshot;
+      target.updatedAt = now();
+      if (!existing) db.workReports.push(target);
+      appendAuditLog(db, user, existing ? 'update' : 'create', 'workReport', target.id, `${existing ? '更新' : '创建'}${reportType}工作汇报`, projectId);
+      await writeDb(db);
+      return json(res, 200, { message: existing ? '工作汇报已更新' : '工作汇报已创建', data: buildWorkReportResponse(db, target) });
+    }
+
+    if (req.method === 'PUT' && pathname.startsWith('/api/work-reports/')) {
+      const user = requireEditor(req, res, db);
+      if (!user) return;
+      const reportId = pathname.split('/')[3];
+      const target = (db.workReports || []).find(item => item.id === reportId);
+      if (!target) return json(res, 404, { message: '工作汇报不存在' });
+      if (!canManageWorkReport(user, target)) return json(res, 403, { message: '无权修改该工作汇报' });
+      if (!canEditWorkReportContent(target)) {
+        return json(res, 400, { message: target.status === 'locked' ? '该工作汇报已锁定' : '已提交的工作汇报仅退回后可修改' });
+      }
+      const body = await readBody(req);
+      const nextReportType = ['daily', 'weekly', 'monthly'].includes(body.reportType) ? body.reportType : target.reportType;
+      const nextProjectId = user.role === 'admin' && body.projectId !== undefined
+        ? String(body.projectId || '').trim()
+        : target.projectId;
+      if (!nextProjectId) return json(res, 400, { message: '请选择关联项目' });
+      const periodMeta = getWorkReportPeriodMeta(nextReportType, body.anchorDate || body.rangeStart || target.rangeStart);
+      if (!periodMeta) return json(res, 400, { message: '无效的汇报周期' });
+      const duplicate = (db.workReports || []).find(item => item.id !== target.id
+        && item.userId === target.userId
+        && item.projectId === nextProjectId
+        && item.reportType === nextReportType
+        && item.periodKey === periodMeta.periodKey);
+      let survivor = target;
+      if (duplicate) {
+        if (!canEditWorkReportContent(duplicate)) {
+          return json(res, 400, { message: duplicate.status === 'locked' ? '该周期汇报已锁定' : '该周期已存在已提交的工作汇报' });
+        }
+        db.workReports = (db.workReports || []).filter(item => item.id !== target.id);
+        survivor = duplicate;
+      }
+      if (body.summary !== undefined) survivor.summary = String(body.summary || '').trim();
+      if (body.completedWork !== undefined) survivor.completedWork = String(body.completedWork || '').trim();
+      if (body.pendingWork !== undefined) survivor.pendingWork = String(body.pendingWork || '').trim();
+      if (body.risks !== undefined) survivor.risks = String(body.risks || '').trim();
+      if (body.nextPlan !== undefined) survivor.nextPlan = String(body.nextPlan || '').trim();
+      survivor.reportType = nextReportType;
+      survivor.projectId = nextProjectId;
+      survivor.periodKey = periodMeta.periodKey;
+      survivor.rangeStart = periodMeta.rangeStart;
+      survivor.rangeEnd = periodMeta.rangeEnd;
+      survivor.metricsSnapshot = buildWorkloadMetrics(db, { rangeStart: survivor.rangeStart, rangeEnd: survivor.rangeEnd, userId: survivor.userId, projectId: survivor.projectId });
+      survivor.status = body.status === 'draft' ? 'draft' : survivor.status;
+      survivor.updatedAt = now();
+      appendAuditLog(db, user, 'update', 'workReport', survivor.id, duplicate && survivor.id !== target.id ? '合并工作汇报到已有周期草稿' : '编辑工作汇报', survivor.projectId);
+      await writeDb(db);
+      return json(res, 200, { message: duplicate && survivor.id !== target.id ? '已合并到该周期已有草稿' : '工作汇报已保存', data: buildWorkReportResponse(db, survivor) });
+    }
+
+    if (req.method === 'DELETE' && pathname.startsWith('/api/work-reports/')) {
+      const user = requireEditor(req, res, db);
+      if (!user) return;
+      const reportId = pathname.split('/')[3];
+      const index = (db.workReports || []).findIndex(item => item.id === reportId);
+      if (index === -1) return json(res, 404, { message: '工作汇报不存在' });
+      const target = db.workReports[index];
+      if (!canManageWorkReport(user, target)) return json(res, 403, { message: '无权删除该工作汇报' });
+      if (target.status !== 'draft') return json(res, 400, { message: '仅草稿工作汇报可以删除' });
+      db.workReports.splice(index, 1);
+      appendAuditLog(db, user, 'delete', 'workReport', target.id, '删除草稿工作汇报', target.projectId);
+      await writeDb(db);
+      return json(res, 200, { ok: true, message: '工作汇报草稿已删除' });
+    }
+
+    if (req.method === 'POST' && pathname.startsWith('/api/work-reports/') && pathname.endsWith('/submit')) {
+      const user = requireEditor(req, res, db);
+      if (!user) return;
+      const reportId = pathname.split('/')[3];
+      const target = (db.workReports || []).find(item => item.id === reportId);
+      if (!target) return json(res, 404, { message: '工作汇报不存在' });
+      if (!canManageWorkReport(user, target)) return json(res, 403, { message: '无权提交该工作汇报' });
+      if (!canSubmitWorkReport(target)) {
+        return json(res, 400, { message: target.status === 'locked' ? '该工作汇报已锁定' : '仅草稿或已退回的工作汇报可以提交' });
+      }
+      if (!String(target.summary || '').trim()) return json(res, 400, { message: '请输入工作总结' });
+      if (!String(target.completedWork || '').trim()) return json(res, 400, { message: '请输入已完成事项' });
+      if (!String(target.pendingWork || '').trim()) return json(res, 400, { message: '请输入未完成事项' });
+      if (!String(target.nextPlan || '').trim()) return json(res, 400, { message: '请输入下一步计划' });
+      target.metricsSnapshot = buildWorkloadMetrics(db, { rangeStart: target.rangeStart, rangeEnd: target.rangeEnd, userId: target.userId, projectId: target.projectId });
+      target.status = 'submitted';
+      target.submittedAt = now();
+      target.updatedAt = now();
+      appendAuditLog(db, user, 'submit', 'workReport', target.id, '提交工作汇报', target.projectId);
+      await writeDb(db);
+      return json(res, 200, { message: '工作汇报已提交', data: buildWorkReportResponse(db, target) });
+    }
+
+    if (req.method === 'POST' && pathname.startsWith('/api/work-reports/') && pathname.endsWith('/review')) {
+      const user = requireAdmin(req, res, db);
+      if (!user) return;
+      const reportId = pathname.split('/')[3];
+      const target = (db.workReports || []).find(item => item.id === reportId);
+      if (!target) return json(res, 404, { message: '工作汇报不存在' });
+      const body = await readBody(req);
+      const action = String(body.action || '').trim();
+      if (!['approved', 'returned', 'locked'].includes(action)) return json(res, 400, { message: '无效的审核动作' });
+      if (action === 'approved' && target.status !== 'submitted') {
+        return json(res, 400, { message: '仅已提交的工作汇报支持确认' });
+      }
+      if (action === 'returned' && target.status !== 'submitted' && target.status !== 'approved') {
+        return json(res, 400, { message: '仅已提交或已确认的工作汇报支持退回' });
+      }
+      if (action === 'locked' && target.status !== 'approved') return json(res, 400, { message: '请先确认后再锁定' });
+      target.reviewedBy = user.id;
+      target.reviewedAt = now();
+      target.reviewComment = String(body.comment || '').trim();
+      target.updatedAt = now();
+      target.status = action;
+      if (action === 'locked') {
+        target.lockedAt = now();
+      }
+      if (action === 'returned') {
+        target.lockedAt = '';
+      }
+      appendAuditLog(db, user, action, 'workReport', target.id, `工作汇报${action === 'approved' ? '已确认' : action === 'returned' ? '已退回' : '已锁定'}`, target.projectId);
+      await writeDb(db);
+      return json(res, 200, { message: action === 'approved' ? '工作汇报已确认' : action === 'returned' ? '工作汇报已退回' : '工作汇报已锁定', data: buildWorkReportResponse(db, target) });
+    }
+
+    if (req.method === 'GET' && pathname === '/api/reports/workload') {
+      const user = requireAuth(req, res, db);
+      if (!user) return;
+      if (user.role === 'customer') return json(res, 403, { message: '当前账号无权查看工作量看板' });
+      const period = String(reqUrl.searchParams.get('period') || 'month').trim();
+      const projectId = user.role === 'admin' ? String(reqUrl.searchParams.get('projectId') || '').trim() : user.projectId;
+      const range = getDateRangeFromPeriod(period, reqUrl.searchParams.get('anchorDate') || '', reqUrl.searchParams.get('startDate') || '', reqUrl.searchParams.get('endDate') || '');
+      if (!range) return json(res, 400, { message: '无效的统计范围' });
+      const rows = buildWorkloadRows(db, user, { rangeStart: range.rangeStart, rangeEnd: range.rangeEnd, projectId });
+      const previousRange = getPreviousDateRange(range);
+      const previousRows = previousRange
+        ? buildWorkloadRows(db, user, { rangeStart: previousRange.rangeStart, rangeEnd: previousRange.rangeEnd, projectId })
+        : [];
+      const summary = buildWorkloadBoardSummary(rows);
+      const previousSummary = buildWorkloadBoardSummary(previousRows);
+      return json(res, 200, {
+        data: rows,
+        range,
+        previousRange,
+        summary,
+        previousSummary,
+        summaryComparison: buildWorkloadSummaryComparison(summary, previousSummary)
+      });
+    }
+
+    if (req.method === 'POST' && pathname === '/api/reports/workload/export') {
+      const user = requireAuth(req, res, db);
+      if (!user) return;
+      if (user.role === 'customer') return json(res, 403, { message: '当前账号无权查看工作量看板' });
+      const period = String(reqUrl.searchParams.get('period') || 'month').trim();
+      const projectId = user.role === 'admin' ? String(reqUrl.searchParams.get('projectId') || '').trim() : user.projectId;
+      const range = getDateRangeFromPeriod(period, reqUrl.searchParams.get('anchorDate') || '', reqUrl.searchParams.get('startDate') || '', reqUrl.searchParams.get('endDate') || '');
+      if (!range) return json(res, 400, { message: '无效的统计范围' });
+      const rows = buildWorkloadRows(db, user, { rangeStart: range.rangeStart, rangeEnd: range.rangeEnd, projectId });
+      appendAuditLog(db, user, 'export', 'workload', 'workload-board', '导出人员工作量看板', projectId || user.projectId || '');
+      await writeDb(db);
+      res.writeHead(200, buildSecurityHeaders({
+        'Content-Type': 'text/csv; charset=utf-8',
+        'Content-Disposition': `attachment; filename="workload-${range.rangeStart}-${range.rangeEnd}.csv"`
+      }));
+      return res.end(buildWorkloadCsv(rows));
+    }
+
     if (req.method === 'GET' && pathname === '/api/reports/drilldown') {
       const user = requireAuth(req, res, db);
       if (!user) return;
+      if (user.role === 'customer') return json(res, 403, { message: '当前账号无权查看下钻报表' });
       const period = reqUrl.searchParams.get('period') || 'month';
       const groupBy = reqUrl.searchParams.get('groupBy') || 'customer';
       return json(res, 200, buildDrilldown(db, user, period, groupBy));
@@ -7042,7 +9237,7 @@ const requestHandler = async (req, res) => {
       const user = requireAdmin(req, res, db);
       if (!user) return;
       const body = await readBody(req);
-      const allowedKeys = ['webIdleLogoutMinutes', 'httpsLoginEnabled', 'httpsPort', 'allowRegistration', 'httpLoginDisabled', 'loginRateLimitMaxAttempts', 'loginRateLimitWindowMinutes', 'loginRateLimitLockMinutes', 'timezoneOffset'];
+      const allowedKeys = ['webIdleLogoutMinutes', 'httpsLoginEnabled', 'httpsPort', 'allowRegistration', 'httpLoginDisabled', 'loginRateLimitMaxAttempts', 'loginRateLimitWindowMinutes', 'loginRateLimitLockMinutes', 'timezoneOffset', 'dailyReportReminderHour', 'weeklyReportReminderDays', 'monthlyReportReminderDays', 'dailyLowHoursThreshold', 'dailyHighHoursThreshold', 'noLogStreakDays', 'projectInactiveDays'];
       const safeBody = {};
       for (const key of allowedKeys) {
         if (body[key] !== undefined) safeBody[key] = body[key];
@@ -7112,25 +9307,24 @@ const requestHandler = async (req, res) => {
     if (req.method === 'POST' && pathname === '/api/system/import') {
       const user = requireAdmin(req, res, db);
       if (!user) return;
-      const body = await readBody(req);
+      const body = await readBody(req, importBodyLimitBytes);
       if (!body || typeof body !== 'object' || Array.isArray(body)) {
         return json(res, 400, { message: '导入数据格式无效，需为有效的 JSON 对象' });
       }
       if (!Array.isArray(body.users)) {
         return json(res, 400, { message: '导入数据缺少 users 字段' });
       }
-      if (body.users.length > 2000) {
-        return json(res, 400, { message: '导入用户数量不能超过 2000' });
+      if (body.users.length > importUserLimit) {
+        return json(res, 400, { message: `导入用户数量不能超过 ${importUserLimit}` });
       }
       for (const key of dbCollectionKeys) {
-        if (Array.isArray(body[key]) && body[key].length > 5000) {
-          return json(res, 400, { message: `导入的 ${key} 数据量超过上限 5000` });
+        if (Array.isArray(body[key]) && body[key].length > importCollectionLimit) {
+          return json(res, 400, { message: `导入的 ${key} 数据量超过上限 ${importCollectionLimit}` });
         }
       }
-      const cookies = parseCookies(req);
-      const sessionToken = cookies.sessionToken || '';
+      const sessionToken = getSessionToken(req);
       const currentSession = (db.sessions || []).find(item => item.token === sessionToken) || null;
-      const nextDb = buildImportedDbPreservingCurrentSession(body, user, sessionToken, currentSession);
+      const nextDb = buildImportedDbPreservingCurrentSession(fillMissingSnapshotSecrets(body, db), user, sessionToken, currentSession);
       restoreDocumentAttachments(nextDb, body.documentAttachments || []);
       const backupFilename = `backup-before-import-${now().replace(/[:.]/g, '-')}.json`;
       fs.writeFileSync(path.join(backupDir, backupFilename), JSON.stringify(serializeDbSnapshot(db), null, 2));
@@ -7160,14 +9354,23 @@ const requestHandler = async (req, res) => {
       if (!body.password || !verifyPassword(body.password, user.passwordHash)) {
         return json(res, 401, { message: '管理员密码错误' });
       }
-      const cookies = parseCookies(req);
-      const sessionToken = cookies.sessionToken || '';
+      const sessionToken = getSessionToken(req);
       const currentSession = (db.sessions || []).find(item => item.token === sessionToken) || null;
       const backupFilename = `backup-before-reset-${now().replace(/[:.]/g, '-')}.json`;
       fs.writeFileSync(path.join(backupDir, backupFilename), JSON.stringify(serializeDbSnapshot(db), null, 2));
       const preservedHttpsConfig = normalizeSystemConfig(db.systemConfig || {});
       const nextDb = buildResetDbForNewEnvironment(user, sessionToken, currentSession);
-      nextDb.systemConfig = normalizeSystemConfig({ ...nextDb.systemConfig, httpsLoginEnabled: preservedHttpsConfig.httpsLoginEnabled, httpLoginDisabled: preservedHttpsConfig.httpLoginDisabled, httpsPort: preservedHttpsConfig.httpsPort, httpsCertFilename: preservedHttpsConfig.httpsCertFilename, httpsKeyFilename: preservedHttpsConfig.httpsKeyFilename, httpsCertUploadedAt: preservedHttpsConfig.httpsCertUploadedAt, httpsKeyUploadedAt: preservedHttpsConfig.httpsKeyUploadedAt, httpsCertSubject: preservedHttpsConfig.httpsCertSubject, httpsCertIssuer: preservedHttpsConfig.httpsCertIssuer, httpsCertValidFrom: preservedHttpsConfig.httpsCertValidFrom, httpsCertValidTo: preservedHttpsConfig.httpsCertValidTo, httpsCertFingerprint256: preservedHttpsConfig.httpsCertFingerprint256, loginRateLimitMaxAttempts: preservedHttpsConfig.loginRateLimitMaxAttempts, loginRateLimitWindowMinutes: preservedHttpsConfig.loginRateLimitWindowMinutes, loginRateLimitLockMinutes: preservedHttpsConfig.loginRateLimitLockMinutes, allowRegistration: preservedHttpsConfig.allowRegistration, webIdleLogoutMinutes: preservedHttpsConfig.webIdleLogoutMinutes, timezoneOffset: preservedHttpsConfig.timezoneOffset });
+      nextDb.systemConfig = normalizeSystemConfig({
+        ...nextDb.systemConfig,
+        ...preservedHttpsConfig,
+        dailyReportReminderHour: preservedHttpsConfig.dailyReportReminderHour,
+        weeklyReportReminderDays: preservedHttpsConfig.weeklyReportReminderDays,
+        monthlyReportReminderDays: preservedHttpsConfig.monthlyReportReminderDays,
+        dailyLowHoursThreshold: preservedHttpsConfig.dailyLowHoursThreshold,
+        dailyHighHoursThreshold: preservedHttpsConfig.dailyHighHoursThreshold,
+        noLogStreakDays: preservedHttpsConfig.noLogStreakDays,
+        projectInactiveDays: preservedHttpsConfig.projectInactiveDays
+      });
       await writeDb(nextDb);
       let httpsMsg = '';
       try {
@@ -7178,7 +9381,7 @@ const requestHandler = async (req, res) => {
       return json(res, 200, { message: `数据库已初始化，仅保留当前管理员账号${httpsMsg}`, backupFilename });
     }
 
-    if (req.method === 'GET' && pathname === '/api/system/export') {
+    if (req.method === 'POST' && pathname === '/api/system/export') {
       const user = requireAdmin(req, res, db);
       if (!user) return;
       appendAuditLog(db, user, 'export', 'system', '', '导出系统数据');
@@ -7187,10 +9390,52 @@ const requestHandler = async (req, res) => {
         'Content-Type': 'application/json; charset=utf-8',
         'Content-Disposition': 'attachment; filename="onsite-ops-export.json"'
       }));
-      return res.end(JSON.stringify(serializeDbSnapshot(db), null, 2));
+      return res.end(JSON.stringify(redactSnapshotSecrets(serializeDbSnapshot(db)), null, 2));
     }
 
-    if (req.method === 'GET' && pathname.startsWith('/api/system/backups/')) {
+    if (req.method === 'POST' && pathname.startsWith('/api/system/backups/') && pathname.endsWith('/restore')) {
+      const user = requireAdmin(req, res, db);
+      if (!user) return;
+      const parts = pathname.split('/');
+      const rawFilename = parts[4] || '';
+      const filename = path.basename(decodeURIComponent(rawFilename));
+      if (!filename || filename !== decodeURIComponent(rawFilename) || !filename.endsWith('.json')) {
+        return json(res, 400, { message: '文件名无效' });
+      }
+      const filePath = path.join(backupDir, filename);
+      if (!filePath.startsWith(backupDir + path.sep) || !fs.existsSync(filePath)) {
+        return json(res, 404, { message: '备份文件不存在' });
+      }
+      let snapshot;
+      try {
+        snapshot = JSON.parse(fs.readFileSync(filePath, 'utf8'));
+      } catch (_) {
+        return json(res, 400, { message: '备份文件不是有效 JSON' });
+      }
+      if (!snapshot || typeof snapshot !== 'object' || Array.isArray(snapshot) || !Array.isArray(snapshot.users)) {
+        return json(res, 400, { message: '备份数据格式无效' });
+      }
+      if (snapshot.users.length > importUserLimit) {
+        return json(res, 400, { message: `导入用户数量不能超过 ${importUserLimit}` });
+      }
+      for (const key of dbCollectionKeys) {
+        if (Array.isArray(snapshot[key]) && snapshot[key].length > importCollectionLimit) {
+          return json(res, 400, { message: `导入的 ${key} 数据量超过上限 ${importCollectionLimit}` });
+        }
+      }
+      const sessionToken = getSessionToken(req);
+      const currentSession = (db.sessions || []).find(item => item.token === sessionToken) || null;
+      const nextDb = buildImportedDbPreservingCurrentSession(snapshot, user, sessionToken, currentSession);
+      restoreDocumentAttachments(nextDb, snapshot.documentAttachments || []);
+      const backupFilename = `backup-before-restore-${now().replace(/[:.]/g, '-')}.json`;
+      fs.writeFileSync(path.join(backupDir, backupFilename), JSON.stringify(serializeDbSnapshot(db), null, 2));
+      appendAuditLog(nextDb, user, 'restore', 'system', '', `从磁盘备份恢复 ${filename}，恢复前备份 ${backupFilename}`);
+      await writeDb(nextDb);
+      await applyHttpsServerConfig(nextDb.systemConfig || {});
+      return json(res, 200, { message: '磁盘备份恢复成功，当前登录状态已保留', backupFilename, filename });
+    }
+
+    if (req.method === 'POST' && pathname.startsWith('/api/system/backups/')) {
       const user = requireAdmin(req, res, db);
       if (!user) return;
       const rawFilename = pathname.split('/').pop() || '';
@@ -7202,30 +9447,40 @@ const requestHandler = async (req, res) => {
       if (!filePath.startsWith(backupDir + path.sep) || !fs.existsSync(filePath)) {
         return json(res, 404, { message: '备份文件不存在' });
       }
+      let payload = fs.readFileSync(filePath, 'utf8');
+      try {
+        payload = JSON.stringify(redactSnapshotSecrets(JSON.parse(payload)), null, 2);
+      } catch (_) {}
+      const body = Buffer.from(payload, 'utf8');
       res.writeHead(200, buildSecurityHeaders({
         'Content-Type': 'application/json; charset=utf-8',
-        'Content-Disposition': `attachment; filename="${filename}"`
+        'Content-Disposition': `attachment; filename="${filename}"`,
+        'Content-Length': String(body.length)
       }));
-      return fs.createReadStream(filePath).pipe(res);
+      return res.end(body);
     }
 
     if (req.method === 'GET' && pathname === '/api/reports/summary') {
       const user = requireAuth(req, res, db);
       if (!user) return;
+      if (user.role === 'customer') return json(res, 403, { message: '当前账号无权查看汇总' });
       const period = reqUrl.searchParams.get('period') || 'week';
       const userId = user.role === 'admin' ? reqUrl.searchParams.get('userId') || '' : user.role === 'engineer' ? user.id : '';
       const projectId = user.role === 'admin' ? reqUrl.searchParams.get('projectId') || '' : user.projectId;
+      if (user.role !== 'admin' && user.role !== 'engineer' && !projectId) {
+        return json(res, 403, { message: '未绑定项目，无权查看汇总' });
+      }
       return json(res, 200, buildSummary(db, period, userId, projectId));
     }
 
-    if (req.method === 'GET' && pathname.startsWith('/api/reports/user/') && pathname.endsWith('/html')) {
+    if (req.method === 'POST' && pathname.startsWith('/api/reports/user/') && pathname.endsWith('/html')) {
       const user = requireAuth(req, res, db);
       if (!user) return;
       const targetUserId = pathname.split('/')[4];
       const targetUser = requireExistingUser(targetUserId, db);
       if (!targetUser) return json(res, 404, { message: '用户不存在' });
       if (user.role !== 'admin' && user.role !== 'engineer') return json(res, 403, { message: '当前账号仅支持查看数据' });
-      if (user.role !== 'admin' && targetUser.projectId !== user.projectId) return json(res, 403, { message: '无权查看其他人员报表' });
+      if (user.role !== 'admin' && user.id !== targetUserId) return json(res, 403, { message: '仅支持查看本人报表' });
       const period = reqUrl.searchParams.get('period') || 'month';
       const content = buildOperationalReportHtml(db, 'user', targetUserId, period);
       if (!content) return json(res, 404, { message: '报表生成失败' });
@@ -7233,7 +9488,7 @@ const requestHandler = async (req, res) => {
       return res.end(content);
     }
 
-    if (req.method === 'GET' && pathname.startsWith('/api/reports/user/') && pathname.endsWith('/pptx')) {
+    if (req.method === 'POST' && pathname.startsWith('/api/reports/user/') && pathname.endsWith('/pptx')) {
       const user = requireAuth(req, res, db);
       if (!user) return;
       const targetUserId = pathname.split('/')[4];
@@ -7244,8 +9499,8 @@ const requestHandler = async (req, res) => {
       if (user.role !== 'admin' && user.role !== 'engineer') {
         return json(res, 403, { message: '当前账号仅支持查看数据' });
       }
-      if (user.role !== 'admin' && targetUser.projectId !== user.projectId) {
-        return json(res, 403, { message: '无权导出其他人员报表' });
+      if (user.role !== 'admin' && user.id !== targetUserId) {
+        return json(res, 403, { message: '仅支持导出本人报表' });
       }
       const period = reqUrl.searchParams.get('period') || 'month';
       const content = buildPptxBuffer(db, targetUserId, period);
@@ -7259,11 +9514,11 @@ const requestHandler = async (req, res) => {
       return res.end(content);
     }
 
-    if (req.method === 'GET' && pathname.startsWith('/api/reports/project/') && pathname.endsWith('/html')) {
+    if (req.method === 'POST' && pathname.startsWith('/api/reports/project/') && pathname.endsWith('/html')) {
       const user = requireAuth(req, res, db);
       if (!user) return;
       const projectId = pathname.split('/')[4];
-      if (user.role !== 'admin' && user.projectId !== projectId) return json(res, 403, { message: '无权查看其他项目报表' });
+      if (!canViewProject(user, projectId)) return json(res, 403, { message: '无权查看其他项目报表' });
       const period = reqUrl.searchParams.get('period') || 'month';
       const content = buildOperationalReportHtml(db, 'project', projectId, period);
       if (!content) return json(res, 404, { message: '项目不存在' });
@@ -7271,11 +9526,11 @@ const requestHandler = async (req, res) => {
       return res.end(content);
     }
 
-    if (req.method === 'GET' && pathname.startsWith('/api/reports/project/') && pathname.endsWith('/pptx')) {
+    if (req.method === 'POST' && pathname.startsWith('/api/reports/project/') && pathname.endsWith('/pptx')) {
       const user = requireAuth(req, res, db);
       if (!user) return;
       const projectId = pathname.split('/')[4];
-      if (user.role !== 'admin' && user.projectId !== projectId) {
+      if (!canViewProject(user, projectId)) {
         return json(res, 403, { message: '无权导出其他项目报表' });
       }
       const period = reqUrl.searchParams.get('period') || 'month';
@@ -7290,11 +9545,11 @@ const requestHandler = async (req, res) => {
       return res.end(content);
     }
 
-    if (req.method === 'GET' && pathname.startsWith('/api/reports/inspection/project/') && pathname.endsWith('/html')) {
+    if (req.method === 'POST' && pathname.startsWith('/api/reports/inspection/project/') && pathname.endsWith('/html')) {
       const user = requireAuth(req, res, db);
       if (!user) return;
       const projectId = pathname.split('/')[5];
-      if (user.role !== 'admin' && user.projectId !== projectId) {
+      if (!canViewProject(user, projectId)) {
         return json(res, 403, { message: '无权查看其他项目巡检报表' });
       }
       const period = reqUrl.searchParams.get('period') || 'month';
@@ -7306,11 +9561,11 @@ const requestHandler = async (req, res) => {
       return res.end(content);
     }
 
-    if (req.method === 'GET' && pathname.startsWith('/api/reports/inspection/project/') && pathname.endsWith('/csv')) {
+    if (req.method === 'POST' && pathname.startsWith('/api/reports/inspection/project/') && pathname.endsWith('/csv')) {
       const user = requireAuth(req, res, db);
       if (!user) return;
       const projectId = pathname.split('/')[5];
-      if (user.role !== 'admin' && user.projectId !== projectId) {
+      if (!canViewProject(user, projectId)) {
         return json(res, 403, { message: '无权导出其他项目巡检报表' });
       }
       const period = reqUrl.searchParams.get('period') || 'month';
@@ -7325,16 +9580,16 @@ const requestHandler = async (req, res) => {
       return res.end(content);
     }
 
-    if (req.method === 'GET' && pathname.startsWith('/api/reports/ai-inspection/results/') && pathname.endsWith('/html')) {
+    if (req.method === 'POST' && pathname.startsWith('/api/reports/ai-inspection/results/') && pathname.endsWith('/html')) {
       const user = requireAuth(req, res, db);
       if (!user) return;
       const resultId = pathname.split('/')[5];
       const result = (db.aiInspectionResults || []).find(item => item.id === resultId);
       if (!result) return json(res, 404, { message: '巡检结果不存在' });
-      if (user.role !== 'admin' && result.projectId !== user.projectId) {
+      if (!canViewProject(user, result.projectId)) {
         return json(res, 403, { message: '无权查看该巡检报告' });
       }
-      const content = buildAiInspectionResultHtml(db, resultId);
+      const content = buildAiInspectionResultHtml(db, resultId, user);
       if (!content) {
         return json(res, 404, { message: '巡检报告生成失败' });
       }
@@ -7342,13 +9597,13 @@ const requestHandler = async (req, res) => {
       return res.end(content);
     }
 
-    if (req.method === 'GET' && pathname.startsWith('/api/reports/ai-inspection/results/') && pathname.endsWith('/pptx')) {
+    if (req.method === 'POST' && pathname.startsWith('/api/reports/ai-inspection/results/') && pathname.endsWith('/pptx')) {
       const user = requireAuth(req, res, db);
       if (!user) return;
       const resultId = pathname.split('/')[5];
       const result = (db.aiInspectionResults || []).find(item => item.id === resultId);
       if (!result) return json(res, 404, { message: '巡检结果不存在' });
-      if (user.role !== 'admin' && result.projectId !== user.projectId) {
+      if (!canViewProject(user, result.projectId)) {
         return json(res, 403, { message: '无权导出该巡检报告' });
       }
       const content = buildAiInspectionResultPptxBuffer(db, resultId);
@@ -7583,8 +9838,22 @@ function attachWsUpgradeHandler(targetServer) {
 
 attachWsUpgradeHandler(server);
 
-wss.on('connection', (ws) => {
+wss.on('connection', (ws, request) => {
   ws.isAlive = true;
+  try {
+    const db = readDbInternalSync();
+    const user = getAuthUser(request, db);
+    if (!user) {
+      ws.close();
+      return;
+    }
+    ws.userId = user.id;
+    ws.role = user.role;
+    ws.projectId = user.projectId || '';
+  } catch (_) {
+    ws.close();
+    return;
+  }
   ws.on('pong', () => { ws.isAlive = true; });
   ws.on('message', (data) => {
     try {
@@ -7596,7 +9865,8 @@ wss.on('connection', (ws) => {
   ws.on('close', () => wsClients.delete(ws));
   ws.on('error', () => wsClients.delete(ws));
   try {
-    ws.send(JSON.stringify({ type: 'traffic_update', rates: trafficMonitorState.rates, portStatus: trafficMonitorState.portStatus, timestamp: Date.now() }));
+    const snapshot = buildTrafficSnapshotForUser(user, db);
+    ws.send(JSON.stringify({ type: 'traffic_update', rates: snapshot.rates, portStatus: snapshot.portStatus, timestamp: Date.now() }));
   } catch (_) {}
 });
 
@@ -7622,19 +9892,39 @@ if (wsHeartbeatTimer.unref) wsHeartbeatTimer.unref();
 
 function broadcastChange(topic, payload = {}) {
   const message = JSON.stringify({ type: 'data-changed', topic, payload, timestamp: Date.now() });
-  sendToAllWs(message);
+  sendToScopedWs(message, payload && payload.projectId);
 }
 
 function broadcastToProject(projectId, payload = {}) {
-  const message = JSON.stringify({ type: 'monitor_alert', projectId, ...payload, timestamp: Date.now() });
-  sendToAllWs(message);
-}
-
-function sendToAllWs(message) {
   const stale = [];
   for (const ws of wsClients) {
     try {
-      if (ws.readyState === 1) ws.send(message);
+      if (ws.readyState !== 1) continue;
+      const isAdmin = ws.role === 'admin';
+      const sameProject = Boolean(projectId) && ws.projectId === projectId;
+      if (!isAdmin && !sameProject) continue;
+      const body = { type: 'monitor_alert', projectId, ...payload, timestamp: Date.now() };
+      if (ws.role === 'customer') {
+        delete body.host;
+        if (body.message) body.message = String(body.message).replace(/\s*\([^)]*\)/, '');
+      }
+      ws.send(JSON.stringify(body));
+    } catch (_) {
+      stale.push(ws);
+    }
+  }
+  for (const ws of stale) wsClients.delete(ws);
+}
+
+function sendToScopedWs(message, projectId) {
+  const stale = [];
+  for (const ws of wsClients) {
+    try {
+      if (ws.readyState !== 1) continue;
+      const allowAll = !projectId;
+      const isAdmin = ws.role === 'admin';
+      const sameProject = Boolean(projectId) && ws.projectId === projectId;
+      if (allowAll || isAdmin || sameProject) ws.send(message);
     } catch (_) {
       stale.push(ws);
     }
@@ -7693,11 +9983,12 @@ function setMonitorStatus(assetId, status) {
 function checkAssetPing(host, timeoutMs = 3000) {
   return new Promise(resolve => {
     try {
-      const { exec } = require('child_process');
-      const child = exec(`ping -c 1 -W 2 ${host.replace(/[^a-zA-Z0-9.\-]/g, '')}`, { timeout: timeoutMs }, (err) => {
+      const safeHost = String(host || '').replace(/[^a-zA-Z0-9.\-]/g, '');
+      if (!safeHost) return resolve('offline');
+      const child = execFile('ping', ['-c', '1', '-W', '2', safeHost], { timeout: timeoutMs }, (err) => {
         resolve(err ? 'offline' : 'online');
       });
-      setTimeout(() => { child.kill(); resolve('offline'); }, timeoutMs);
+      setTimeout(() => { try { child.kill(); } catch (_) {} resolve('offline'); }, timeoutMs);
     } catch (_) {
       resolve('offline');
     }
@@ -7720,6 +10011,17 @@ function checkAssetTcp(host, port, timeoutMs = 3000) {
   });
 }
 
+async function checkAssetSnmp(host, asset, timeoutMs = 3000) {
+  const community = asset.snmpCommunity || 'public';
+  const port = parseInt(asset.snmpPort || '161', 10);
+  try {
+    const vb = await snmpGetUdp(host, port, community, [1, 3, 6, 1, 2, 1, 1, 3, 0], timeoutMs);
+    return vb && vb.value !== undefined && vb.value !== null ? 'online' : 'offline';
+  } catch (_) {
+    return 'offline';
+  }
+}
+
 async function checkAssetMonitor(asset) {
   if (!asset.monitorEnabled) return;
   const host = asset.monitorHost || asset.installationLocation || '';
@@ -7732,6 +10034,8 @@ async function checkAssetMonitor(asset) {
     if (asset.monitorType === 'tcp') {
       const port = Number(asset.monitorPort) || 80;
       status = await checkAssetTcp(host, port);
+    } else if (asset.monitorType === 'snmp') {
+      status = await checkAssetSnmp(host, asset);
     } else {
       status = await checkAssetPing(host);
     }
@@ -7751,20 +10055,17 @@ async function notifyMonitorChange(asset, prevStatus, newStatus) {
       ? `设备离线告警: ${asset.name}`
       : `设备恢复在线: ${asset.name}`;
     const message = newStatus === 'offline'
-      ? `资产 "${asset.name}" (${asset.monitorHost || '未配置地址'}) 监测到离线`
-      : `资产 "${asset.name}" (${asset.monitorHost || '未配置地址'}) 已恢复在线`;
+      ? `资产 "${asset.name}" 监测到离线`
+      : `资产 "${asset.name}" 已恢复在线`;
     if (!db.notifications) db.notifications = [];
-    db.notifications.push({
-      id: id('notif'),
-      type: 'monitor_alert',
+    createNotification(
+      db,
+      asset.projectId || '',
       title,
       message,
-      level: newStatus === 'offline' ? 'danger' : 'info',
-      targetType: 'asset',
-      targetId: asset.id,
-      read: false,
-      createdAt: now()
-    });
+      newStatus === 'offline' ? 'warning' : 'info',
+      'monitor-alert'
+    );
     await writeDb(db);
     broadcastToProject(asset.projectId, { type: 'monitor_alert', assetId: asset.id, assetName: asset.name, host: asset.monitorHost || '', monitorStatus: newStatus, title, message });
   } catch (_) {}
@@ -7789,9 +10090,45 @@ setTimeout(() => runAssetMonitorScheduler(), 5000);
 const trafficMonitorState = { lastCounters: {}, rates: {}, portStatus: {} };
 const portStatusCache = {};
 
+function buildTrafficSnapshotForUser(user, db) {
+  const rates = trafficMonitorState.rates || {};
+  const portStatus = trafficMonitorState.portStatus || {};
+  if (!user || user.role === 'admin') return { rates, portStatus };
+  if (!user.projectId) return { rates: {}, portStatus: {} };
+  const assetIds = new Set((db.assets || []).filter(item => item.projectId === user.projectId).map(item => item.id));
+  const filteredRates = {};
+  for (const [key, value] of Object.entries(rates)) {
+    if ([...assetIds].some(assetId => key === `${assetId}_` || key.startsWith(`${assetId}_`))) {
+      filteredRates[key] = value;
+    }
+  }
+  const relIds = new Set((db.assetRelations || []).filter(item => assetIds.has(item.sourceAssetId) || assetIds.has(item.targetAssetId)).map(item => item.id));
+  const filteredPortStatus = {};
+  for (const [key, value] of Object.entries(portStatus)) {
+    if (relIds.has(key)) filteredPortStatus[key] = value;
+  }
+  return { rates: filteredRates, portStatus: filteredPortStatus };
+}
+
 function broadcastTrafficUpdate(projectId) {
-  const payload = { type: 'traffic_update', projectId, rates: trafficMonitorState.rates, portStatus: trafficMonitorState.portStatus, timestamp: Date.now() };
-  sendToAllWs(JSON.stringify(payload));
+  let db = { assets: [], assetRelations: [] };
+  try {
+    db = readDbInternalSync();
+  } catch (_) {}
+  const stale = [];
+  for (const ws of wsClients) {
+    try {
+      if (ws.readyState !== 1) continue;
+      const isAdmin = ws.role === 'admin';
+      const sameProject = Boolean(projectId) && ws.projectId === projectId;
+      if (!isAdmin && !sameProject) continue;
+      const snapshot = buildTrafficSnapshotForUser({ role: ws.role, projectId: ws.projectId || '' }, db);
+      ws.send(JSON.stringify({ type: 'traffic_update', projectId, rates: snapshot.rates, portStatus: snapshot.portStatus, timestamp: Date.now() }));
+    } catch (_) {
+      stale.push(ws);
+    }
+  }
+  for (const ws of stale) wsClients.delete(ws);
 }
 
 async function getAssetSnmpPortMap(asset) {
@@ -7801,35 +10138,17 @@ async function getAssetSnmpPortMap(asset) {
   const host = asset.monitorHost;
   if (!host) return {};
   try {
-    const snmp = require('snmp-native');
     const community = asset.snmpCommunity || 'public';
     const port = parseInt(asset.snmpPort || '161', 10);
-    const session = new snmp.Session({ host, community, port, timeouts: [3000] });
-    const descrOid = [1, 3, 6, 1, 2, 1, 2, 2, 1, 2];
-    const statusOid = [1, 3, 6, 1, 2, 1, 2, 2, 1, 8];
-    const ifList = [];
-    await new Promise((resolve) => {
-      let pending = 2;
-      const timer = setTimeout(() => { pending = 0; resolve(); }, 6000);
-      const checkDone = () => { pending--; if (pending <= 0) { clearTimeout(timer); resolve(); } };
-      session.getSubtree({ oid: descrOid, communities: [community] }, (err, vbs) => {
-        if (!err && vbs) vbs.forEach(vb => { if (vb && vb.value !== undefined) ifList.push({ index: vb.oid[vb.oid.length - 1], name: String(vb.value) }); });
-        checkDone();
-      });
-      session.getSubtree({ oid: statusOid, communities: [community] }, (err, vbs) => {
-        if (!err && vbs) vbs.forEach(vb => {
-          if (vb && vb.value !== undefined) {
-            const idx = vb.oid[vb.oid.length - 1];
-            const entry = ifList.find(i => i.index === idx);
-            if (entry) entry.status = vb.value === 1 ? 'up' : 'down';
-          }
-        });
-        checkDone();
-      });
-    });
-    session.close();
+    const [descrList, statusList] = await Promise.all([
+      snmpWalkSubtree(host, port, community, [1, 3, 6, 1, 2, 1, 2, 2, 1, 2], 4000),
+      snmpWalkSubtree(host, port, community, [1, 3, 6, 1, 2, 1, 2, 2, 1, 8], 4000)
+    ]);
+    const statusByIndex = new Map(statusList.map(item => [item.index, item.value === 1 ? 'up' : 'down']));
     const map = {};
-    ifList.forEach(i => { map[i.name] = i.status || 'unknown'; });
+    descrList.forEach(item => {
+      map[String(item.value)] = statusByIndex.get(item.index) || 'unknown';
+    });
     portStatusCache[key] = { timestamp: Date.now(), map };
     return map;
   } catch (_) { return {}; }
@@ -7878,19 +10197,12 @@ async function runTrafficMonitorScheduler() {
       const community = srcAsset.snmpCommunity || 'public';
       const port = parseInt(srcAsset.snmpPort || '161', 10);
       try {
-        const snmp = require('snmp-native');
-        const session = new snmp.Session({ host, community, port, timeouts: [2000] });
-        const inOid = [1, 3, 6, 1, 2, 1, 31, 1, 1, 1, 6];
-        const outOid = [1, 3, 6, 1, 2, 1, 31, 1, 1, 1, 10];
-        const results = await new Promise((resolve) => {
-          let values = {};
-          let pending = 2;
-          const checkDone = () => { pending--; if (pending <= 0) resolve(values); };
-          session.get({ oid: [...inOid, 1] }, (err, vbs) => { if (!err && vbs.length) values.inOctets = vbs[0].value; checkDone(); });
-          session.get({ oid: [...outOid, 1] }, (err, vbs) => { if (!err && vbs.length) values.outOctets = vbs[0].value; checkDone(); });
-          setTimeout(() => checkDone(), 3000);
-        });
-        session.close();
+        const inVb = await snmpGetUdp(host, port, community, [1, 3, 6, 1, 2, 1, 31, 1, 1, 1, 6, 1], 2000);
+        const outVb = await snmpGetUdp(host, port, community, [1, 3, 6, 1, 2, 1, 31, 1, 1, 1, 10, 1], 2000);
+        const results = {
+          inOctets: inVb && Number.isFinite(Number(inVb.value)) ? Number(inVb.value) : undefined,
+          outOctets: outVb && Number.isFinite(Number(outVb.value)) ? Number(outVb.value) : undefined
+        };
         const key = rel.id;
         const prev = trafficMonitorState.lastCounters[key] || {};
         const nowTs = Date.now();

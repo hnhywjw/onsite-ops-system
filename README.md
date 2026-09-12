@@ -105,13 +105,38 @@ docker compose --env-file .env.production -f docker-compose.prod.yml up -d --bui
 
 ## 版本
 
-当前版本：`1.0.4`
+当前版本：`1.0.12`
 
 ### 软件包下载
 
-最新版本：**[v1.0.4 - 部署配置优化](https://github.com/hnhywjw/onsite-ops-system/releases/tag/v1.0.4)**
+最新版本：**[v1.0.12](https://github.com/hnhywjw/onsite-ops-system/releases/tag/v1.0.12)**
 
-下载 `onsite-ops-system-v1.0.4-production.tar.gz` 后解压即可部署，SHA256 校验文件随 Release 一同提供。
+- 完整安装包 `onsite-ops-system-v1.0.12-production.tar.gz`
+- 离线升级包 `onsite-ops-upgrade-v1.0.12.tar.gz`
+- SHA256 校验文件
+- 部署说明见仓库 `PRODUCTION_DEPLOY.md`
+
+### v1.0.12 更新说明
+
+权限与脱敏：
+- 新用户审批默认只读 `viewer`，需要工程师权限时再编辑人员
+- 客户角色隐藏监测地址、安装位置、日志列表、报表汇总/下钻、通知中的地址
+- 巡检 HTML 报告对客户隐藏地址；非管理员用户列表去掉账号与微信
+- 结果筛选项统一为正常/关注/异常/严重
+
+安全加固：
+- 备件名、巡检对象名、告警标题等动态 HTML 统一转义
+- 资料附件下载限制在上传目录内
+- 配置备份 SSH 使用 `StrictHostKeyChecking=yes` 与隔离的 `known_hosts`
+- 资产 Ping 存活检测改为 `execFile`
+- 密码策略文案与注册/创建人员安全问题对齐
+
+能力补齐：
+- 工作汇报第二阶段：待审核定位、审批流与客户已提交记录可见
+- 巡检结果分页；管理汇总仅管理员
+- SNMP 存活用 GET `sysUpTime`，优先 `snmp-native`
+- 验证码改为 5x7 点阵 SVG；SheetJS 改为本地 `public/vendor`
+- 系统治理升级状态轮询；巡检报告支持导出 PPT
 
 ### v1.0.4 更新说明
 

@@ -528,8 +528,8 @@
       background: #f5f7fa;
       border: 1px solid #e5e7eb;
       border-radius: 8px;
-      padding: 0 14px;
-      height: 46px;
+      height: 56px;
+      padding: 0 16px;
       margin-bottom: 12px;
       transition: border-color .2s, box-shadow .2s;
     }
@@ -548,7 +548,9 @@
       border: none;
       background: transparent;
       outline: none;
-      font-size: 14px;
+      font-size: 16px;
+      line-height: 24px;
+      min-height: 24px;
       color: var(--text);
       padding: 0;
     }
@@ -566,12 +568,29 @@
       align-items: center;
       margin-bottom: 12px;
     }
-    #captchaImg {
-      height: 46px;
-      width: 106px;
+    #captchaImg,
+    #ldapCaptchaImg {
+      height: 38px;
+      width: 90px;
       border-radius: 8px;
       cursor: pointer;
       flex-shrink: 0;
+      border: 1px solid #d1d5db;
+      background: #f8fafc;
+      color: #1e3a8a;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      font: 700 20px/1 monospace;
+      letter-spacing: 4px;
+      user-select: none;
+    }
+    #captchaImg img,
+    #ldapCaptchaImg img {
+      width: 100%;
+      height: 100%;
+      object-fit: contain;
+      pointer-events: none;
     }
     .captcha-refresh {
       flex-shrink: 0;
@@ -641,8 +660,8 @@
       background: #f8faff;
     }
     #loginForm button.primary {
-      height: 46px;
-      font-size: 15px;
+      height: 52px;
+      font-size: 16px;
       border-radius: 8px;
       font-weight: 600;
     }
@@ -824,7 +843,7 @@
     .topo-node-icon { width:32px;height:32px;margin:0 auto 4px;display:block;flex-shrink:0; }
     .topo-cmenu-item:hover { background:#f0f5ff; }
   </style>
-  <script src="https://cdn.sheetjs.com/xlsx-0.20.3/package/dist/xlsx.full.min.js"></script>
+  <script src="/vendor/xlsx.full.min.js"></script>
 </head>
 <body>
   <section id="loginView" class="login-wrap">
@@ -907,7 +926,7 @@
             <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="3" width="18" height="18" rx="2"/><path d="M3 9h18M9 3v18"/></svg>
             <input name="captcha" id="loginCaptchaInput" placeholder="验证码" maxlength="4" autocomplete="off" style="text-transform:uppercase; letter-spacing:4px; text-align:center; font-size:13px;" />
           </div>
-          <img id="captchaImg" src="" alt="验证码" title="点击刷新" style="height:38px; width:90px;" />
+          <div id="captchaImg" role="img" aria-label="验证码" title="点击刷新">加载中</div>
           <label class="checkbox-label" style="margin-left:auto;">
             <input type="checkbox" id="rememberUsername" /> 记住用户名
           </label>
@@ -933,6 +952,47 @@
         </div>
   </section>
 
+  <script>
+    (async () => {
+      const loginCaptcha = document.getElementById('captchaImg');
+      const ldapCaptcha = document.getElementById('ldapCaptchaImg');
+      const paintCaptcha = (el, svg) => {
+        if (!el) return;
+        el.textContent = '';
+        if (!svg) {
+          el.textContent = '刷新失败';
+          return;
+        }
+        const img = document.createElement('img');
+        img.alt = '验证码';
+        img.src = svg;
+        el.appendChild(img);
+      };
+      if (loginCaptcha) loginCaptcha.textContent = '加载中';
+      if (ldapCaptcha) ldapCaptcha.textContent = '加载中';
+      try {
+        const response = await fetch('/api/captcha', { credentials: 'include' });
+        const result = await response.json();
+        paintCaptcha(loginCaptcha, result.svg);
+        paintCaptcha(ldapCaptcha, result.svg);
+        window.__captchaToken = result.token || '';
+        window.__ldapCaptchaToken = result.token || '';
+        window.__captchaCsrf = result.csrfToken || '';
+        window.__ldapCaptchaCsrf = result.csrfToken || '';
+        const appState = window.__appState || window.state;
+        if (appState) {
+          appState.captchaToken = result.token || '';
+          appState.ldapCaptchaToken = result.token || '';
+          appState.captchaCsrf = result.csrfToken || '';
+          appState.ldapCaptchaCsrf = result.csrfToken || '';
+        }
+      } catch (_) {
+        if (loginCaptcha) loginCaptcha.textContent = '刷新失败';
+        if (ldapCaptcha) ldapCaptcha.textContent = '刷新失败';
+      }
+    })();
+  </script>
+
   <div id="forgotPwdModal" class="modal-overlay hidden">
     <div class="modal-box">
       <h3>重置密码</h3>
@@ -948,7 +1008,7 @@
       <div id="forgotPwdStep2" class="hidden">
         <label id="forgotQuestionLabel"></label>
         <input id="forgotSecurityAnswer" placeholder="请输入答案" />
-        <label style="margin-top:12px;">新密码（至少6位，包含字母和数字）</label>
+        <label style="margin-top:12px;">新密码（至少8位，须包含字母、数字和特殊字符）</label>
         <input id="forgotNewPassword" type="password" placeholder="请输入新密码" />
         <div id="forgotPwdError2" class="modal-error"></div>
         <div class="btn-row">
@@ -964,8 +1024,8 @@
       <h3>注册账号</h3>
       <label>账号 <em style="color:#dc2626;font-style:normal;">*</em></label>
       <input id="regUsername" placeholder="请输入登录账号" required />
-      <label>密码（至少6位，包含字母和数字）<em style="color:#dc2626;font-style:normal;"> *</em></label>
-      <input id="regPassword" type="password" placeholder="至少6位，包含字母和数字" required />
+      <label>密码（至少8位，须包含字母、数字和特殊字符）<em style="color:#dc2626;font-style:normal;"> *</em></label>
+      <input id="regPassword" type="password" placeholder="至少8位，须包含字母、数字和特殊字符" required />
       <label>显示名称 <em style="color:#dc2626;font-style:normal;">*</em></label>
       <input id="regName" placeholder="请输入姓名" required />
       <label>电话 <em style="color:#dc2626;font-style:normal;">*</em></label>
@@ -995,7 +1055,7 @@
       <input id="ldapPassword" type="password" placeholder="请输入 LDAP 密码" />
       <div class="captcha-row" style="justify-content:flex-start; margin:8px 0;">
         <input id="ldapCaptchaInput" placeholder="验证码" maxlength="4" autocomplete="off" style="text-transform:uppercase; letter-spacing:4px; text-align:center; font-size:13px;" />
-        <img id="ldapCaptchaImg" src="" alt="LDAP 验证码" title="点击刷新" style="height:38px; width:90px;" />
+        <div id="ldapCaptchaImg" role="img" aria-label="LDAP 验证码" title="点击刷新">加载中</div>
       </div>
       <div id="ldapError" class="modal-error"></div>
       <div class="btn-row">
@@ -1191,28 +1251,18 @@
         <label>派单人<select id="edLogDispatcher"></select></label>
         <label>
           工单类型
-          <select id="edLogTicketType">
-            <option value="">请选择</option>
-            <option value="物理环境">物理环境</option>
-            <option value="设备变更">设备变更</option>
-            <option value="配置变更">配置变更</option>
-            <option value="网络安全告警">网络安全告警</option>
-            <option value="网络安全事件">网络安全事件</option>
-            <option value="故障排查">故障排查</option>
-            <option value="软硬件维护">软硬件维护</option>
-            <option value="桌面终端及周边">桌面终端及周边</option>
-            <option value="资料管理">资料管理</option>
-            <option value="事务工作">事务工作</option>
-            <option value="外围工作">外围工作</option>
-          </select>
+          <select id="edLogTicketType"></select>
         </label>
         <label>接单人<select id="edLogAssignee"></select></label>
         <label>
           关联项目
           <select id="edLogProjectId"></select>
         </label>
+        <label>关联资产<select id="edLogAssetId"></select></label>
         <label class="full">工单位置<input id="edLogRelatedTarget" /></label>
         <label class="full">工单内容<textarea id="edLogEvent" required></textarea></label>
+        <label>处理结果<select id="edLogResult"></select></label>
+        <div class="full muted" id="edLogTemplateHint" style="margin-top:-6px;"></div>
         <label class="full">处理过程<textarea id="edLogProcess" required></textarea></label>
         <label class="full">结论<textarea id="edLogConclusion" required></textarea></label>
         <label>工单用时（小时）<input id="edLogDurationHours" type="number" min="0" step="0.5" required /></label>
@@ -1617,7 +1667,7 @@
         <button data-tab="projects" data-admin-only="true"><span class="nav-icon"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M3 7h18"></path><path d="M6 4h12l2 3v13H4V7z"></path></svg></span><span class="nav-label">项目管理</span></button>
         <button data-tab="users" data-admin-only="true"><span class="nav-icon"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M16 21v-2a4 4 0 0 0-4-4H7a4 4 0 0 0-4 4v2"></path><circle cx="9.5" cy="7" r="3"></circle><path d="M20 21v-2a4 4 0 0 0-3-3.87"></path><path d="M16 4.13a3 3 0 0 1 0 5.74"></path></svg></span><span class="nav-label">人员管理</span></button>
         <button data-tab="assets"><span class="nav-icon"><svg viewBox="0 0 24 24" aria-hidden="true"><rect x="3" y="4" width="18" height="14" rx="2"></rect><path d="M8 20h8"></path><path d="M12 18v2"></path></svg></span><span class="nav-label">资产管理</span></button>
-        <button data-tab="logs"><span class="nav-icon"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M8 6h13"></path><path d="M8 12h13"></path><path d="M8 18h13"></path><path d="M3 6h.01"></path><path d="M3 12h.01"></path><path d="M3 18h.01"></path></svg></span><span class="nav-label">运维日志</span></button>
+        <button data-tab="logs" data-customer-hidden="true"><span class="nav-icon"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M8 6h13"></path><path d="M8 12h13"></path><path d="M8 18h13"></path><path d="M3 6h.01"></path><path d="M3 12h.01"></path><path d="M3 18h.01"></path></svg></span><span class="nav-label">运维日志</span></button>
         <button data-tab="assetOps"><span class="nav-icon"><svg viewBox="0 0 24 24" aria-hidden="true"><rect x="3" y="4" width="18" height="6" rx="1"></rect><rect x="3" y="14" width="18" height="6" rx="1"></rect><path d="M7 7h.01"></path><path d="M7 17h.01"></path></svg></span><span class="nav-label">深化运维</span></button>
         <button data-tab="aiInspection"><span class="nav-icon"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 3l2.8 5.7 6.2.9-4.5 4.4 1.1 6.2L12 17.8 6.4 20.2l1.1-6.2L3 9.6l6.2-.9z"></path></svg></span><span class="nav-label">自动化巡检</span></button>
         <button data-tab="governance"><span class="nav-icon"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 3l7 4v5c0 5-3.5 8-7 9-3.5-1-7-4-7-9V7l7-4z"></path><path d="M9 12l2 2 4-4"></path></svg></span><span class="nav-label">审批管理</span></button>
@@ -1798,7 +1848,7 @@
             <form id="userForm" class="grid-form">
               <input name="id" type="hidden" />
               <label><span>账号 <em style="color:#dc2626;font-style:normal;">*</em></span><input name="username" required placeholder="请输入登录账号" /></label>
-              <label><span>密码 <em style="color:#dc2626;font-style:normal;">*</em></span><input name="password" type="password" required placeholder="至少6位，包含字母和数字" /></label>
+              <label><span>密码 <em style="color:#dc2626;font-style:normal;">*</em></span><input name="password" type="password" required placeholder="至少8位，须包含字母、数字和特殊字符" /></label>
               <label><span>姓名 <em style="color:#dc2626;font-style:normal;">*</em></span><input name="name" required placeholder="请输入姓名" /></label>
               <label>
                 <span>角色 <em style="color:#dc2626;font-style:normal;">*</em></span>
@@ -1813,6 +1863,8 @@
               <label><span>身份证号</span><input name="idCard" placeholder="18位身份证号" /></label>
               <label><span>邮箱</span><input name="email" type="email" /></label>
               <label><span>微信</span><input name="wechat" /></label>
+              <label><span>安全问题</span><input name="securityQuestion" placeholder="例如：您母亲的名字是？" /></label>
+              <label><span>安全问题答案</span><input name="securityAnswer" type="password" placeholder="创建人员时建议填写，用于密码找回" /></label>
               <label>
                 <span>关联项目 <em style="color:#dc2626;font-style:normal;">*</em></span>
                 <select name="projectId" id="userProjectId" required></select>
@@ -1873,21 +1925,7 @@
               <label><span>派单人</span><select name="dispatcher" id="logDispatcherSelect"></select></label>
               <label>
                 <span>工单类型</span>
-                <select name="ticketType">
-                  <option value="">请选择</option>
-                  <option value="物理环境">物理环境</option>
-                  <option value="设备变更">设备变更</option>
-                  <option value="配置变更">配置变更</option>
-                  <option value="网络安全告警">网络安全告警</option>
-                  <option value="网络安全事件">网络安全事件</option>
-                  <option value="故障排查">故障排查</option>
-                  <option value="软硬件维护">软硬件维护</option>
-                  <option value="桌面终端及周边">桌面终端及周边</option>
-                  <option value="资料管理">资料管理</option>
-                  <option value="事务工作">事务工作</option>
-                  <option value="外围工作">外围工作</option>
-                  <option value="视频会议">视频会议</option>
-                </select>
+                <select name="ticketType" id="logTicketType" required></select>
               </label>
               <label><span>接单人</span><select name="assignee" id="logAssigneeSelect"></select></label>
               <label>
@@ -1896,6 +1934,8 @@
               </label>
               <label><span>工单位置</span><input name="relatedTarget" placeholder="请输入工单位置" /></label>
               <label class="full"><span>工单内容</span><textarea name="event" required placeholder="请输入工单内容"></textarea></label>
+              <label><span>处理结果</span><select name="result" id="logResult" required></select></label>
+              <div class="full muted" id="logTemplateHint" style="margin-top:-6px;"></div>
               <label class="full"><span>处理过程</span><textarea name="process" required placeholder="请输入处理过程"></textarea></label>
               <label class="full"><span>结论</span><textarea name="conclusion" required placeholder="请输入结论"></textarea></label>
               <label><span>工单用时（小时）</span><input name="durationHours" type="number" min="0" step="0.5" required /></label>
@@ -2280,7 +2320,7 @@
           <button data-subtab="tasks" type="button">巡检任务</button>
           <button data-subtab="results" type="button">巡检结果</button>
           <button data-subtab="reports" type="button">巡检报告</button>
-          <button data-subtab="configBackup" type="button">配置备份</button>
+          <button data-subtab="configBackup" data-customer-hidden="true" type="button">配置备份</button>
         </div>
         <div class="subtab-panel" data-section="aiInspection" data-subtab="targets">
             <div class="card">
@@ -2399,7 +2439,7 @@
             <h3 style="margin-top:0;">巡检结果</h3>
             <div class="toolbar ai-result-filter-toolbar">
               <input type="text" id="aiResultSearch" placeholder="搜索总结或风险..." />
-              <select id="aiResultLevelFilter"><option value="">全部等级</option><option value="优秀">优秀</option><option value="良好">良好</option><option value="一般">一般</option><option value="较差">较差</option><option value="差">差</option></select>
+              <select id="aiResultLevelFilter"><option value="">全部等级</option><option value="正常">正常</option><option value="关注">关注</option><option value="异常">异常</option><option value="严重">严重</option></select>
             </div>
             <div id="aiInspectionResultMessage"></div>
             <div class="table-wrap"><table><thead><tr><th>对象</th><th>得分</th><th>等级</th><th>总结</th><th>风险</th><th>建议</th><th>异常项</th><th>时间</th><th>操作</th></tr></thead><tbody id="aiInspectionResultTable"></tbody></table></div>
@@ -2505,7 +2545,7 @@
         <div class="page-header">
           <div>
             <div class="title">审批管理</div>
-            <div class="subtitle">变更审批</div>
+            <div class="subtitle">变更审批与站内消息</div>
           </div>
         </div>
           <div class="card">
@@ -2518,20 +2558,186 @@
               <button class="secondary" id="approvalNextBtn" type="button">下一页</button>
             </div>
         </div>
+        <div class="card" style="margin-top:16px;">
+          <div class="toolbar" style="justify-content:space-between;align-items:center;">
+            <h3 style="margin:0;">站内消息</h3>
+            <div class="toolbar">
+              <button class="secondary" id="notificationMarkAllReadBtn" type="button">全部标记已读</button>
+              <button class="secondary" id="notificationClearReadBtn" type="button">清理已读</button>
+            </div>
+          </div>
+          <div id="notificationMessage"></div>
+          <div class="table-wrap"><table><thead><tr><th>标题</th><th>级别</th><th>项目</th><th>状态</th><th>时间</th><th>操作</th></tr></thead><tbody id="notificationTable"></tbody></table></div>
+          <div class="pagination-bar">
+            <button class="secondary" id="notificationPrevBtn" type="button">上一页</button>
+            <span id="notificationPageInfo">第 1 / 1 页</span>
+            <button class="secondary" id="notificationNextBtn" type="button">下一页</button>
+          </div>
+        </div>
       </section>
 
       <section class="tab-panel hidden" data-tab="reports">
         <div class="page-header">
           <div>
             <div class="title">报表管理</div>
-            <div class="subtitle">为个人生成周期统计和 PPTX 下载</div>
+            <div class="subtitle">管理汇总、工作量看板、工作汇报与报表导出</div>
           </div>
         </div>
+        <div class="section-tabs" data-section="reports">
+          <button class="active" data-subtab="overview" data-admin-only="true" type="button">管理汇总看板</button>
+          <button data-subtab="workload" data-customer-hidden="true" type="button">人员工作量看板</button>
+          <button data-subtab="workReports" type="button">工作汇报</button>
+          <button data-subtab="export" type="button">现有报表导出</button>
+        </div>
+        <div class="subtab-panel" data-section="reports" data-subtab="overview">
+        <div class="card hidden" id="workReportOverviewCard">
+          <div class="toolbar" style="justify-content:space-between;align-items:flex-start;gap:12px;flex-wrap:wrap;">
+            <div>
+              <h3 style="margin:0 0 4px;">管理汇总看板</h3>
+              <div class="muted">趋势、排行与待审核汇总</div>
+            </div>
+            <div class="toolbar report-actions">
+              <select id="workReportOverviewTrendUnit">
+                <option value="day">按日趋势</option>
+                <option value="week" selected>按周趋势</option>
+                <option value="month">按月趋势</option>
+              </select>
+              <button class="primary" id="refreshWorkReportOverviewBtn" type="button">刷新汇总</button>
+              <button class="secondary" id="exportWorkReportOverviewBtn" type="button">导出汇总 CSV</button>
+            </div>
+          </div>
+          <div id="workReportOverviewRangeHint" class="muted" style="margin:12px 0;"></div>
+          <div class="grid cols-4" id="workReportOverviewSummary" style="gap:12px;"></div>
+          <div class="grid cols-2" style="margin-top:16px;gap:16px;">
+            <div class="card" style="background:#f8fafc;border:1px solid #e2e8f0;">
+              <h4 style="margin-top:0;">趋势</h4>
+              <div class="table-wrap">
+                <table>
+                  <thead><tr><th>周期</th><th>汇报数</th><th>已提交</th><th>已确认</th><th>已锁定</th><th>工时</th><th>待审核</th></tr></thead>
+                  <tbody id="workReportOverviewTrendTable"></tbody>
+                </table>
+              </div>
+            </div>
+            <div class="card" style="background:#f8fafc;border:1px solid #e2e8f0;">
+              <h4 style="margin-top:0;">待审核汇总</h4>
+              <div id="workReportPendingSummary" class="muted"></div>
+              <div class="table-wrap" style="margin-top:12px;">
+                <table>
+                  <thead><tr><th>类型</th><th>人员</th><th>项目</th><th>周期</th><th>提交时间</th></tr></thead>
+                  <tbody id="workReportPendingTable"></tbody>
+                </table>
+              </div>
+            </div>
+          </div>
+          <div class="grid cols-2" style="margin-top:16px;gap:16px;">
+            <div class="card" style="background:#f8fafc;border:1px solid #e2e8f0;">
+              <h4 style="margin-top:0;">人员排行</h4>
+              <div class="table-wrap">
+                <table>
+                  <thead><tr><th>人员</th><th>汇报数</th><th>工时</th><th>日志数</th><th>待审核</th></tr></thead>
+                  <tbody id="workReportUserRankingTable"></tbody>
+                </table>
+              </div>
+            </div>
+            <div class="card" style="background:#f8fafc;border:1px solid #e2e8f0;">
+              <h4 style="margin-top:0;">项目排行</h4>
+              <div class="table-wrap">
+                <table>
+                  <thead><tr><th>项目</th><th>汇报数</th><th>工时</th><th>日志数</th><th>待审核</th></tr></thead>
+                  <tbody id="workReportProjectRankingTable"></tbody>
+                </table>
+              </div>
+            </div>
+          </div>
+        </div>
+        </div>
+        <div class="subtab-panel hidden" data-section="reports" data-subtab="workload">
         <div class="card">
+          <h3 style="margin-top:0;">人员工作量看板</h3>
+          <div class="toolbar report-actions" style="margin-bottom: 16px;">
+            <select id="workloadPeriod">
+              <option value="day">按日</option>
+              <option value="week">按周</option>
+              <option value="month" selected>按月</option>
+              <option value="custom">自定义</option>
+            </select>
+            <select id="workloadProjectId"></select>
+            <input id="workloadAnchorDate" type="date" />
+            <input id="workloadStartDate" type="date" class="hidden" />
+            <input id="workloadEndDate" type="date" class="hidden" />
+            <button class="primary" id="refreshWorkloadBtn" type="button">刷新看板</button>
+            <button class="secondary" id="exportWorkloadBtn" type="button">导出 CSV</button>
+          </div>
+          <div id="workloadRangeHint" class="muted" style="margin-bottom:12px;"></div>
+          <div class="grid cols-3" id="workloadSummary" style="gap:12px; margin-bottom:12px;"></div>
+          <div class="table-wrap">
+            <table>
+              <thead><tr><th>人员</th><th>项目</th><th>工作内容指标</th><th>工作量指标</th><th>工作成效指标</th><th>汇报提交</th></tr></thead>
+              <tbody id="workloadTable"></tbody>
+            </table>
+          </div>
+          <div class="pagination-bar">
+            <button class="secondary" id="workloadPrevBtn" type="button">上一页</button>
+            <span id="workloadPageInfo">第 1 / 1 页</span>
+            <button class="secondary" id="workloadNextBtn" type="button">下一页</button>
+          </div>
+        </div>
+        </div>
+        <div class="subtab-panel hidden" data-section="reports" data-subtab="workReports">
+        <div class="grid cols-2">
+          <div class="card" id="workReportEditorCard">
+            <h3 style="margin-top:0;">工作汇报录入</h3>
+            <input id="workReportId" type="hidden" />
+            <label><span>汇报类型</span><select id="workReportType"><option value="daily">日报</option><option value="weekly">周报</option><option value="monthly">月报</option></select></label>
+            <label><span>关联项目</span><select id="workReportProjectId"></select></label>
+            <label><span>周期锚点日期</span><input id="workReportAnchorDate" type="date" /></label>
+            <label><span>工作总结</span><textarea id="workReportSummary" rows="3"></textarea></label>
+            <label><span>已完成事项</span><textarea id="workReportCompletedWork" rows="3"></textarea></label>
+            <label><span>未完成事项</span><textarea id="workReportPendingWork" rows="3"></textarea></label>
+            <label><span>风险阻塞</span><textarea id="workReportRisks" rows="3"></textarea></label>
+            <label><span>下一步计划</span><textarea id="workReportNextPlan" rows="3"></textarea></label>
+            <div class="toolbar" style="margin-top:16px;">
+              <button class="primary" id="saveWorkReportBtn" type="button">保存草稿</button>
+              <button class="secondary" id="submitWorkReportBtn" type="button">提交汇报</button>
+              <button class="secondary" id="resetWorkReportBtn" type="button">清空</button>
+            </div>
+            <div id="workReportEditorMessage"></div>
+          </div>
+          <div class="card">
+            <h3 style="margin-top:0;">工作汇报列表</h3>
+            <div class="toolbar report-actions" style="margin-bottom:16px;">
+              <select id="workReportFilterType"><option value="">全部类型</option><option value="daily">日报</option><option value="weekly">周报</option><option value="monthly">月报</option></select>
+              <select id="workReportFilterStatus"><option value="">全部状态</option><option value="draft">草稿</option><option value="submitted">已提交</option><option value="returned">已退回</option><option value="approved">已确认</option><option value="locked">已锁定</option></select>
+              <select id="workReportFilterProject"><option value="">全部项目</option></select>
+              <select id="workReportFilterUser"><option value="">全部人员</option></select>
+              <button class="secondary" id="refreshWorkReportListBtn" type="button">刷新列表</button>
+              <button class="secondary" id="exportWorkReportListBtn" type="button">导出列表 CSV</button>
+            </div>
+            <div class="table-wrap">
+              <table>
+                <thead><tr><th>周期</th><th>类型</th><th>人员</th><th>项目</th><th>日志/工时</th><th>状态</th><th>审核</th><th>操作</th></tr></thead>
+                <tbody id="workReportTable"></tbody>
+              </table>
+            </div>
+            <div class="pagination-bar">
+              <button class="secondary" id="workReportListPrevBtn" type="button">上一页</button>
+              <span id="workReportListPageInfo">第 1 / 1 页</span>
+              <button class="secondary" id="workReportListNextBtn" type="button">下一页</button>
+            </div>
+          </div>
+        </div>
+        <div class="card" style="margin-top:16px;">
+          <h3 style="margin-top:0;">汇报详情</h3>
+          <div id="workReportDetail" class="muted">请选择一条工作汇报查看详情</div>
+        </div>
+        </div>
+        <div class="subtab-panel hidden" data-section="reports" data-subtab="export">
+        <div class="card">
+          <h3 style="margin-top:0;">现有报表导出</h3>
           <div class="toolbar report-actions" style="margin-bottom: 16px;">
             <select id="reportDimension">
-              <option value="user" selected>按人员</option>
-              <option value="project">按项目</option>
+              <option value="user" selected>运维综合-按人员</option>
+              <option value="project">运维综合-按项目</option>
               <option value="inspection">巡检执行</option>
             </select>
             <select id="reportPeriod">
@@ -2543,7 +2749,7 @@
           </div>
           <div class="table-wrap">
             <table>
-              <thead><tr><th id="reportDimensionHeader">人员</th><th id="reportRelatedHeader">项目</th><th id="reportMetric1Header">日志数</th><th id="reportMetric2Header">工时</th><th id="reportMetric3Header">资产数</th><th id="reportMetric4Header">知识数</th><th id="reportActionHeader">操作</th></tr></thead>
+              <thead><tr><th id="reportDimensionHeader">人员</th><th id="reportRelatedHeader">项目</th><th id="reportMetric1Header">项目现状</th><th id="reportMetric2Header">周期产出</th><th id="reportMetric3Header">周期工时</th><th id="reportMetric4Header">知识沉淀</th><th id="reportActionHeader">操作</th></tr></thead>
               <tbody id="reportTable"></tbody>
             </table>
             <div class="pagination-bar">
@@ -2552,6 +2758,7 @@
               <button class="secondary" id="reportNextBtn" type="button">下一页</button>
             </div>
           </div>
+        </div>
         </div>
       </section>
 
@@ -2564,10 +2771,10 @@
         </div>
         <div class="section-tabs" data-section="system">
           <button class="active" data-subtab="serviceStatus" type="button">系统及服务状态</button>
+          <button data-subtab="workReportReminder" type="button">工作汇报提醒阈值</button>
           <button data-subtab="upgrade" type="button">系统升级与数据备份</button>
           <button data-subtab="databaseInit" type="button">初始化数据库</button>
           <button data-subtab="auditLog" type="button">操作日志</button>
-          <button data-subtab="notification" type="button">站内消息</button>
         </div>
         <div class="subtab-panel hidden system-compact" data-section="system" data-subtab="upgrade">
           <div class="grid system-upgrade-grid">
@@ -2748,6 +2955,46 @@
             </div>
           </div>
         </div>
+        <div class="subtab-panel hidden system-compact" data-section="system" data-subtab="workReportReminder">
+          <div class="card">
+            <h3 style="margin:0 0 16px;">工作汇报提醒阈值</h3>
+            <div class="muted">推荐默认值：日报提醒 12 点，周报提前 7 天，月报提前 15 天，低工时 1 小时，高工时 12 小时，连续无记录 3 天，项目无人填报 7 天。</div>
+            <div class="grid cols-3" style="gap: 12px; margin-top: 8px; max-width: 720px;">
+              <label>
+                <span>日报提醒时间（时）</span>
+                <input id="dailyReportReminderHour" type="number" min="0" max="23" step="1" />
+              </label>
+              <label>
+                <span>周报提前提醒（天）</span>
+                <input id="weeklyReportReminderDays" type="number" min="0" max="30" step="1" />
+              </label>
+              <label>
+                <span>月报提前提醒（天）</span>
+                <input id="monthlyReportReminderDays" type="number" min="0" max="31" step="1" />
+              </label>
+              <label>
+                <span>低工时阈值（小时）</span>
+                <input id="dailyLowHoursThreshold" type="number" min="0" max="24" step="0.5" />
+              </label>
+              <label>
+                <span>高工时阈值（小时）</span>
+                <input id="dailyHighHoursThreshold" type="number" min="0" max="24" step="0.5" />
+              </label>
+              <label>
+                <span>连续无记录天数</span>
+                <input id="noLogStreakDays" type="number" min="1" max="30" step="1" />
+              </label>
+              <label>
+                <span>项目无人填报天数</span>
+                <input id="projectInactiveDays" type="number" min="1" max="90" step="1" />
+              </label>
+            </div>
+            <div class="system-actions" style="margin-top: 16px;">
+              <button class="primary" id="saveWorkReportReminderBtn" type="button">保存提醒阈值</button>
+            </div>
+            <div id="workReportReminderMessage"></div>
+          </div>
+        </div>
         <div class="subtab-panel hidden" data-section="system" data-subtab="auditLog">
         <div class="card">
           <h3 style="margin-top:0;">操作日志</h3>
@@ -2778,17 +3025,6 @@
           </div>
           </div>
         </div>
-        <div class="subtab-panel hidden" data-section="system" data-subtab="notification">
-          <div class="card">
-            <h3 style="margin-top:0;">站内消息</h3>
-            <div class="table-wrap"><table><thead><tr><th>标题</th><th>级别</th><th>项目</th><th>时间</th></tr></thead><tbody id="notificationTable"></tbody></table></div>
-            <div class="pagination-bar">
-              <button class="secondary" id="notificationPrevBtn" type="button">上一页</button>
-              <span id="notificationPageInfo">第 1 / 1 页</span>
-              <button class="secondary" id="notificationNextBtn" type="button">下一页</button>
-            </div>
-          </div>
-        </div>
       </section>
     </main>
   </section>
@@ -2798,8 +3034,8 @@
       <h3>修改密码</h3>
       <form id="changePwdForm">
         <label>当前密码<input name="oldPassword" type="password" required /></label>
-        <label>新密码<input name="newPassword" type="password" required minlength="6" /></label>
-        <label>确认新密码<input name="confirmPassword" type="password" required minlength="6" /></label>
+        <label>新密码<input name="newPassword" type="password" required minlength="8" /></label>
+        <label>确认新密码<input name="confirmPassword" type="password" required minlength="8" /></label>
         <div id="changePwdMessage" class="message"></div>
         <div class="modal-actions">
           <button type="button" id="changePwdCancelBtn" class="secondary">取消</button>
@@ -2822,6 +3058,7 @@
       logs: [],
       kb: [],
       documents: [],
+      workReports: [],
 
       inspectionPlans: [],
       inspectionExecutions: [],
@@ -2847,6 +3084,13 @@
         httpsLoginEnabled: false,
         httpLoginDisabled: false,
         httpsPort: 3443,
+        dailyReportReminderHour: 12,
+        weeklyReportReminderDays: 7,
+        monthlyReportReminderDays: 15,
+        dailyLowHoursThreshold: 1,
+        dailyHighHoursThreshold: 12,
+        noLogStreakDays: 3,
+        projectInactiveDays: 7,
         httpsCertFilename: '',
         httpsKeyFilename: '',
         httpsCertUploadedAt: '',
@@ -2877,11 +3121,21 @@
       dashboardPage: 1,
       dashboardSummary: [],
       dashboardChartMetrics: [],
+      logDictionaries: {
+        ticketTypes: [],
+        results: []
+      },
       notificationPage: 1,
+      notificationTotal: 0,
+      notificationUnread: 0,
+      notificationTotalPages: 1,
       sparePartPage: 1,
       approvalPage: 1,
       reportPage: 1,
       reportTotalPages: 1,
+      workloadRows: [],
+      workloadPage: 1,
+      workReportListPage: 1,
       inspectionPlanPage: 1,
       sparePartMovementPage: 1,
       incidentPage: 1,
@@ -2889,14 +3143,20 @@
       aiInspectionTemplatePage: 1,
       aiInspectionTaskPage: 1,
       aiInspectionResultPage: 1,
+      aiInspectionResultTotal: 0,
+      aiInspectionResultTotalPages: 1,
       aiInspectionReportPage: 1,
+      aiInspectionReportRows: [],
+      aiInspectionReportTotal: 0,
+      aiInspectionReportTotalPages: 1,
       configBackupPlanPage: 1,
       configBackupRecordPage: 1,
       currentTab: 'dashboard',
       currentSubtab: null,
       expandedLogId: '',
       expandedUserId: '',
-      expandedKbId: ''
+      expandedKbId: '',
+      selectedWorkReportId: ''
     };
 
     const els = {
@@ -2909,6 +3169,16 @@
       navTabs: document.getElementById('navTabs'),
       logoutBtn: document.getElementById('logoutBtn')
     };
+    window.__appState = state;
+    window.state = state;
+
+    function getSessionTokenFallback() {
+      return localStorage.getItem('sessionTokenFallback') || '';
+    }
+
+    function setSessionTokenFallback(token) {
+      localStorage.removeItem('sessionTokenFallback');
+    }
 
     async function api(path, options = {}) {
       const method = String(options.method || 'GET').toUpperCase();
@@ -2920,7 +3190,8 @@
       const response = await fetch(path, {
         credentials: 'include',
         ...options,
-        headers: { ...headers, ...(options.headers || {}) }
+        headers: { ...headers, ...(options.headers || {}) },
+        signal: options.signal || (typeof AbortSignal !== 'undefined' && typeof AbortSignal.timeout === 'function' ? AbortSignal.timeout(60000) : undefined)
       });
       const isJson = response.headers.get('content-type')?.includes('application/json');
       let data;
@@ -2933,7 +3204,7 @@
       } else {
         data = await response.text();
       }
-      if (data && typeof data === 'object' && data.csrfToken) state.csrfToken = data.csrfToken;
+      if (data && typeof data === 'object' && data.csrfToken && !String(path || '').startsWith('/api/captcha')) state.csrfToken = data.csrfToken;
       if (!response.ok) {
         const errorMessage = data.message || '请求失败';
         if (!silent) showGlobalError(errorMessage);
@@ -2942,10 +3213,40 @@
       return data;
     }
 
+    function buildAuthenticatedUrl(url) {
+      const target = new URL(url, window.location.origin);
+      return target.toString();
+    }
+
     function esc(text) {
-      const div = document.createElement('div');
-      div.appendChild(document.createTextNode(String(text ?? '')));
-      return div.innerHTML;
+      return String(text ?? '')
+        .replace(/&/g, '&amp;')
+        .replace(/</g, '&lt;')
+        .replace(/>/g, '&gt;')
+        .replace(/"/g, '&quot;')
+        .replace(/'/g, '&#39;');
+    }
+
+    function attrEsc(text) {
+      return String(text ?? '')
+        .replace(/&/g, '&amp;')
+        .replace(/"/g, '&quot;')
+        .replace(/'/g, '&#39;')
+        .replace(/</g, '&lt;')
+        .replace(/>/g, '&gt;');
+    }
+
+    function paintCaptcha(el, svg) {
+      if (!el) return;
+      el.textContent = '';
+      if (!svg) {
+        el.textContent = '刷新失败';
+        return;
+      }
+      const img = document.createElement('img');
+      img.alt = '验证码';
+      img.src = svg;
+      el.appendChild(img);
     }
 
     function fmt(text) {
@@ -2961,13 +3262,34 @@
       }
     }
 
-    function openReport(url) {
-      window.open(url, '_blank', 'noopener,noreferrer');
+    async function openReport(url) {
+      try {
+        const headers = {};
+        if (state.csrfToken) headers['X-CSRF-Token'] = state.csrfToken;
+        const response = await fetch(buildAuthenticatedUrl(url), {
+          method: 'POST',
+          credentials: 'include',
+          headers
+        });
+        if (!response.ok) throw new Error('打开报表失败');
+        const blob = await response.blob();
+        const blobUrl = URL.createObjectURL(blob);
+        window.open(blobUrl, '_blank', 'noopener,noreferrer');
+      } catch (error) {
+        window.alert(error.message);
+      }
     }
 
-    async function downloadReport(url, filename) {
+    async function downloadReport(url, filename, options = {}) {
       try {
-        const response = await fetch(url, { credentials: 'include' });
+        const method = String(options.method || 'POST').toUpperCase();
+        const headers = {};
+        if (method !== 'GET' && method !== 'HEAD' && state.csrfToken) headers['X-CSRF-Token'] = state.csrfToken;
+        const response = await fetch(buildAuthenticatedUrl(url), {
+          method,
+          credentials: 'include',
+          headers
+        });
         if (!response.ok) throw new Error('下载失败');
         const blob = await response.blob();
         const downloadUrl = URL.createObjectURL(blob);
@@ -3023,9 +3345,13 @@
         const wrapper = document.createElement('div');
         wrapper.className = 'message ' + type;
         const prefix = document.createTextNode('备份创建成功: ');
-        const link = document.createElement('a');
-        link.href = href;
+        const link = document.createElement('button');
+        link.type = 'button';
+        link.className = 'secondary';
         link.textContent = filename;
+        link.addEventListener('click', () => {
+          downloadReport(href, filename, { method: 'POST' });
+        });
         wrapper.appendChild(prefix);
         wrapper.appendChild(link);
         box.appendChild(wrapper);
@@ -3059,7 +3385,10 @@
       } else {
         const existing = state.activeAlerts.find(a => a.assetId === msg.assetId);
         if (existing) { existing.time = now; existing.count = (existing.count || 1) + 1; }
-        else state.activeAlerts.unshift({ assetId: msg.assetId, assetName: msg.assetName, host: msg.host, time: now, count: 1 });
+        else {
+          const asset = (state.assets || []).find(item => item.id === msg.assetId);
+          state.activeAlerts.unshift({ assetId: msg.assetId, assetName: msg.assetName, host: msg.host || asset?.monitorHost || '', time: now, count: 1 });
+        }
         toggleAlertPopup(true);
       }
       updateAlertBadge();
@@ -3109,7 +3438,7 @@
             <div class="alert-item-host">${esc(a.host || '')}</div>
             <div class="alert-item-time">${a.time}${a.count > 1 ? ' · 共' + a.count + '次告警' : ''}</div>
           </div>
-          <button class="alert-item-dismiss" onclick="event.stopPropagation();dismissAlert('${a.assetId}')">确认</button>
+          <button class="alert-item-dismiss" onclick="event.stopPropagation();dismissAlert('${attrEsc(a.assetId)}')">确认</button>
         </div>
       `).join('') || '<div style="padding:16px;text-align:center;color:#9ca3af;font-size:13px;">暂无告警</div>';
     }
@@ -3275,6 +3604,7 @@
     async function performAutoLogout() {
       stopSystemLoadAutoRefresh();
       stopIdleLogoutTracking();
+      setSessionTokenFallback('');
       try {
         await api('/api/logout', { method: 'POST', body: '{}' });
       } catch (error) {
@@ -3322,21 +3652,60 @@
       return `${project.projectStartDate || '-'} ~ ${project.projectEndDate || '-'}`;
     }
 
+    function parseDateOnly(dateString) {
+      const match = String(dateString || '').trim().match(/^(\d{4})-(\d{2})-(\d{2})/);
+      if (!match) return null;
+      const year = Number(match[1]);
+      const month = Number(match[2]);
+      const day = Number(match[3]);
+      const date = new Date(Date.UTC(year, month - 1, day));
+      if (date.getUTCFullYear() !== year || date.getUTCMonth() !== month - 1 || date.getUTCDate() !== day) return null;
+      return date;
+    }
+
+    function formatUtcDateKey(date) {
+      return `${date.getUTCFullYear()}-${String(date.getUTCMonth() + 1).padStart(2, '0')}-${String(date.getUTCDate()).padStart(2, '0')}`;
+    }
+
+    function formatLocalDateKey(date) {
+      const minutes = Number(state.systemConfig?.timezoneOffset);
+      const offsetMinutes = Number.isFinite(minutes) ? minutes : 480;
+      return new Date(date.getTime() + offsetMinutes * 60000).toISOString().slice(0, 10);
+    }
+
+    function addUtcDays(date, days) {
+      const next = new Date(date.getTime());
+      next.setUTCDate(next.getUTCDate() + days);
+      return next;
+    }
+
+    function startOfUtcWeek(date) {
+      const monday = new Date(Date.UTC(date.getUTCFullYear(), date.getUTCMonth(), date.getUTCDate()));
+      const day = monday.getUTCDay() || 7;
+      monday.setUTCDate(monday.getUTCDate() - day + 1);
+      return monday;
+    }
+
+    function daysUntilDateKey(dateKey) {
+      const target = parseDateOnly(dateKey);
+      const today = parseDateOnly(formatLocalDateKey(new Date()));
+      if (!target || !today) return null;
+      return Math.round((target.getTime() - today.getTime()) / 86400000);
+    }
+
     function getPeriodKey(dateString, period) {
-      const normalized = String(dateString || '').slice(0, 10);
-      const d = new Date(`${normalized}T00:00:00`);
-      if (Number.isNaN(d.getTime())) return '';
-      if (period === 'year') return `${d.getFullYear()}`;
-      if (period === 'month') return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}`;
-      const temp = new Date(d);
-      const day = temp.getDay() || 7;
-      temp.setHours(0, 0, 0, 0);
-      temp.setDate(temp.getDate() - day + 1);
-      return `${temp.getFullYear()}-W${String(Math.ceil((((temp - new Date(temp.getFullYear(), 0, 1)) / 86400000) + 1) / 7)).padStart(2, '0')}`;
+      const d = parseDateOnly(dateString);
+      if (!d) return '';
+      if (period === 'year') return `${d.getUTCFullYear()}`;
+      if (period === 'month') return `${d.getUTCFullYear()}-${String(d.getUTCMonth() + 1).padStart(2, '0')}`;
+      const monday = startOfUtcWeek(d);
+      const yearStart = Date.UTC(monday.getUTCFullYear(), 0, 1);
+      const weekNumber = Math.ceil((((monday.getTime() - yearStart) / 86400000) + 1) / 7);
+      return `${monday.getUTCFullYear()}-W${String(weekNumber).padStart(2, '0')}`;
     }
 
     function getCurrentPeriodKey(period) {
-      return getPeriodKey(new Date().toISOString().slice(0, 10), period);
+      return getPeriodKey(formatLocalDateKey(new Date()), period);
     }
 
     function getLogsByPeriod(period) {
@@ -3344,14 +3713,72 @@
       return state.logs.filter(item => getPeriodKey(item.date, period) === currentPeriod);
     }
 
+    function getCurrentDateRange(period) {
+      const today = new Date();
+      const todayKey = formatLocalDateKey(today);
+      const todayUtc = parseDateOnly(todayKey);
+      if (period === 'year') {
+        const year = todayUtc ? todayUtc.getUTCFullYear() : today.getFullYear();
+        return {
+          rangeStart: `${year}-01-01`,
+          rangeEnd: `${year}-12-31`
+        };
+      }
+      if (period === 'month') {
+        const year = todayUtc ? todayUtc.getUTCFullYear() : today.getFullYear();
+        const monthIndex = todayUtc ? todayUtc.getUTCMonth() : today.getMonth();
+        const month = String(monthIndex + 1).padStart(2, '0');
+        const lastDay = new Date(Date.UTC(year, monthIndex + 1, 0)).getUTCDate();
+        return {
+          rangeStart: `${year}-${month}-01`,
+          rangeEnd: `${year}-${month}-${String(lastDay).padStart(2, '0')}`
+        };
+      }
+      const monday = startOfUtcWeek(todayUtc || today);
+      const sunday = addUtcDays(monday, 6);
+      return {
+        rangeStart: formatUtcDateKey(monday),
+        rangeEnd: formatUtcDateKey(sunday)
+      };
+    }
+
+    function isDateInRange(dateString, rangeStart, rangeEnd) {
+      const value = String(dateString || '').slice(0, 10);
+      return Boolean(value) && value >= rangeStart && value <= rangeEnd;
+    }
+
+    function buildFrontEndMetrics({ userId = '', projectId = '', rangeStart, rangeEnd }) {
+      const logs = state.logs.filter(item => (!userId || item.userId === userId) && (!projectId || item.projectId === projectId) && isDateInRange(item.date, rangeStart, rangeEnd));
+      return {
+        logCount: logs.length,
+        totalHours: Number(logs.reduce((sum, item) => sum + Number(item.durationHours || 0), 0).toFixed(2)),
+        inspectionCount: state.inspectionExecutions.filter(item => (!userId || item.createdBy === userId) && (!projectId || item.projectId === projectId) && isDateInRange(item.executedAt, rangeStart, rangeEnd)).length,
+        incidentCount: state.incidents.filter(item => (!userId || item.createdBy === userId) && (!projectId || item.projectId === projectId) && isDateInRange(item.occurredAt || item.createdAt, rangeStart, rangeEnd)).length,
+        changeCount: state.changeRecords.filter(item => (!userId || item.createdBy === userId) && (!projectId || item.projectId === projectId) && isDateInRange(item.createdAt, rangeStart, rangeEnd)).length,
+        knowledgeCount: state.kb.filter(item => (!userId || item.createdBy === userId) && (!projectId || item.projectId === projectId) && isDateInRange(item.createdAt, rangeStart, rangeEnd)).length
+      };
+    }
+
+    function buildOperationalStateSummary(projectId) {
+      const assets = state.assets.filter(item => item.projectId === projectId).length;
+      const documents = state.documents.filter(item => item.projectId === projectId).length;
+      const spareParts = state.spareParts.filter(item => item.projectId === projectId);
+      const spareKinds = spareParts.length;
+      return `资产 ${assets} 项，资料 ${documents} 份，备件 ${spareKinds} 类`;
+    }
+
+    function buildOperationalOutputSummary(metrics) {
+      return `日志 ${metrics.logCount} 条，巡检 ${metrics.inspectionCount} 次，故障 ${metrics.incidentCount} 条，变更 ${metrics.changeCount} 条`;
+    }
+
     function getProjectExpiryInfo(project) {
       if (!project?.projectEndDate) {
         return { daysLeft: null, levelClass: 'expiry-green', label: '未设置结束日期' };
       }
-      const today = new Date();
-      today.setHours(0, 0, 0, 0);
-      const endDate = new Date(`${project.projectEndDate}T00:00:00`);
-      const daysLeft = Math.ceil((endDate - today) / (1000 * 60 * 60 * 24));
+      const daysLeft = daysUntilDateKey(project.projectEndDate);
+      if (daysLeft == null) {
+        return { daysLeft: null, levelClass: 'expiry-green', label: '未设置结束日期' };
+      }
       if (daysLeft <= 0) return { daysLeft, levelClass: 'expiry-darkred', label: `已到期 ${Math.abs(daysLeft)} 天` };
       if (daysLeft < 15) return { daysLeft, levelClass: 'expiry-darkred', label: `剩余 ${daysLeft} 天` };
       if (daysLeft < 30) return { daysLeft, levelClass: 'expiry-red', label: `剩余 ${daysLeft} 天` };
@@ -3362,20 +3789,20 @@
 
     function buildUserReportRows(period) {
       if (state.user.role === 'customer') return [];
-      const logs = getLogsByPeriod(period);
+      const range = getCurrentDateRange(period);
       const targetUsers = state.user.role === 'admin'
         ? state.users
         : state.users.filter(item => item.id === state.user.id);
       return targetUsers.map(user => {
-        const userLogs = logs.filter(item => item.userId === user.id);
+        const metrics = buildFrontEndMetrics({ userId: user.id, projectId: user.projectId, rangeStart: range.rangeStart, rangeEnd: range.rangeEnd });
         return {
           id: user.id,
           name: user.name,
           related: formatProjectDisplayById(user.projectId),
-          totalLogs: userLogs.length,
-          totalHours: Number(userLogs.reduce((sum, item) => sum + Number(item.durationHours || 0), 0).toFixed(2)),
-          assetCount: state.assets.filter(item => item.projectId === user.projectId).length,
-          kbCount: state.kb.filter(item => item.createdBy === user.id).length,
+          totalLogs: buildOperationalStateSummary(user.projectId),
+          totalHours: buildOperationalOutputSummary(metrics),
+          metric3: `${metrics.totalHours} 小时`,
+          metric4: `${metrics.knowledgeCount} 条`,
           href: `/api/reports/user/${user.id}/pptx?period=${period}`,
           htmlHref: `/api/reports/user/${user.id}/html?period=${period}`,
           actionLabel: '下载PPTX'
@@ -3384,18 +3811,18 @@
     }
 
     function buildProjectReportRows(period) {
-      const logs = getLogsByPeriod(period);
+      const range = getCurrentDateRange(period);
       const targetProjects = state.user.role === 'admin' ? state.projects : state.projects.filter(item => item.id === state.user.projectId);
       return targetProjects.map(project => {
-        const projectLogs = logs.filter(item => item.projectId === project.id);
+        const metrics = buildFrontEndMetrics({ projectId: project.id, rangeStart: range.rangeStart, rangeEnd: range.rangeEnd });
         return {
           id: project.id,
           name: formatProjectDisplay(project),
           related: formatProjectPeriod(project),
-          totalLogs: projectLogs.length,
-          totalHours: Number(projectLogs.reduce((sum, item) => sum + Number(item.durationHours || 0), 0).toFixed(2)),
-          assetCount: state.assets.filter(item => item.projectId === project.id).length,
-          kbCount: state.kb.filter(item => item.projectId === project.id).length,
+          totalLogs: buildOperationalStateSummary(project.id),
+          totalHours: buildOperationalOutputSummary(metrics),
+          metric3: `${metrics.totalHours} 小时`,
+          metric4: `${metrics.knowledgeCount} 条`,
           href: `/api/reports/project/${project.id}/pptx?period=${period}`,
           htmlHref: `/api/reports/project/${project.id}/html?period=${period}`,
           actionLabel: '下载PPTX'
@@ -3411,19 +3838,514 @@
         const abnormalCount = executions.filter(item => item.result === '异常').length;
         const normalCount = executions.filter(item => item.result === '正常').length;
         const planCount = new Set(executions.map(item => item.planId).filter(Boolean)).size;
+        const assetCount = new Set(executions.map(item => item.assetId).filter(Boolean)).size;
         return {
           id: project.id,
           name: formatProjectDisplay(project),
           related: formatProjectPeriod(project),
-          totalLogs: executions.length,
-          totalHours: abnormalCount,
-          assetCount: normalCount,
-          kbCount: planCount,
+          totalLogs: `覆盖 ${assetCount} 个对象`,
+          totalHours: `执行 ${executions.length} 次，正常 ${normalCount} 次`,
+          metric3: `异常 ${abnormalCount} 条`,
+          metric4: `覆盖 ${planCount} 个计划`,
           htmlHref: `/api/reports/inspection/project/${project.id}/html?period=${period}`,
           csvHref: `/api/reports/inspection/project/${project.id}/csv?period=${period}`,
           actionLabel: '查看HTML'
         };
       });
+    }
+
+    function toggleWorkloadCustomRange() {
+      const isCustom = document.getElementById('workloadPeriod')?.value === 'custom';
+      document.getElementById('workloadAnchorDate')?.classList.toggle('hidden', isCustom);
+      document.getElementById('workloadStartDate')?.classList.toggle('hidden', !isCustom);
+      document.getElementById('workloadEndDate')?.classList.toggle('hidden', !isCustom);
+    }
+
+    function fillWorkloadProjectSelect() {
+      const select = document.getElementById('workloadProjectId');
+      if (!select) return;
+      const projects = state.user?.role === 'admin' ? state.projects : state.projects.filter(item => item.id === state.user?.projectId);
+      const options = ['<option value="">全部项目</option>'].concat(projects.map(item => `<option value="${item.id}">${esc(formatProjectDisplay(item))}</option>`));
+      const currentValue = select.value;
+      select.innerHTML = options.join('');
+      if (currentValue && projects.some(item => item.id === currentValue)) select.value = currentValue;
+      if (state.user?.role !== 'admin' && state.user?.projectId) select.value = state.user.projectId;
+    }
+
+    function fillWorkReportProjectSelect() {
+      const select = document.getElementById('workReportProjectId');
+      if (!select) return;
+      const projects = state.user?.role === 'admin' ? state.projects : state.projects.filter(item => item.id === state.user?.projectId);
+      const currentValue = select.value;
+      select.innerHTML = projects.map(item => `<option value="${item.id}">${esc(formatProjectDisplay(item))}</option>`).join('');
+      if (currentValue && projects.some(item => item.id === currentValue)) select.value = currentValue;
+      if (!select.value && projects.length) select.value = projects[0].id;
+    }
+
+    function fillWorkReportFilterProjectSelect() {
+      const select = document.getElementById('workReportFilterProject');
+      if (!select) return;
+      const projects = state.user?.role === 'admin' ? state.projects : state.projects.filter(item => item.id === state.user?.projectId);
+      const currentValue = select.value;
+      select.innerHTML = ['<option value="">全部项目</option>']
+        .concat(projects.map(item => `<option value="${item.id}">${esc(formatProjectDisplay(item))}</option>`))
+        .join('');
+      if (currentValue && projects.some(item => item.id === currentValue)) {
+        select.value = currentValue;
+      } else if (state.user?.role !== 'admin' && state.user?.projectId) {
+        select.value = state.user.projectId;
+      }
+    }
+
+    function fillWorkReportFilterUserSelect() {
+      const select = document.getElementById('workReportFilterUser');
+      if (!select) return;
+      const projectId = document.getElementById('workReportFilterProject')?.value || '';
+      const currentValue = select.value;
+      const users = state.user?.role === 'admin'
+        ? state.users.filter(item => item.role !== 'customer' && (!projectId || item.projectId === projectId || item.role === 'admin'))
+        : state.users.filter(item => item.id === state.user?.id);
+      select.innerHTML = ['<option value="">全部人员</option>']
+        .concat(users.map(item => `<option value="${item.id}">${esc(item.name)}</option>`))
+        .join('');
+      if (currentValue && users.some(item => item.id === currentValue)) {
+        select.value = currentValue;
+      } else if (state.user?.role !== 'admin' && state.user?.id) {
+        select.value = state.user.id;
+      }
+    }
+
+    function canEditWorkReportContent(status) {
+      return status === 'draft' || status === 'returned' || !status;
+    }
+
+    function setWorkReportEditorLocked(locked) {
+      const fieldIds = [
+        'workReportType',
+        'workReportProjectId',
+        'workReportAnchorDate',
+        'workReportSummary',
+        'workReportCompletedWork',
+        'workReportPendingWork',
+        'workReportRisks',
+        'workReportNextPlan'
+      ];
+      fieldIds.forEach(id => {
+        const field = document.getElementById(id);
+        if (field) field.disabled = locked;
+      });
+      const saveBtn = document.getElementById('saveWorkReportBtn');
+      const submitBtn = document.getElementById('submitWorkReportBtn');
+      if (saveBtn) saveBtn.disabled = locked;
+      if (submitBtn) submitBtn.disabled = locked;
+    }
+
+    function resetWorkReportForm() {
+      document.getElementById('workReportId').value = '';
+      document.getElementById('workReportType').value = 'daily';
+      document.getElementById('workReportAnchorDate').value = formatLocalDateKey(new Date());
+      document.getElementById('workReportSummary').value = '';
+      document.getElementById('workReportCompletedWork').value = '';
+      document.getElementById('workReportPendingWork').value = '';
+      document.getElementById('workReportRisks').value = '';
+      document.getElementById('workReportNextPlan').value = '';
+      fillWorkReportProjectSelect();
+      document.getElementById('workReportEditorMessage').innerHTML = '';
+      setWorkReportEditorLocked(false);
+    }
+
+    function populateWorkReportForm(report) {
+      document.getElementById('workReportId').value = report.id || '';
+      document.getElementById('workReportType').value = report.reportType || 'daily';
+      document.getElementById('workReportProjectId').value = report.projectId || '';
+      document.getElementById('workReportAnchorDate').value = report.rangeStart || formatLocalDateKey(new Date());
+      document.getElementById('workReportSummary').value = report.summary || '';
+      document.getElementById('workReportCompletedWork').value = report.completedWork || '';
+      document.getElementById('workReportPendingWork').value = report.pendingWork || '';
+      document.getElementById('workReportRisks').value = report.risks || '';
+      document.getElementById('workReportNextPlan').value = report.nextPlan || '';
+      setWorkReportEditorLocked(!canEditWorkReportContent(report.status));
+    }
+
+    const workloadCategoryOrder = ['inspection', 'incident', 'change', 'document', 'task', 'support'];
+    const workloadCategoryLabels = {
+      inspection: '巡检类',
+      incident: '故障类',
+      change: '变更类',
+      document: '资料类',
+      task: '事务类',
+      support: '外围支撑类'
+    };
+
+    function formatWorkloadCategorySummary(values = {}, suffix = '') {
+      return workloadCategoryOrder.map(key => `${workloadCategoryLabels[key]}${Number(values?.[key] || 0)}${suffix}`).join(' ｜ ');
+    }
+
+    function buildWorkloadBoardSummary(rows = []) {
+      const totals = {
+        logCount: 0,
+        totalHours: 0,
+        inspectionCount: 0,
+        incidentCount: 0,
+        resolvedIncidentCount: 0,
+        changeCount: 0,
+        knowledgeCount: 0,
+        documentCount: 0,
+        categoryCounts: Object.fromEntries(workloadCategoryOrder.map(key => [key, 0])),
+        categoryHours: Object.fromEntries(workloadCategoryOrder.map(key => [key, 0]))
+      };
+      rows.forEach(item => {
+        totals.logCount += Number(item.logCount || 0);
+        totals.totalHours += Number(item.totalHours || 0);
+        totals.inspectionCount += Number(item.inspectionCount || 0);
+        totals.incidentCount += Number(item.incidentCount || 0);
+        totals.resolvedIncidentCount += Number(item.resolvedIncidentCount || 0);
+        totals.changeCount += Number(item.changeCount || 0);
+        totals.knowledgeCount += Number(item.knowledgeCount || 0);
+        totals.documentCount += Number(item.documentCount || 0);
+        workloadCategoryOrder.forEach(key => {
+          totals.categoryCounts[key] += Number(item.categoryCounts?.[key] || 0);
+          totals.categoryHours[key] += Number(item.categoryHours?.[key] || 0);
+        });
+      });
+      totals.totalHours = Number(totals.totalHours.toFixed(2));
+      workloadCategoryOrder.forEach(key => {
+        totals.categoryHours[key] = Number(totals.categoryHours[key].toFixed(2));
+      });
+      return totals;
+    }
+
+    function getWorkloadQuery() {
+      const period = document.getElementById('workloadPeriod').value;
+      const params = new URLSearchParams({ period });
+      const projectId = document.getElementById('workloadProjectId').value;
+      if (projectId) params.set('projectId', projectId);
+      if (period === 'custom') {
+        if (document.getElementById('workloadStartDate').value) params.set('startDate', document.getElementById('workloadStartDate').value);
+        if (document.getElementById('workloadEndDate').value) params.set('endDate', document.getElementById('workloadEndDate').value);
+      } else if (document.getElementById('workloadAnchorDate').value) {
+        params.set('anchorDate', document.getElementById('workloadAnchorDate').value);
+      }
+      return params;
+    }
+
+    function formatComparisonRate(metric) {
+      if (!metric) return '';
+      if (metric.changeRate === null) return '基期为 0';
+      return `${metric.changeRate >= 0 ? '+' : ''}${metric.changeRate}%`;
+    }
+
+    function formatComparisonChange(metric, suffix = '') {
+      if (!metric) return '';
+      return `${metric.change >= 0 ? '+' : ''}${metric.change}${suffix}`;
+    }
+
+    function buildComparisonNote(label, metric, suffix = '') {
+      if (!metric) return '';
+      return `较上周期${label}${formatComparisonChange(metric, suffix)} ｜ 环比${formatComparisonRate(metric)}`;
+    }
+
+    async function refreshWorkloadBoard() {
+      if (state.user?.role === 'customer') return;
+      const result = await api(`/api/reports/workload?${getWorkloadQuery().toString()}`);
+      state.workloadRows = result.data || [];
+      document.getElementById('workloadRangeHint').textContent = result.range ? `统计范围：${result.range.rangeStart} 至 ${result.range.rangeEnd}${result.previousRange ? ` ｜ 上周期：${result.previousRange.rangeStart} 至 ${result.previousRange.rangeEnd}` : ''}` : '';
+      const summary = result.summary || buildWorkloadBoardSummary(state.workloadRows);
+      const summaryComparison = result.summaryComparison || {};
+      document.getElementById('workloadSummary').innerHTML = [
+        {
+          label: '工作内容指标',
+          value: `总工单 ${summary.logCount}`,
+          detail: formatWorkloadCategorySummary(summary.categoryCounts, '项'),
+          compare: buildComparisonNote('工单', summaryComparison.logCount, '项')
+        },
+        {
+          label: '工作量指标',
+          value: `累计工时 ${summary.totalHours}h`,
+          detail: formatWorkloadCategorySummary(summary.categoryHours, 'h'),
+          compare: buildComparisonNote('工时', summaryComparison.totalHours, 'h')
+        },
+        {
+          label: '工作成效指标',
+          value: `巡检 ${summary.inspectionCount} ｜ 故障 ${summary.incidentCount} ｜ 已解决 ${summary.resolvedIncidentCount}`,
+          detail: `变更 ${summary.changeCount} ｜ 知识 ${summary.knowledgeCount} ｜ 资料 ${summary.documentCount}`,
+          compare: buildComparisonNote('已解决故障', summaryComparison.resolvedIncidentCount, '项')
+        }
+      ].map(item => `<div class="card"><div class="muted">${esc(item.label)}</div><div style="font-weight:700; margin:8px 0;">${esc(item.value)}</div><div class="muted">${esc(item.detail)}</div><div class="muted" style="margin-top:6px;">${esc(item.compare || '')}</div></div>`).join('');
+      state.workloadPage = 1;
+      renderWorkloadTable();
+    }
+
+    function renderWorkloadTable() {
+      const pageSize = 10;
+      const rows = Array.isArray(state.workloadRows) ? state.workloadRows : [];
+      const totalPages = Math.max(1, Math.ceil(rows.length / pageSize));
+      state.workloadPage = Math.min(Math.max(1, state.workloadPage || 1), totalPages);
+      const start = (state.workloadPage - 1) * pageSize;
+      const pageRows = rows.slice(start, start + pageSize);
+      document.getElementById('workloadTable').innerHTML = pageRows.map(item => `
+        <tr>
+          <td>${esc(item.userName)}</td>
+          <td>${esc(item.projectName)}</td>
+          <td>${esc(`总工单 ${item.logCount || 0}`)}<div class="muted">${esc(item.workContentSummary || '')}</div></td>
+          <td>${esc(`累计工时 ${item.totalHours || 0}h`)}<div class="muted">${esc(item.workloadHoursSummary || '')}</div></td>
+          <td>${esc(item.workEffectSummary || '')}</td>
+          <td>${esc(`日报 ${item.dailySubmittedCount || 0} ｜ 已提交 ${item.submittedWorkReportCount || 0}`)}</td>
+        </tr>
+      `).join('') || '<tr><td colspan="6">暂无数据</td></tr>';
+      document.getElementById('workloadPageInfo').textContent = `第 ${state.workloadPage} / ${totalPages} 页`;
+      document.getElementById('workloadPrevBtn').disabled = state.workloadPage <= 1;
+      document.getElementById('workloadNextBtn').disabled = state.workloadPage >= totalPages;
+    }
+
+    function getWorkReportQuery() {
+      const params = new URLSearchParams();
+      const type = document.getElementById('workReportFilterType')?.value || '';
+      const status = document.getElementById('workReportFilterStatus')?.value || '';
+      const projectId = document.getElementById('workReportFilterProject')?.value || '';
+      const userId = document.getElementById('workReportFilterUser')?.value || '';
+      if (type) params.set('reportType', type);
+      if (status) params.set('status', status);
+      if (projectId) params.set('projectId', projectId);
+      if (userId) params.set('userId', userId);
+      return params;
+    }
+
+    function getWorkReportOverviewQuery() {
+      const params = getWorkloadQuery();
+      const reportFilters = getWorkReportQuery();
+      reportFilters.forEach((value, key) => {
+        if (value) params.set(key, value);
+      });
+      params.set('trendUnit', document.getElementById('workReportOverviewTrendUnit')?.value || 'week');
+      return params;
+    }
+
+    async function refreshWorkReportList() {
+      const query = getWorkReportQuery().toString();
+      const result = await api(`/api/work-reports${query ? `?${query}` : ''}`);
+      state.workReports = result.data || [];
+      state.workReportListPage = 1;
+      renderWorkReportList();
+    }
+
+    async function refreshWorkReportOverview() {
+      const card = document.getElementById('workReportOverviewCard');
+      if (!card) return;
+      if (state.user?.role !== 'admin') {
+        card.classList.add('hidden');
+        return;
+      }
+      card.classList.remove('hidden');
+      const result = await api(`/api/reports/work-reports/overview?${getWorkReportOverviewQuery().toString()}`);
+      state.workReportOverview = result;
+      document.getElementById('workReportOverviewRangeHint').textContent = result.range ? `统计范围：${result.range.rangeStart} 至 ${result.range.rangeEnd}${result.previousRange ? ` ｜ 上周期：${result.previousRange.rangeStart} 至 ${result.previousRange.rangeEnd}` : ''}` : '';
+      document.getElementById('workReportOverviewSummary').innerHTML = [
+        { label: '汇报总数', value: result.totals?.reportCount || 0, compare: buildComparisonNote('汇报', result.totalsComparison?.reportCount, '条') },
+        { label: '累计工时', value: result.totals?.totalHours || 0, compare: buildComparisonNote('工时', result.totalsComparison?.totalHours, 'h') },
+        { label: '待审核', value: result.totals?.submitted || 0, compare: buildComparisonNote('待审核', result.totalsComparison?.submitted, '条') },
+        { label: '已锁定', value: result.totals?.locked || 0, compare: buildComparisonNote('已锁定', result.totalsComparison?.locked, '条') }
+      ].map(item => `<div class="card"><div class="muted">${esc(item.label)}</div><div class="metric-value">${esc(item.value)}</div><div class="muted">${esc(item.compare || '')}</div></div>`).join('');
+      document.getElementById('workReportOverviewTrendTable').innerHTML = (result.trend || []).map(item => `
+        <tr>
+          <td>${esc(item.label)}</td>
+          <td>${esc(item.reportCount)}</td>
+          <td>${esc(item.submittedCount || 0)}</td>
+          <td>${esc(item.approvedCount || 0)}</td>
+          <td>${esc(item.lockedCount || 0)}</td>
+          <td>${esc(item.totalHours)}</td>
+          <td>${esc(item.pendingCount)}</td>
+        </tr>
+      `).join('') || '<tr><td colspan="7">暂无趋势数据</td></tr>';
+      const pendingTypeText = (result.pendingSummary?.byType || []).map(item => `${item.reportType === 'daily' ? '日报' : item.reportType === 'weekly' ? '周报' : '月报'} ${item.count}`).join(' ｜ ');
+      const pendingUserText = (result.pendingSummary?.byUsers || []).map(item => `${item.name} ${item.pendingCount}`).join(' ｜ ');
+      const pendingProjectText = (result.pendingSummary?.byProjects || []).map(item => `${item.name} ${item.pendingCount}`).join(' ｜ ');
+      document.getElementById('workReportPendingSummary').innerHTML = `待审核 ${esc(result.pendingSummary?.total || 0)} 条${pendingTypeText ? `｜${esc(pendingTypeText)}` : ''}${pendingUserText ? `｜人员：${esc(pendingUserText)}` : ''}${pendingProjectText ? `｜项目：${esc(pendingProjectText)}` : ''}${result.pendingSummary?.oldestSubmittedAt ? `｜最早提交：${esc(result.pendingSummary.oldestSubmittedAt)}` : ''}`;
+      document.getElementById('workReportPendingTable').innerHTML = (result.pendingSummary?.items || []).map(item => `
+        <tr data-id="${attrEsc(item.id || '')}" data-report-type="${attrEsc(item.reportType || '')}" data-project-id="${attrEsc(item.projectId || '')}" data-user-id="${attrEsc(item.userId || '')}" style="cursor:pointer;">
+          <td>${esc(item.reportType === 'daily' ? '日报' : item.reportType === 'weekly' ? '周报' : '月报')}</td>
+          <td>${esc(item.userName || '-')}</td>
+          <td>${esc(item.projectName || '-')}</td>
+          <td>${esc(item.rangeStart)} ~ ${esc(item.rangeEnd)}</td>
+          <td>${esc(item.submittedAt || '-')}</td>
+        </tr>
+      `).join('') || '<tr><td colspan="5">暂无待审核汇报</td></tr>';
+      document.getElementById('workReportUserRankingTable').innerHTML = (result.rankings?.users || []).map(item => `
+        <tr>
+          <td>${esc(item.name)}</td>
+          <td>${esc(item.reportCount)}</td>
+          <td>${esc(item.totalHours)}</td>
+          <td>${esc(item.logCount)}</td>
+          <td>${esc(item.pendingCount)}</td>
+        </tr>
+      `).join('') || '<tr><td colspan="5">暂无排行数据</td></tr>';
+      document.getElementById('workReportProjectRankingTable').innerHTML = (result.rankings?.projects || []).map(item => `
+        <tr>
+          <td>${esc(item.name)}</td>
+          <td>${esc(item.reportCount)}</td>
+          <td>${esc(item.totalHours)}</td>
+          <td>${esc(item.logCount)}</td>
+          <td>${esc(item.pendingCount)}</td>
+        </tr>
+      `).join('') || '<tr><td colspan="5">暂无排行数据</td></tr>';
+    }
+
+    async function openPendingWorkReportFromOverview(item) {
+      const typeEl = document.getElementById('workReportFilterType');
+      const statusEl = document.getElementById('workReportFilterStatus');
+      const projectEl = document.getElementById('workReportFilterProject');
+      const userEl = document.getElementById('workReportFilterUser');
+      if (typeEl) typeEl.value = item.reportType || '';
+      if (statusEl) statusEl.value = 'submitted';
+      if (projectEl) projectEl.value = item.projectId || '';
+      fillWorkReportFilterUserSelect();
+      if (userEl) userEl.value = item.userId || '';
+      state.selectedWorkReportId = item.id || '';
+      switchSectionSubtab('reports', 'workReports');
+      await refreshWorkReportList();
+      if (item.id) {
+        const rows = (state.workReports || []).slice().sort((a, b) => String(b.rangeStart).localeCompare(String(a.rangeStart)));
+        const idx = rows.findIndex(entry => entry.id === item.id);
+        if (idx >= 0) {
+          state.workReportListPage = Math.floor(idx / 10) + 1;
+          renderWorkReportList();
+        }
+      }
+    }
+
+    function renderWorkReportDetail(reportId = '') {
+      const detailEl = document.getElementById('workReportDetail');
+      if (!detailEl) return;
+      const report = (state.workReports || []).find(item => item.id === reportId) || (state.workReports || []).find(item => item.id === state.selectedWorkReportId);
+      if (!report) {
+        detailEl.className = 'muted';
+        detailEl.innerHTML = '请选择一条工作汇报查看详情';
+        return;
+      }
+      state.selectedWorkReportId = report.id;
+      const typeLabel = report.reportType === 'daily' ? '日报' : report.reportType === 'weekly' ? '周报' : '月报';
+      const statusLabel = report.status === 'draft' ? '草稿' : report.status === 'submitted' ? '已提交' : report.status === 'returned' ? '已退回' : report.status === 'approved' ? '已确认' : '已锁定';
+      detailEl.className = '';
+      detailEl.innerHTML = `
+        <div><strong>${esc(typeLabel)}</strong> · ${esc(statusLabel)} · ${esc(report.rangeStart)} ~ ${esc(report.rangeEnd)}</div>
+        <div class="muted" style="margin-top:8px;">人员：${esc(report.userName || '-')}｜项目：${esc(report.projectName || '-')}｜审核：${esc(report.reviewerName || '-')}</div>
+        <div class="grid cols-3" style="margin-top:12px; gap:12px;">
+          <div class="card"><div class="muted">日志数</div><div class="metric-value">${esc(report.metricsSnapshot?.logCount || 0)}</div></div>
+          <div class="card"><div class="muted">累计工时</div><div class="metric-value">${esc(report.metricsSnapshot?.totalHours || 0)}</div></div>
+          <div class="card"><div class="muted">巡检数</div><div class="metric-value">${esc(report.metricsSnapshot?.inspectionCount || 0)}</div></div>
+          <div class="card"><div class="muted">故障数</div><div class="metric-value">${esc(report.metricsSnapshot?.incidentCount || 0)}</div></div>
+          <div class="card"><div class="muted">已解决故障</div><div class="metric-value">${esc(report.metricsSnapshot?.resolvedIncidentCount || 0)}</div></div>
+          <div class="card"><div class="muted">变更数</div><div class="metric-value">${esc(report.metricsSnapshot?.changeCount || 0)}</div></div>
+          <div class="card"><div class="muted">知识数</div><div class="metric-value">${esc(report.metricsSnapshot?.knowledgeCount || 0)}</div></div>
+          <div class="card"><div class="muted">资料数</div><div class="metric-value">${esc(report.metricsSnapshot?.documentCount || 0)}</div></div>
+        </div>
+        <div style="margin-top:12px;"><strong>工作内容指标</strong><div class="muted">${esc(formatWorkloadCategorySummary(report.metricsSnapshot?.categoryCounts || {}, '项'))}</div></div>
+        <div style="margin-top:12px;"><strong>工作量指标</strong><div class="muted">累计工时 ${esc(report.metricsSnapshot?.totalHours || 0)}h ｜ ${esc(formatWorkloadCategorySummary(report.metricsSnapshot?.categoryHours || {}, 'h'))}</div></div>
+        <div style="margin-top:12px;"><strong>工作成效指标</strong><div class="muted">巡检 ${esc(report.metricsSnapshot?.inspectionCount || 0)} ｜ 故障 ${esc(report.metricsSnapshot?.incidentCount || 0)} ｜ 已解决 ${esc(report.metricsSnapshot?.resolvedIncidentCount || 0)} ｜ 变更 ${esc(report.metricsSnapshot?.changeCount || 0)} ｜ 知识 ${esc(report.metricsSnapshot?.knowledgeCount || 0)} ｜ 资料 ${esc(report.metricsSnapshot?.documentCount || 0)}</div></div>
+        <div style="margin-top:12px;"><strong>工作总结</strong><div class="muted">${fmt(report.summary || '-')}</div></div>
+        <div style="margin-top:12px;"><strong>已完成事项</strong><div class="muted">${fmt(report.completedWork || '-')}</div></div>
+        <div style="margin-top:12px;"><strong>未完成事项</strong><div class="muted">${fmt(report.pendingWork || '-')}</div></div>
+        <div style="margin-top:12px;"><strong>风险阻塞</strong><div class="muted">${fmt(report.risks || '-')}</div></div>
+        <div style="margin-top:12px;"><strong>下一步计划</strong><div class="muted">${fmt(report.nextPlan || '-')}</div></div>
+        <div style="margin-top:12px;"><strong>审核意见</strong><div class="muted">${fmt(report.reviewComment || '-')}</div></div>
+      `;
+    }
+
+    function validateWorkReportPayload(payload) {
+      if (!payload.projectId) return '请选择关联项目';
+      if (!payload.anchorDate) return '请选择周期锚点日期';
+      if (!payload.summary) return '请输入工作总结';
+      if (!payload.completedWork) return '请输入已完成事项';
+      if (!payload.pendingWork) return '请输入未完成事项';
+      if (!payload.nextPlan) return '请输入下一步计划';
+      return '';
+    }
+
+    function renderWorkReportList() {
+      const pageSize = 10;
+      const rows = (state.workReports || [])
+        .slice()
+        .sort((a, b) => String(b.rangeStart).localeCompare(String(a.rangeStart)));
+      const totalPages = Math.max(1, Math.ceil(rows.length / pageSize));
+      state.workReportListPage = Math.min(Math.max(1, state.workReportListPage || 1), totalPages);
+      const start = (state.workReportListPage - 1) * pageSize;
+      const pageRows = rows.slice(start, start + pageSize);
+      document.getElementById('workReportTable').innerHTML = pageRows.map(item => {
+        const canEdit = state.user.role === 'admin' || item.userId === state.user.id;
+        const canReview = state.user.role === 'admin';
+        const actions = [];
+        actions.push(`<button class="secondary" data-action="view-work-report" data-id="${item.id}" type="button">详情</button>`);
+        if (canEdit && canEditWorkReportContent(item.status)) actions.push(`<button class="secondary" data-action="edit-work-report" data-id="${attrEsc(item.id)}" type="button">编辑</button>`);
+        if (canEdit && item.status === 'draft') actions.push(`<button class="secondary" data-action="delete-work-report" data-id="${attrEsc(item.id)}" type="button">删除</button>`);
+        if (canEdit && (item.status === 'draft' || item.status === 'returned')) actions.push(`<button class="secondary" data-action="submit-work-report" data-id="${attrEsc(item.id)}" type="button">提交</button>`);
+        if (canReview && item.status === 'submitted') actions.push(`<button class="secondary" data-action="approve-work-report" data-id="${item.id}" type="button">确认</button>`);
+        if (canReview && (item.status === 'submitted' || item.status === 'approved')) actions.push(`<button class="secondary" data-action="return-work-report" data-id="${item.id}" type="button">退回</button>`);
+        if (canReview && item.status === 'approved') actions.push(`<button class="secondary" data-action="lock-work-report" data-id="${item.id}" type="button">锁定</button>`);
+        return `
+          <tr>
+            <td>${esc(item.rangeStart)} ~ ${esc(item.rangeEnd)}</td>
+            <td>${esc(item.reportType === 'daily' ? '日报' : item.reportType === 'weekly' ? '周报' : '月报')}</td>
+            <td>${esc(item.userName || '-')}</td>
+            <td>${esc(item.projectName || '-')}</td>
+            <td>${esc(`${item.metricsSnapshot?.logCount || 0} / ${item.metricsSnapshot?.totalHours || 0}`)}</td>
+            <td>${esc(item.status === 'draft' ? '草稿' : item.status === 'submitted' ? '已提交' : item.status === 'returned' ? '已退回' : item.status === 'approved' ? '已确认' : '已锁定')}</td>
+            <td>${esc(item.reviewerName || '-')}${item.reviewComment ? `<div class="muted">${fmt(item.reviewComment)}</div>` : ''}</td>
+            <td>${actions.join(' ') || '-'}</td>
+          </tr>
+        `;
+      }).join('') || '<tr><td colspan="8">暂无工作汇报</td></tr>';
+      document.getElementById('workReportListPageInfo').textContent = `第 ${state.workReportListPage} / ${totalPages} 页`;
+      document.getElementById('workReportListPrevBtn').disabled = state.workReportListPage <= 1;
+      document.getElementById('workReportListNextBtn').disabled = state.workReportListPage >= totalPages;
+      const selectedStillVisible = pageRows.some(item => item.id === state.selectedWorkReportId);
+      renderWorkReportDetail(selectedStillVisible ? state.selectedWorkReportId : pageRows[0]?.id || '');
+    }
+
+    async function saveWorkReport(submitAfterSave = false) {
+      const payload = {
+        reportType: document.getElementById('workReportType').value,
+        projectId: document.getElementById('workReportProjectId').value,
+        anchorDate: document.getElementById('workReportAnchorDate').value,
+        summary: document.getElementById('workReportSummary').value.trim(),
+        completedWork: document.getElementById('workReportCompletedWork').value.trim(),
+        pendingWork: document.getElementById('workReportPendingWork').value.trim(),
+        risks: document.getElementById('workReportRisks').value.trim(),
+        nextPlan: document.getElementById('workReportNextPlan').value.trim()
+      };
+      if (!payload.projectId) throw new Error('请选择关联项目');
+      if (!payload.anchorDate) throw new Error('请选择周期锚点日期');
+      if (submitAfterSave) {
+        const validationError = validateWorkReportPayload(payload);
+        if (validationError) throw new Error(validationError);
+      }
+      const reportId = document.getElementById('workReportId').value;
+      if (reportId) {
+        const existing = (state.workReports || []).find(item => item.id === reportId);
+        if (existing && !canEditWorkReportContent(existing.status)) {
+          throw new Error('当前状态的工作汇报不可修改');
+        }
+      }
+      let result;
+      if (reportId) {
+        result = await api(`/api/work-reports/${reportId}`, { method: 'PUT', body: JSON.stringify(payload) });
+      } else {
+        result = await api('/api/work-reports', { method: 'POST', body: JSON.stringify(payload) });
+      }
+      const targetId = result.data?.data?.id || result.data?.id || reportId;
+      if (submitAfterSave && targetId) {
+        await api(`/api/work-reports/${targetId}/submit`, { method: 'POST', body: JSON.stringify({}) });
+      }
+      resetWorkReportForm();
+      setMessage('workReportEditorMessage', submitAfterSave ? '工作汇报已提交' : '工作汇报已保存');
+      await loadBaseData();
+      await refreshReports();
+    }
+
+    async function reviewWorkReport(reportId, action) {
+      const comment = window.prompt(action === 'returned' ? '请输入退回意见' : '请输入审核意见', '') || '';
+      await api(`/api/work-reports/${reportId}/review`, { method: 'POST', body: JSON.stringify({ action, comment }) });
+      await loadBaseData();
+      await refreshReports();
     }
 
     function formatAssetName(assetId) {
@@ -3455,7 +4377,7 @@
     }
 
     function canEditData() {
-      return state.user?.role !== 'customer';
+      return state.user?.role === 'admin' || state.user?.role === 'engineer';
     }
 
     function getAvailableReportDimension() {
@@ -3463,15 +4385,98 @@
     }
 
     function filterByUserProject(arr) {
-      return state.user?.role === 'admin' ? arr : arr.filter(item => item.projectId === state.user?.projectId);
+      if (state.user?.role === 'admin') return arr;
+      if (!state.user?.projectId) return [];
+      return arr.filter(item => item.projectId === state.user.projectId);
     }
 
     function fillSelect(selectId, list, includeEmpty = true) {
       const select = document.getElementById(selectId);
       const options = [];
       if (includeEmpty) options.push('<option value="">请选择</option>');
-      options.push(...list.map(item => `<option value="${item.id}">${esc(item.name)}</option>`));
+      options.push(...list.map(item => `<option value="${attrEsc(item.id)}">${esc(item.name)}</option>`));
       select.innerHTML = options.join('');
+    }
+
+    const LOG_PROCESS_TEMPLATES = {
+      '物理环境': '1. 现场核查物理环境状态\n2. 处理环境异常并复测\n3. 记录现场恢复情况',
+      '设备变更': '1. 确认变更窗口与影响范围\n2. 执行设备调整并核验配置\n3. 记录变更结果与回退点',
+      '配置变更': '1. 备份当前配置\n2. 实施配置修改并验证业务\n3. 记录配置差异与验证结果',
+      '网络安全告警': '1. 核实告警来源与影响范围\n2. 进行初步处置并消减风险\n3. 记录处置结果与后续建议',
+      '网络安全事件': '1. 确认事件级别与受影响对象\n2. 执行隔离、排查与恢复\n3. 输出事件结论与复盘要点',
+      '故障排查': '1. 收集故障现象与时间点\n2. 定位原因并执行修复\n3. 验证恢复结果并记录结论',
+      '软硬件维护': '1. 核查软硬件运行状态\n2. 执行维护操作并验证\n3. 记录维护结果与建议',
+      '桌面终端及周边': '1. 核实终端或外设故障现象\n2. 处理问题并完成功能验证\n3. 记录恢复情况与用户反馈',
+      '资料管理': '1. 核对资料内容与版本\n2. 完成整理、更新或归档\n3. 记录资料去向与结果',
+      '事务工作': '1. 确认工作事项与目标\n2. 完成执行并同步相关方\n3. 记录结果与待跟进事项',
+      '外围工作': '1. 确认支撑事项与协同对象\n2. 完成支撑处理并反馈结果\n3. 记录后续配合事项',
+      '视频会议': '1. 检查会议环境与设备状态\n2. 保障会议过程稳定运行\n3. 记录会议支持结果与异常情况'
+    };
+
+    function getLogTicketTypes() {
+      return state.logDictionaries.ticketTypes || [];
+    }
+
+    function getLogResultOptions() {
+      return state.logDictionaries.results || [];
+    }
+
+    function fillLogDictionarySelect(selectId, options, includeEmpty = true) {
+      const select = document.getElementById(selectId);
+      if (!select) return;
+      const currentValue = select.value;
+      const entries = [];
+      if (includeEmpty) entries.push('<option value="">请选择</option>');
+      entries.push(...options.map(item => `<option value="${esc(item)}">${esc(item)}</option>`));
+      select.innerHTML = entries.join('');
+      if (currentValue && options.includes(currentValue)) {
+        select.value = currentValue;
+      }
+    }
+
+    function fillLogDictionaryOptions() {
+      fillLogDictionarySelect('logTicketType', getLogTicketTypes());
+      fillLogDictionarySelect('edLogTicketType', getLogTicketTypes());
+      fillLogDictionarySelect('logResult', getLogResultOptions());
+      fillLogDictionarySelect('edLogResult', getLogResultOptions());
+    }
+
+    function updateLogTemplateHint(prefix, ticketType) {
+      const hint = document.getElementById(prefix ? `${prefix}LogTemplateHint` : 'logTemplateHint');
+      if (!hint) return;
+      const template = LOG_PROCESS_TEMPLATES[ticketType] || '';
+      hint.textContent = template ? `处理过程模板：${template.replace(/\n/g, ' ｜ ')}` : '';
+    }
+
+    function applyLogProcessTemplate(prefix, { force = false } = {}) {
+      const ticketType = document.getElementById(prefix ? `${prefix}LogTicketType` : 'logTicketType')?.value || '';
+      const process = document.querySelector(prefix ? `#${prefix}LogProcess` : '#logForm textarea[name="process"]');
+      const template = LOG_PROCESS_TEMPLATES[ticketType] || '';
+      updateLogTemplateHint(prefix, ticketType);
+      if (!process || !template) return;
+      if (force || !String(process.value || '').trim()) {
+        process.value = template;
+      }
+    }
+
+    function getLogQualityWarningText(warnings = []) {
+      return warnings.map((item, index) => `${index + 1}. ${item}`).join('\n');
+    }
+
+    async function confirmLogQualityWarnings(payload) {
+      const result = await api('/api/logs/quality-check', { method: 'POST', body: JSON.stringify(payload) });
+      const warnings = result.warnings || [];
+      if (!warnings.length) return true;
+      return window.confirm(`检测到以下提醒：\n${getLogQualityWarningText(warnings)}\n\n是否继续保存？`);
+    }
+
+    async function loadLogDictionaries() {
+      const result = await api('/api/logs/dictionaries', { silent: true });
+      state.logDictionaries = {
+        ticketTypes: result.ticketTypes || [],
+        results: result.results || []
+      };
+      fillLogDictionaryOptions();
     }
 
     function fillUserProjectSelect() {
@@ -3634,6 +4639,19 @@
       const select = document.getElementById('logAssetId');
       if (!select) return;
       const currentValue = select.value;
+      const assets = state.assets.filter(item => !projectId || item.projectId === projectId);
+      select.innerHTML = ['<option value="">请选择</option>']
+        .concat(assets.map(item => `<option value="${item.id}">${esc(item.name)}</option>`))
+        .join('');
+      if (currentValue && assets.some(item => item.id === currentValue)) {
+        select.value = currentValue;
+      }
+    }
+
+    function fillEdLogAssetSelect(projectId, preferredValue = '') {
+      const select = document.getElementById('edLogAssetId');
+      if (!select) return;
+      const currentValue = preferredValue || select.value;
       const assets = state.assets.filter(item => !projectId || item.projectId === projectId);
       select.innerHTML = ['<option value="">请选择</option>']
         .concat(assets.map(item => `<option value="${item.id}">${esc(item.name)}</option>`))
@@ -4040,11 +5058,11 @@
       const picker = document.getElementById('aiInspectionTemplateMetricPicker');
       const tbody = document.getElementById('aiInspectionTemplateMetricTable');
       if (!picker || !tbody) return;
-      picker.innerHTML = catalog.map(item => `<label style="display:inline-flex;align-items:center;gap:6px;margin:0 12px 8px 0;white-space:nowrap;"><input type="checkbox" data-role="template-metric-toggle" value="${item.key}" ${selectedKeys.has(item.key) ? 'checked' : ''} />${item.label}</label>`).join('') || '<div class="muted">暂无可选指标</div>';
+      picker.innerHTML = catalog.map(item => `<label style="display:inline-flex;align-items:center;gap:6px;margin:0 12px 8px 0;white-space:nowrap;"><input type="checkbox" data-role="template-metric-toggle" value="${attrEsc(item.key)}" ${selectedKeys.has(item.key) ? 'checked' : ''} />${esc(item.label)}</label>`).join('') || '<div class="muted">暂无可选指标</div>';
       tbody.innerHTML = catalog.map(item => {
         const metric = current.find(entry => entry.key === item.key) || item;
         const enabled = selectedKeys.has(item.key);
-        return `<tr data-key="${item.key}" class="${enabled ? '' : 'hidden'}"><td style="text-align:center;vertical-align:middle;"><input type="checkbox" data-field="enabled" ${enabled ? 'checked' : ''} /></td><td><input data-field="label" value="${metric.label}" /></td><td><input data-field="unit" value="${metric.unit}" style="max-width:80px;" /></td><td><input data-field="warn" type="number" step="0.01" value="${metric.warn}" style="max-width:100px;" /></td><td><input data-field="critical" type="number" step="0.01" value="${metric.critical}" style="max-width:100px;" /></td><td><select data-field="direction"><option value="high" ${metric.direction === 'high' ? 'selected' : ''}>高于阈值告警</option><option value="low" ${metric.direction === 'low' ? 'selected' : ''}>低于阈值告警</option></select></td><td><input data-field="description" value="${metric.description}" /></td></tr>`;
+        return `<tr data-key="${attrEsc(item.key)}" class="${enabled ? '' : 'hidden'}"><td style="text-align:center;vertical-align:middle;"><input type="checkbox" data-field="enabled" ${enabled ? 'checked' : ''} /></td><td><input data-field="label" value="${attrEsc(metric.label)}" /></td><td><input data-field="unit" value="${attrEsc(metric.unit)}" style="max-width:80px;" /></td><td><input data-field="warn" type="number" step="0.01" value="${attrEsc(metric.warn)}" style="max-width:100px;" /></td><td><input data-field="critical" type="number" step="0.01" value="${attrEsc(metric.critical)}" style="max-width:100px;" /></td><td><select data-field="direction"><option value="high" ${metric.direction === 'high' ? 'selected' : ''}>高于阈值告警</option><option value="low" ${metric.direction === 'low' ? 'selected' : ''}>低于阈值告警</option></select></td><td><input data-field="description" value="${attrEsc(metric.description)}" /></td></tr>`;
       }).join('') || '<tr><td colspan="7">暂无指标</td></tr>';
     }
 
@@ -4077,7 +5095,7 @@
       tbody.innerHTML = catalog.map(item => {
         const metric = current.find(entry => entry.key === item.key) || { ...item, value: '' };
         const enabled = enabledKeys.has(item.key);
-        return `<tr data-key="${item.key}" data-label="${metric.label}" data-unit="${metric.unit}" data-warn="${metric.warn}" data-critical="${metric.critical}" data-direction="${metric.direction}" data-description="${metric.description}"><td style="text-align:center;vertical-align:middle;"><input type="checkbox" data-field="enabled" ${enabled ? 'checked' : ''} /></td><td data-field="label">${metric.label}</td><td>${metric.unit || '-'}</td><td><input data-field="value" type="number" step="0.01" value="${metric.value === '' ? '' : metric.value}" style="max-width:120px;" /></td><td>${metric.warn}</td><td>${metric.critical}</td><td>${metric.description || '-'}</td></tr>`;
+        return `<tr data-key="${attrEsc(item.key)}" data-label="${attrEsc(metric.label)}" data-unit="${attrEsc(metric.unit)}" data-warn="${attrEsc(metric.warn)}" data-critical="${attrEsc(metric.critical)}" data-direction="${attrEsc(metric.direction)}" data-description="${attrEsc(metric.description)}"><td style="text-align:center;vertical-align:middle;"><input type="checkbox" data-field="enabled" ${enabled ? 'checked' : ''} /></td><td data-field="label">${esc(metric.label)}</td><td>${esc(metric.unit || '-')}</td><td><input data-field="value" type="number" step="0.01" value="${attrEsc(metric.value === '' ? '' : metric.value)}" style="max-width:120px;" /></td><td>${esc(metric.warn)}</td><td>${esc(metric.critical)}</td><td>${esc(metric.description || '-')}</td></tr>`;
       }).join('') || '<tr><td colspan="7">暂无指标</td></tr>';
     }
 
@@ -4344,11 +5362,23 @@
     }
 
     function renderNav() {
+      if (!state.user) {
+        els.currentUserName.textContent = '';
+        els.currentUserMeta.textContent = '';
+        return;
+      }
       els.currentUserName.textContent = `${state.user.name}（${state.user.username}）`;
       els.currentUserMeta.textContent = formatProjectDisplayById(state.user.projectId);
       [...els.navTabs.querySelectorAll('button')].forEach(button => {
         const adminOnly = button.dataset.adminOnly === 'true';
-        button.classList.toggle('hidden', adminOnly && state.user.role !== 'admin');
+        const customerHidden = button.dataset.customerHidden === 'true';
+        button.classList.toggle('hidden', (adminOnly && state.user.role !== 'admin') || (customerHidden && state.user.role === 'customer'));
+      });
+      document.querySelectorAll('.section-tabs button[data-admin-only="true"]').forEach(button => {
+        button.classList.toggle('hidden', state.user.role !== 'admin');
+      });
+      document.querySelectorAll('.section-tabs button[data-customer-hidden="true"]').forEach(button => {
+        button.classList.toggle('hidden', state.user.role === 'customer');
       });
       document.getElementById('projectForm')?.closest('.card')?.classList.toggle('hidden', state.user.role !== 'admin');
       document.getElementById('userForm')?.closest('.card')?.classList.toggle('hidden', state.user.role !== 'admin');
@@ -4364,6 +5394,11 @@
       document.getElementById('aiInspectionTargetForm')?.closest('.card')?.classList.toggle('hidden', !canEditData());
       document.getElementById('aiInspectionTemplateForm')?.closest('.card')?.classList.toggle('hidden', !canEditData());
       document.getElementById('aiInspectionTaskForm')?.closest('.card')?.classList.toggle('hidden', !canEditData());
+      document.getElementById('documentForm')?.closest('.card')?.classList.toggle('hidden', !canEditData());
+      document.querySelector('.section-tabs[data-section="documents"] button[data-subtab="form"]')?.classList.toggle('hidden', !canEditData());
+      document.getElementById('configBackupPlanForm')?.closest('.card')?.classList.toggle('hidden', !canEditData());
+      document.getElementById('topoSaveLayoutBtn')?.classList.toggle('hidden', !canEditData());
+      document.getElementById('topoAddRelBtn')?.classList.toggle('hidden', !canEditData());
       const reportDimension = document.getElementById('reportDimension');
       if (reportDimension) {
         [...reportDimension.options].forEach(option => {
@@ -4386,14 +5421,18 @@
       assets: ['list', 'topology'],
       documents: ['form', 'list'],
       kb: ['list'],
-      system: ['serviceStatus', 'upgrade', 'databaseInit', 'auditLog', 'notification']
+      system: ['serviceStatus', 'workReportReminder', 'upgrade', 'databaseInit', 'auditLog'],
+      reports: ['overview', 'workload', 'workReports', 'export']
     };
 
     function switchTab(tab) {
+      if (window.__DISABLE_WS_REFRESH && tab === 'dashboard' && state.currentTab && state.currentTab !== 'dashboard') {
+        return;
+      }
       state.currentTab = tab;
       [...document.querySelectorAll('.tab-panel')].forEach(panel => panel.classList.toggle('hidden', panel.dataset.tab !== tab));
       [...els.navTabs.querySelectorAll('button')].forEach(button => button.classList.toggle('active', button.dataset.tab === tab));
-      const subtabButtons = [...document.querySelectorAll(`.section-tabs[data-section="${tab}"] button[data-subtab]`)];
+      const subtabButtons = [...document.querySelectorAll(`.section-tabs[data-section="${tab}"] button[data-subtab]`)].filter(button => !button.classList.contains('hidden'));
       if (!subtabButtons.length) {
         state.currentSubtab = null;
         return;
@@ -4401,6 +5440,11 @@
       const activeButton = subtabButtons.find(button => button.classList.contains('active')) || subtabButtons[0];
       if (activeButton) {
         switchSectionSubtab(tab, activeButton.dataset.subtab);
+      }
+      if (tab === 'reports') {
+        refreshReports();
+      } else if (tab === 'system') {
+        refreshSystemManagement();
       }
     }
 
@@ -4420,6 +5464,8 @@
     function openTabWithSubtab(tab, subtab = 'list') {
       switchTab(tab);
       if (subtab) {
+        const button = document.querySelector(`.section-tabs[data-section="${tab}"] button[data-subtab="${subtab}"]`);
+        if (!button || button.classList.contains('hidden')) return;
         switchSectionSubtab(tab, subtab);
       }
     }
@@ -4601,6 +5647,7 @@
     }
 
     async function saveTopoLayout() {
+      if (!canEditData()) return;
       try {
         await api('/api/assets/topology-layout', {
           method: 'POST',
@@ -4683,11 +5730,11 @@
         const type = esc(asset.type || '未知');
         const icon = getDeviceIcon(asset);
         const selClass = state.topoSelectedNodes.has(asset.id) ? ' selected' : '';
-        return `<div class="topo-node${selClass}" data-asset-id="${asset.id}" style="position:absolute;left:${pos.x}%;top:${pos.y}%;transform:translate(-50%,-50%);background:#fff;border:2px solid #d1d5db;border-radius:10px;padding:8px 12px;cursor:move;z-index:2;min-width:100px;text-align:center;box-shadow:0 1px 4px rgba(0,0,0,0.08);user-select:none;">
+        return `<div class="topo-node${selClass}" data-asset-id="${attrEsc(asset.id)}" style="position:absolute;left:${pos.x}%;top:${pos.y}%;transform:translate(-50%,-50%);background:#fff;border:2px solid #d1d5db;border-radius:10px;padding:8px 12px;cursor:move;z-index:2;min-width:100px;text-align:center;box-shadow:0 1px 4px rgba(0,0,0,0.08);user-select:none;">
           <svg class="topo-node-icon" viewBox="0 0 32 32">${icon}</svg>
           <div style="font-weight:600;font-size:12px;color:#1f2937;">${name}</div>
           <div style="font-size:10px;color:#6b7280;">${type}</div>
-          <div class="topo-status-dot" data-asset-id="${asset.id}" style="position:absolute;top:-6px;right:-6px;width:12px;height:12px;border-radius:50%;background:#9ca3af;border:2px solid #fff;" title="未监控"></div>
+          <div class="topo-status-dot" data-asset-id="${attrEsc(asset.id)}" style="position:absolute;top:-6px;right:-6px;width:12px;height:12px;border-radius:50%;background:#9ca3af;border:2px solid #fff;" title="未监控"></div>
         </div>`;
       }).join('');
       renderTopoLines();
@@ -5314,7 +6361,7 @@
                <td><div class="toolbar"><button class="secondary" data-action="view-log-detail" data-id="${item.id}" type="button">${expanded ? '收起' : '详情'}</button>${canEditData() ? `<button class="secondary" data-action="edit-log" data-id="${item.id}" type="button">修改</button><button class="secondary" data-action="delete-log" data-id="${item.id}" type="button" style="background:#fee2e2;color:#dc2626;border-color:#fecaca;">删除</button>` : ''}</div></td>
 
             </tr>
-            ${expanded ? `<tr><td colspan="7"><div class="card" style="margin: 8px 0;"><div class="muted" style="margin-bottom: 8px;">工单详情</div><div class="grid-form" style="grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));"><div><div class="muted">派单时间</div><div>${esc(item.date || '-')}</div></div><div><div class="muted">派单部门</div><div>${esc(item.dispatchDepartment || '-')}</div></div><div><div class="muted">派单人</div><div>${esc(item.dispatcher || '-')}</div></div><div><div class="muted">工单类型</div><div>${esc(item.ticketType || '-')}</div></div><div><div class="muted">接单人</div><div>${esc(item.assignee || '-')}</div></div><div><div class="muted">关联项目</div><div>${esc(formatProjectDisplayById(item.projectId))}</div></div><div><div class="muted">关联资产</div><div>${esc(formatAssetName(item.assetId))}</div></div><div><div class="muted">工单位置</div><div>${esc(item.relatedTarget || '-')}</div></div><div><div class="muted">工单用时（小时）</div><div>${esc(item.durationHours)}</div></div></div><div class="muted" style="margin: 12px 0 8px;">工单内容</div><div style="white-space:pre-wrap;">${esc(item.event || '-')}</div><div class="muted" style="margin: 12px 0 8px;">处理过程</div><div style="white-space:pre-wrap;">${esc(item.process || '暂无处理过程')}</div><div class="muted" style="margin: 12px 0 8px;">结论</div><div style="white-space:pre-wrap;">${esc(item.conclusion || '-')}</div><div class="muted" style="margin: 12px 0 8px;">备注</div><div style="white-space:pre-wrap;">${esc(item.remark || '-')}</div></div></td></tr>` : ''}`;
+            ${expanded ? `<tr><td colspan="7"><div class="card" style="margin: 8px 0;"><div class="muted" style="margin-bottom: 8px;">工单详情</div><div class="grid-form" style="grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));"><div><div class="muted">派单时间</div><div>${esc(item.date || '-')}</div></div><div><div class="muted">派单部门</div><div>${esc(item.dispatchDepartment || '-')}</div></div><div><div class="muted">派单人</div><div>${esc(item.dispatcher || '-')}</div></div><div><div class="muted">工单类型</div><div>${esc(item.ticketType || '-')}</div></div><div><div class="muted">接单人</div><div>${esc(item.assignee || '-')}</div></div><div><div class="muted">关联项目</div><div>${esc(formatProjectDisplayById(item.projectId))}</div></div><div><div class="muted">关联资产</div><div>${esc(formatAssetName(item.assetId))}</div></div><div><div class="muted">工单位置</div><div>${esc(item.relatedTarget || '-')}</div></div><div><div class="muted">处理结果</div><div>${esc(item.result || '-')}</div></div><div><div class="muted">工单用时（小时）</div><div>${esc(item.durationHours)}</div></div></div><div class="muted" style="margin: 12px 0 8px;">工单内容</div><div style="white-space:pre-wrap;">${esc(item.event || '-')}</div><div class="muted" style="margin: 12px 0 8px;">处理过程</div><div style="white-space:pre-wrap;">${esc(item.process || '暂无处理过程')}</div><div class="muted" style="margin: 12px 0 8px;">结论</div><div style="white-space:pre-wrap;">${esc(item.conclusion || '-')}</div><div class="muted" style="margin: 12px 0 8px;">备注</div><div style="white-space:pre-wrap;">${esc(item.remark || '-')}</div></div></td></tr>` : ''}`;
         }).join('') || '<tr><td colspan="7">暂无数据</td></tr>';
       document.getElementById('logPageInfo').textContent = `第 ${state.logPage} / ${totalPages} 页`;
       document.getElementById('logPrevBtn').disabled = state.logPage <= 1;
@@ -5355,12 +6402,11 @@
     }
 
     function getMaintainReminders(limit = 6) {
-      const today = new Date();
-      today.setHours(0, 0, 0, 0);
       return filterByUserProject(state.assets)
         .filter(item => item.maintainExpiryDate)
         .map(item => {
-          const diff = Math.ceil((new Date(`${item.maintainExpiryDate}T00:00:00`) - today) / 86400000);
+          const diff = daysUntilDateKey(item.maintainExpiryDate);
+          if (diff == null) return null;
           let levelClass;
           if (diff <= 0) levelClass = 'expiry-darkred';
           else if (diff < 15) levelClass = 'expiry-darkred';
@@ -5370,15 +6416,13 @@
           else levelClass = 'expiry-green';
           return { item, diff, levelClass };
         })
+        .filter(Boolean)
         .sort((a, b) => a.diff - b.diff)
         .slice(0, limit);
     }
 
     function getInspectionOverdueReminders(limit = 6) {
-      const today = new Date();
-      today.setHours(0, 0, 0, 0);
-      const nowMs = Date.now();
-      const nowDateStr = today.toISOString().slice(0, 10);
+      const nowDateStr = formatLocalDateKey(new Date());
       return filterByUserProject(state.inspectionPlans)
         .filter(item => {
           if (!item.nextDate) return false;
@@ -5386,9 +6430,11 @@
           return item.nextDate <= nowDateStr;
         })
         .map(item => {
-          const diff = Math.ceil((new Date(`${item.nextDate}T00:00:00`) - today) / 86400000);
+          const diff = daysUntilDateKey(item.nextDate);
+          if (diff == null) return null;
           return { item, diff };
         })
+        .filter(Boolean)
         .sort((a, b) => a.diff - b.diff)
         .slice(0, limit);
     }
@@ -5459,7 +6505,7 @@
         const result = await api(`/api/documents/${id}/verify-password`, { method: 'POST', body: JSON.stringify({ password }) });
         closeModal('documentPasswordModal');
         if (pendingDocumentAction === 'view') {
-          showDocumentDetail(id, result.token);
+          await showDocumentDetail(id, result.token, result.loginPassword);
         } else if (pendingDocumentAction === 'download') {
           const item = state.documents.find(d => d.id === id);
           if (item && item.attachmentName) {
@@ -5523,7 +6569,7 @@
       tbody.appendChild(tr);
     }
 
-    async function showDocumentDetail(id, token) {
+    async function showDocumentDetail(id, token, loginPassword) {
       try {
         const detail = await api(`/api/documents/${id}?token=${encodeURIComponent(token || '')}`);
         const rows = [];
@@ -5535,6 +6581,7 @@
         const managementUrl = buildDocumentManagementUrl(detail.managementMethod, detail.managementIp, detail.managementPort);
         if (managementUrl) rows.push(['管理URL', managementUrl, managementUrl]);
         if (detail.loginAccount) rows.push(['登录账号', detail.loginAccount]);
+        if (loginPassword) rows.push(['登录密码', loginPassword]);
         document.getElementById('documentDetailTitle').textContent = detail.title || '资料详情';
         const content = document.getElementById('documentDetailContent');
         content.textContent = '';
@@ -5747,7 +6794,7 @@
       state.sparePartMovementPage = Math.min(Math.max(1, state.sparePartMovementPage || 1), spmTotalPages);
       const spmStart = (state.sparePartMovementPage - 1) * spmPageSize;
       const spmRows = sourceMovements.slice().sort((a, b) => b.createdAt.localeCompare(a.createdAt)).slice(spmStart, spmStart + spmPageSize);
-      document.getElementById('sparePartMovementTable').innerHTML = spmRows.map(item => `<tr><td>${esc(item.createdAt)}</td><td>${state.spareParts.find(entry => entry.id === item.sparePartId)?.name || '-'}</td><td>${esc(item.type === 'inbound' ? '入库' : '消耗')}</td><td>${esc(item.quantity)}</td><td>${esc(item.reason || '-')}</td><td>${esc(item.operatorName || '-')}</td></tr>`).join('') || '<tr><td colspan="6">暂无记录</td></tr>';
+      document.getElementById('sparePartMovementTable').innerHTML = spmRows.map(item => `<tr><td>${esc(item.createdAt)}</td><td>${esc(state.spareParts.find(entry => entry.id === item.sparePartId)?.name || '-')}</td><td>${esc(item.type === 'inbound' ? '入库' : '消耗')}</td><td>${esc(item.quantity)}</td><td>${esc(item.reason || '-')}</td><td>${esc(item.operatorName || '-')}</td></tr>`).join('') || '<tr><td colspan="6">暂无记录</td></tr>';
       document.getElementById('sparePartMovementPageInfo').textContent = `第 ${state.sparePartMovementPage} / ${spmTotalPages} 页`;
       document.getElementById('sparePartMovementPrevBtn').disabled = state.sparePartMovementPage <= 1;
       document.getElementById('sparePartMovementNextBtn').disabled = state.sparePartMovementPage >= spmTotalPages;
@@ -5826,33 +6873,22 @@
           if (item.status === '已停用') {
             actions.push(`<button class="secondary" data-action="resume-ai-task" data-id="${item.id}" type="button">启用</button>`);
           }
-          const taskResult = (state.aiInspectionResults || []).find(r => r.taskId === item.id && !r.probeError);
-          if (item.status === '已完成' && taskResult) {
-            actions.push(`<button class="secondary" data-action="view-ai-report" data-id="${taskResult.id}" type="button">查看报告</button>`);
+          const taskResultId = item.latestResultId || (state.aiInspectionResults || []).find(r => r.taskId === item.id && !r.probeError)?.id;
+          if (item.status === '已完成' && taskResultId) {
+            actions.push(`<button class="secondary" data-action="view-ai-report" data-id="${taskResultId}" type="button">查看报告</button>`);
           }
           actions.push(`<button class="secondary" data-action="delete-ai-task" data-id="${item.id}" type="button">删除</button>`);
         }
         const cycleLabel = { daily: '每日', weekly: '每周', monthly: '每月', quarterly: '每季度' }[item.cycle] || (item.cycle ? item.cycle : '单次');
-        return `<tr><td>${esc(item.title)}</td><td>${state.aiInspectionTargets.find(target => target.id === item.targetId)?.name || '-'}</td><td>${esc(item.executor || '-')}</td><td>${esc(cycleLabel)}</td><td>${esc(item.executedAt || '-')}</td><td>${esc(item.status || '-')}</td><td>${esc(item.createdAt || '-')}</td><td><div class="toolbar">${actions.length ? actions.join('') : '-'}</div></td></tr>`;
+        return `<tr><td>${esc(item.title)}</td><td>${esc(state.aiInspectionTargets.find(target => target.id === item.targetId)?.name || '-')}</td><td>${esc(item.executor || '-')}</td><td>${esc(cycleLabel)}</td><td>${esc(item.executedAt || '-')}</td><td>${esc(item.status || '-')}</td><td>${esc(item.createdAt || '-')}</td><td><div class="toolbar">${actions.length ? actions.join('') : '-'}</div></td></tr>`;
       }).join('') || '<tr><td colspan="8">暂无数据</td></tr>';
       document.getElementById('aiInspectionTaskPageInfo').textContent = `第 ${state.aiInspectionTaskPage} / ${taskTotalPages} 页`;
       document.getElementById('aiInspectionTaskPrevBtn').disabled = state.aiInspectionTaskPage <= 1;
       document.getElementById('aiInspectionTaskNextBtn').disabled = state.aiInspectionTaskPage >= taskTotalPages;
 
-      const resultSearch = (document.getElementById('aiResultSearch')?.value || '').toLowerCase();
-      const resultLevelFilter = document.getElementById('aiResultLevelFilter')?.value || '';
-      const resultPageSize = 5;
-      const resultRowsAll = filterByUserProject(state.aiInspectionResults)
-        .filter(item => {
-          if (resultLevelFilter && item.level !== resultLevelFilter) return false;
-          if (resultSearch && !(item.summary || '').toLowerCase().includes(resultSearch) && !(item.risk || '').toLowerCase().includes(resultSearch)) return false;
-          return true;
-        })
-        .slice().sort((a, b) => b.createdAt.localeCompare(a.createdAt));
-      const resultTotalPages = Math.max(1, Math.ceil(resultRowsAll.length / resultPageSize));
+      const resultRows = Array.isArray(state.aiInspectionResults) ? state.aiInspectionResults : [];
+      const resultTotalPages = Math.max(1, Number(state.aiInspectionResultTotalPages || 1));
       state.aiInspectionResultPage = Math.min(Math.max(1, state.aiInspectionResultPage || 1), resultTotalPages);
-      const resultStart = (state.aiInspectionResultPage - 1) * resultPageSize;
-      const resultRows = resultRowsAll.slice(resultStart, resultStart + resultPageSize);
       document.getElementById('aiInspectionResultTable').innerHTML = resultRows.map(item => {
         const resultActions = [];
         if (canEditData()) {
@@ -5862,31 +6898,19 @@
           resultActions.push(`<button class="secondary" data-action="delete-ai-result" data-id="${item.id}" type="button">删除</button>`);
         }
         const abnormalText = (item.abnormalItems || []).map(a => typeof a === 'object' ? `${esc(a.label)}: ${esc(a.description || a.value || '')}` : esc(a)).join('<br />') || '-';
-        return `<tr><td>${state.aiInspectionTargets.find(target => target.id === item.targetId)?.name || '-'}</td><td>${esc(item.score)}</td><td>${esc(item.level)}</td><td>${esc(item.summary || '-')}</td><td>${esc(item.risk || '-')}</td><td>${esc(item.suggestion || '-')}</td><td>${abnormalText}</td><td>${esc(item.createdAt || '-')}</td><td><div class="toolbar">${resultActions.length ? resultActions.join('') : '-'}</div></td></tr>`;
+        return `<tr><td>${esc(state.aiInspectionTargets.find(target => target.id === item.targetId)?.name || '-')}</td><td>${esc(item.score)}</td><td>${esc(item.level)}</td><td>${esc(item.summary || '-')}</td><td>${esc(item.risk || '-')}</td><td>${esc(item.suggestion || '-')}</td><td>${abnormalText}</td><td>${esc(item.createdAt || '-')}</td><td><div class="toolbar">${resultActions.length ? resultActions.join('') : '-'}</div></td></tr>`;
       }).join('') || '<tr><td colspan="9">暂无数据</td></tr>';
       document.getElementById('aiInspectionResultPageInfo').textContent = `第 ${state.aiInspectionResultPage} / ${resultTotalPages} 页`;
       document.getElementById('aiInspectionResultPrevBtn').disabled = state.aiInspectionResultPage <= 1;
       document.getElementById('aiInspectionResultNextBtn').disabled = state.aiInspectionResultPage >= resultTotalPages;
 
-      const reportSearch = (document.getElementById('aiReportSearch')?.value || '').toLowerCase();
-      const reportLevelFilter = document.getElementById('aiReportLevelFilter')?.value || '';
-      const reportPageSize = 5;
-      const reportRowsAll = resultRowsAll
-        .filter(item => !item.probeError)
-        .filter(item => {
-          const target = state.aiInspectionTargets.find(t => t.id === item.targetId);
-          if (reportSearch && !(target?.name || '').toLowerCase().includes(reportSearch)) return false;
-          return true;
-        });
-      const reportLevelFiltered = reportLevelFilter ? reportRowsAll.filter(item => item.level === reportLevelFilter) : reportRowsAll;
-      const reportTotalPages = Math.max(1, Math.ceil(reportLevelFiltered.length / reportPageSize));
+      const reportRows = Array.isArray(state.aiInspectionReportRows) ? state.aiInspectionReportRows : [];
+      const reportTotalPages = Math.max(1, Number(state.aiInspectionReportTotalPages || 1));
       state.aiInspectionReportPage = Math.min(Math.max(1, state.aiInspectionReportPage || 1), reportTotalPages);
-      const reportStart = (state.aiInspectionReportPage - 1) * reportPageSize;
-      const reportRows = reportLevelFiltered.slice(reportStart, reportStart + reportPageSize);
       document.getElementById('aiInspectionReportTable').innerHTML = reportRows.map(item => {
         const task = state.aiInspectionTasks.find(entry => entry.id === item.taskId);
         const target = state.aiInspectionTargets.find(entry => entry.id === item.targetId);
-        return `<tr><td>${esc(target?.name || '-')}</td><td>${esc(task?.title || '-')}</td><td>${esc(task?.executedAt || item.createdAt || '-')}</td><td>${esc(item.level)}</td><td>${esc(item.score)}</td><td>${esc(item.createdAt || '-')}</td><td><button class="secondary" onclick="downloadReport('/api/reports/ai-inspection/results/${item.id}/html','${esc(item.id)}_report.html')">下载HTML报告</button> <button class="secondary" data-action="delete-ai-result" data-id="${item.id}" type="button">删除</button></td></tr>`;
+        return `<tr><td>${esc(target?.name || '-')}</td><td>${esc(task?.title || '-')}</td><td>${esc(task?.executedAt || item.createdAt || '-')}</td><td>${esc(item.level)}</td><td>${esc(item.score)}</td><td>${esc(item.createdAt || '-')}</td><td><button class="secondary" onclick="downloadReport('/api/reports/ai-inspection/results/${item.id}/html','${esc(item.id)}_report.html')">下载HTML报告</button> <button class="secondary" onclick="downloadReport('/api/reports/ai-inspection/results/${item.id}/pptx','${esc(item.id)}_report.pptx')">下载PPT报告</button>${canEditData() ? ` <button class="secondary" data-action="delete-ai-result" data-id="${item.id}" type="button">删除</button>` : ''}</td></tr>`;
       }).join('') || '<tr><td colspan="7">暂无可导出的巡检报告</td></tr>';
       document.getElementById('aiInspectionReportPageInfo').textContent = `第 ${state.aiInspectionReportPage} / ${reportTotalPages} 页`;
       document.getElementById('aiInspectionReportPrevBtn').disabled = state.aiInspectionReportPage <= 1;
@@ -5921,8 +6945,8 @@
         const asset = state.assets.find(entry => entry.id === item.assetId);
         const isSelected = state.configBackupDiffBaseId === item.id;
         const actions = [
-          item.status === '成功' ? `<button class="secondary" data-action="download-config-backup-record" data-id="${item.id}" data-filename="${esc(item.filename || 'config-backup.txt')}" type="button">下载</button>` : '',
-          item.status === '成功' ? `<button class="secondary" data-action="diff-config-backup-record" data-id="${item.id}" type="button" style="${isSelected ? 'background:#dbeafe;color:#1d4ed8;border-color:#93c5fd;' : ''}">${isSelected ? '对比 (已选A)' : '对比'}</button>` : '',
+          canEditData() && item.status === '成功' ? `<button class="secondary" data-action="download-config-backup-record" data-id="${item.id}" data-filename="${esc(item.filename || 'config-backup.txt')}" type="button">下载</button>` : '',
+          canEditData() && item.status === '成功' ? `<button class="secondary" data-action="diff-config-backup-record" data-id="${item.id}" type="button" style="${isSelected ? 'background:#dbeafe;color:#1d4ed8;border-color:#93c5fd;' : ''}">${isSelected ? '对比 (已选A)' : '对比'}</button>` : '',
           canEditData() ? `<button class="secondary" data-action="delete-config-backup-record" data-id="${item.id}" type="button">删除</button>` : ''
         ].filter(Boolean).join(' ') || '-';
         return `<tr><td>${esc(target?.name || '-')}</td><td>${esc(asset?.name || '-')}</td><td>${esc(item.filename || '-')}</td><td>${esc(formatBackupSize(item.size))}</td><td>${esc(item.status || '-')}</td><td>${esc(item.message || '-')}</td><td>${esc(item.createdAt || '-')}</td><td><div class="toolbar">${actions}</div></td></tr>`;
@@ -5933,16 +6957,21 @@
     }
 
     function renderNotifications() {
-      const notifPageSize = 10;
-      const sourceNotifications = filterByUserProject(state.notifications);
-      const notifTotalPages = Math.max(1, Math.ceil(sourceNotifications.length / notifPageSize));
+      const notifRows = Array.isArray(state.notifications) ? state.notifications : [];
+      const notifTotalPages = Math.max(1, Number(state.notificationTotalPages || 1));
       state.notificationPage = Math.min(Math.max(1, state.notificationPage || 1), notifTotalPages);
-      const notifStart = (state.notificationPage - 1) * notifPageSize;
-      const notifRows = sourceNotifications.slice().sort((a, b) => b.createdAt.localeCompare(a.createdAt)).slice(notifStart, notifStart + notifPageSize);
-      document.getElementById('notificationTable').innerHTML = notifRows.map(item => `<tr><td>${esc(item.title)}</td><td>${esc(item.level)}</td><td>${esc(formatProjectDisplayById(item.projectId))}</td><td>${esc(item.createdAt)}</td></tr>`).join('') || '<tr><td colspan="4">暂无通知</td></tr>';
+      document.getElementById('notificationTable').innerHTML = notifRows.map(item => {
+        const status = item.readAt ? `已读${item.readAt ? `<div class="muted">${esc(item.readAt)}</div>` : ''}` : '未读';
+        const action = item.readAt
+          ? '-'
+          : `<button class="secondary" data-action="mark-notification-read" data-id="${item.id}" type="button">标记已读</button>`;
+        return `<tr><td>${esc(item.title)}<div class="muted">${fmt(item.content || '-')}</div></td><td>${esc(item.level)}</td><td>${esc(formatProjectDisplayById(item.projectId))}</td><td>${status}</td><td>${esc(item.createdAt)}</td><td>${action}</td></tr>`;
+      }).join('') || '<tr><td colspan="6">暂无通知</td></tr>';
       document.getElementById('notificationPageInfo').textContent = `第 ${state.notificationPage} / ${notifTotalPages} 页`;
       document.getElementById('notificationPrevBtn').disabled = state.notificationPage <= 1;
       document.getElementById('notificationNextBtn').disabled = state.notificationPage >= notifTotalPages;
+      document.getElementById('notificationMarkAllReadBtn').disabled = Number(state.notificationUnread || 0) <= 0;
+      document.getElementById('notificationClearReadBtn').disabled = Number(state.notificationTotal || 0) <= 0 || Number(state.notificationUnread || 0) === Number(state.notificationTotal || 0);
     }
 
     function renderApprovals() {
@@ -5979,6 +7008,13 @@
       const maxAttemptsInput = document.getElementById('loginRateLimitMaxAttempts');
       const rateWindowInput = document.getElementById('loginRateLimitWindowMinutes');
       const rateLockInput = document.getElementById('loginRateLimitLockMinutes');
+      const dailyReportReminderHourInput = document.getElementById('dailyReportReminderHour');
+      const weeklyReportReminderDaysInput = document.getElementById('weeklyReportReminderDays');
+      const monthlyReportReminderDaysInput = document.getElementById('monthlyReportReminderDays');
+      const dailyLowHoursThresholdInput = document.getElementById('dailyLowHoursThreshold');
+      const dailyHighHoursThresholdInput = document.getElementById('dailyHighHoursThreshold');
+      const noLogStreakDaysInput = document.getElementById('noLogStreakDays');
+      const projectInactiveDaysInput = document.getElementById('projectInactiveDays');
       if (!timeoutInput || !httpsEnabledInput || !httpsPortInput || !httpsCertificateStatus) return;
       timeoutInput.value = String(getWebIdleLogoutMinutes());
       httpsEnabledInput.value = state.systemConfig?.httpsLoginEnabled ? 'true' : 'false';
@@ -5989,6 +7025,13 @@
       if (maxAttemptsInput) maxAttemptsInput.value = String(Number(state.systemConfig?.loginRateLimitMaxAttempts || 5));
       if (rateWindowInput) rateWindowInput.value = String(Number(state.systemConfig?.loginRateLimitWindowMinutes || 10));
       if (rateLockInput) rateLockInput.value = String(Number(state.systemConfig?.loginRateLimitLockMinutes || 15));
+      if (dailyReportReminderHourInput) dailyReportReminderHourInput.value = String(Number(state.systemConfig?.dailyReportReminderHour ?? 12));
+      if (weeklyReportReminderDaysInput) weeklyReportReminderDaysInput.value = String(Number(state.systemConfig?.weeklyReportReminderDays ?? 7));
+      if (monthlyReportReminderDaysInput) monthlyReportReminderDaysInput.value = String(Number(state.systemConfig?.monthlyReportReminderDays ?? 15));
+      if (dailyLowHoursThresholdInput) dailyLowHoursThresholdInput.value = String(Number(state.systemConfig?.dailyLowHoursThreshold ?? 1));
+      if (dailyHighHoursThresholdInput) dailyHighHoursThresholdInput.value = String(Number(state.systemConfig?.dailyHighHoursThreshold ?? 12));
+      if (noLogStreakDaysInput) noLogStreakDaysInput.value = String(Number(state.systemConfig?.noLogStreakDays ?? 3));
+      if (projectInactiveDaysInput) projectInactiveDaysInput.value = String(Number(state.systemConfig?.projectInactiveDays ?? 7));
       const tzSelect = document.getElementById('systemTimezone');
       if (tzSelect) {
         const tzOffset = Number(state.systemConfig?.timezoneOffset);
@@ -6137,6 +7180,12 @@
       const form = document.getElementById('logForm');
       form.reset();
       form.elements.assignee.value = state.user?.name || '';
+      fillLogDictionaryOptions();
+      fillLogProjectSelect();
+      fillLogAssigneeOptions(form.elements.projectId.value);
+      fillLogDispatcherOptions(form.elements.projectId.value);
+      if (form.elements.result) form.elements.result.value = '已完成';
+      applyLogProcessTemplate('', { force: false });
     }
 
     function exportSelectedLogs() {
@@ -6145,8 +7194,8 @@
       const sourceLogs = filterByUserProject(state.logs);
       const selected = sourceLogs.filter(item => ids.includes(item.id));
       if (!selected.length) { showToast('未找到选中的日志'); return; }
-      const headers = ['派单时间','工单内容','派单部门','派单人','工单类型','接单人','关联项目','关联资产','工单位置','处理过程','结论','工单用时','备注'];
-      const keys = ['date','event','dispatchDepartment','dispatcher','ticketType','assignee','projectId','assetId','relatedTarget','process','conclusion','durationHours','remark'];
+      const headers = ['派单时间','工单内容','派单部门','派单人','工单类型','接单人','关联项目','关联资产','工单位置','处理结果','处理过程','结论','工单用时','备注'];
+      const keys = ['date','event','dispatchDepartment','dispatcher','ticketType','assignee','projectId','assetId','relatedTarget','result','process','conclusion','durationHours','remark'];
       const csvRows = [headers.join(',')];
       selected.forEach(item => {
         const row = keys.map(k => {
@@ -6200,22 +7249,26 @@
     function editLog(id) {
       const log = state.logs.find(item => item.id === id);
       if (!log) return;
+      fillLogDictionaryOptions();
       document.getElementById('edLogId').value = log.id;
       document.getElementById('edLogDate').value = log.date || '';
       document.getElementById('edLogDispatchDepartment').value = log.dispatchDepartment || '';
       document.getElementById('edLogTicketType').value = log.ticketType || '';
       document.getElementById('edLogRelatedTarget').value = log.relatedTarget || '';
       document.getElementById('edLogEvent').value = log.event || '';
+      document.getElementById('edLogResult').value = log.result || '已完成';
       document.getElementById('edLogProcess').value = log.process || '';
       document.getElementById('edLogConclusion').value = log.conclusion || '';
       document.getElementById('edLogDurationHours').value = log.durationHours || '';
       document.getElementById('edLogRemark').value = log.remark || '';
       fillSelect('edLogProjectId', state.projects, false);
       document.getElementById('edLogProjectId').value = log.projectId || '';
+      fillEdLogAssetSelect(log.projectId || '', log.assetId || '');
       fillEdLogAssigneeOptions(log.projectId);
       fillEdLogDispatcherOptions(log.projectId);
       document.getElementById('edLogDispatcher').value = log.dispatcher || '';
       document.getElementById('edLogAssignee').value = log.assignee || '';
+      applyLogProcessTemplate('ed', { force: false });
       document.getElementById('logEditMessage').textContent = '';
       document.getElementById('logEditMessage').className = 'message';
       openModal('logEditModal');
@@ -6319,7 +7372,7 @@
         ['监控方式', asset.monitorType || 'ping'],
         ['监控地址/IP', asset.monitorHost],
         ['端口号', asset.monitorPort],
-        ['SNMP 团体字', asset.snmpCommunity],
+        ['SNMP 团体字', asset.hasSnmpCommunity ? '已配置' : '未配置'],
         ['SNMP 端口', asset.snmpPort]
       ];
       let html = '<div style="display:grid;grid-template-columns:100px 1fr;gap:6px 12px;font-size:13px;">';
@@ -6354,7 +7407,9 @@
       document.getElementById('edAssetMonitorType').value = asset.monitorType || 'ping';
       document.getElementById('edAssetMonitorHost').value = asset.monitorHost || '';
       document.getElementById('edAssetMonitorPort').value = asset.monitorPort || '';
-      document.getElementById('edAssetSnmpCommunity').value = asset.snmpCommunity || 'public';
+      const snmpInput = document.getElementById('edAssetSnmpCommunity');
+      snmpInput.value = '';
+      snmpInput.placeholder = asset.hasSnmpCommunity ? '已配置，留空保持原值' : '默认: public';
       document.getElementById('edAssetSnmpPort').value = asset.snmpPort || '161';
       toggleEdMonitorPort();
       fillSelect('edAssetProjectId', state.projects);
@@ -6542,7 +7597,7 @@
       const picker = document.getElementById('edAiTemplateMetricPicker');
       const tbody = document.getElementById('edAiTemplateMetricTable');
       if (!picker || !tbody) return;
-      picker.innerHTML = catalog.map(item => `<label style="display:inline-flex; align-items:center; gap:6px; margin:0 12px 8px 0; white-space:nowrap;"><input type="checkbox" data-role="edit-template-metric-toggle" value="${item.key}" ${selectedKeys.has(item.key) ? 'checked' : ''} />${item.label}</label>`).join('') || '<div class="muted">暂无可选指标</div>';
+      picker.innerHTML = catalog.map(item => `<label style="display:inline-flex; align-items:center; gap:6px; margin:0 12px 8px 0; white-space:nowrap;"><input type="checkbox" data-role="edit-template-metric-toggle" value="${attrEsc(item.key)}" ${selectedKeys.has(item.key) ? 'checked' : ''} />${esc(item.label)}</label>`).join('') || '<div class="muted">暂无可选指标</div>';
       picker.querySelectorAll('[data-role="edit-template-metric-toggle"]').forEach(cb => {
         cb.addEventListener('change', function() {
           const key = this.value;
@@ -6557,7 +7612,7 @@
       tbody.innerHTML = catalog.map(item => {
         const metric = current.find(entry => entry.key === item.key) || item;
         const enabled = selectedKeys.has(item.key);
-        return `<tr data-key="${item.key}" class="${enabled ? '' : 'hidden'}"><td style="text-align:center;"><input type="checkbox" data-field="enabled" ${enabled ? 'checked' : ''} /></td><td><input data-field="label" value="${metric.label}" /></td><td><input data-field="unit" value="${metric.unit}" style="max-width:80px;" /></td><td><input data-field="warn" type="number" step="0.01" value="${metric.warn}" style="max-width:100px;" /></td><td><input data-field="critical" type="number" step="0.01" value="${metric.critical}" style="max-width:100px;" /></td><td><select data-field="direction"><option value="high" ${metric.direction === 'high' ? 'selected' : ''}>高于阈值告警</option><option value="low" ${metric.direction === 'low' ? 'selected' : ''}>低于阈值告警</option></select></td><td><input data-field="description" value="${metric.description}" /></td></tr>`;
+        return `<tr data-key="${attrEsc(item.key)}" class="${enabled ? '' : 'hidden'}"><td style="text-align:center;"><input type="checkbox" data-field="enabled" ${enabled ? 'checked' : ''} /></td><td><input data-field="label" value="${attrEsc(metric.label)}" /></td><td><input data-field="unit" value="${attrEsc(metric.unit)}" style="max-width:80px;" /></td><td><input data-field="warn" type="number" step="0.01" value="${attrEsc(metric.warn)}" style="max-width:100px;" /></td><td><input data-field="critical" type="number" step="0.01" value="${attrEsc(metric.critical)}" style="max-width:100px;" /></td><td><select data-field="direction"><option value="high" ${metric.direction === 'high' ? 'selected' : ''}>高于阈值告警</option><option value="low" ${metric.direction === 'low' ? 'selected' : ''}>低于阈值告警</option></select></td><td><input data-field="description" value="${attrEsc(metric.description)}" /></td></tr>`;
       }).join('') || '<tr><td colspan="7">暂无指标</td></tr>';
     }
 
@@ -6649,8 +7704,8 @@
     }
 
     async function approveUser(id) {
-      const result = await api(`/api/users/${id}/approve`, { method: 'PUT', body: '{}' });
-      setMessages(['userMessage', 'userListMessage'], result.message || '已审批通过');
+      const result = await api(`/api/users/${id}/approve`, { method: 'PUT', body: JSON.stringify({ role: 'viewer' }) });
+      setMessages(['userMessage', 'userListMessage'], result.message || '已审批通过，角色为只读，可通过编辑人员调整角色');
       await loadBaseData();
       renderUsers();
     }
@@ -6797,7 +7852,8 @@
     async function refreshDashboard() {
       updateOnlineCount();
       const period = document.getElementById('dashboardPeriod').value;
-      const summary = await api(`/api/reports/summary?period=${period}`);
+      const isCustomer = state.user.role === 'customer';
+      const summary = isCustomer ? [] : await api(`/api/reports/summary?period=${period}`);
       const currentPeriodKey = getCurrentPeriodKey(period);
       const userExecutions = filterByUserProject(state.inspectionExecutions);
       const userPlans = filterByUserProject(state.inspectionPlans);
@@ -6807,9 +7863,8 @@
       const executedPlanCount = new Set(periodExecutions.map(item => item.planId)).size;
       const executionRate = duePlans.length ? `${Math.round((executedPlanCount / duePlans.length) * 100)}%` : '0%';
       const abnormalCount = periodExecutions.filter(item => item.result === '异常').length;
-      const today = new Date();
-      today.setHours(0, 0, 0, 0);
-      const overdueCount = userPlans.filter(item => item.nextDate && new Date(`${item.nextDate}T00:00:00`) < today && item.status !== '已完成').length;
+      const todayKey = formatLocalDateKey(new Date());
+      const overdueCount = userPlans.filter(item => item.nextDate && item.nextDate < todayKey && item.status !== '已完成').length;
       const totalProjects = userProjects.length;
       const userLogs = filterByUserProject(state.logs);
       const totalLogs = userLogs.length;
@@ -6819,8 +7874,10 @@
       state.dashboardChartMetrics = [
         { label: '项目数量', value: totalProjects, color: '#2563eb' },
         { label: '资产总数', value: totalAssets, color: '#0ea5e9' },
-        { label: '日志总数', value: totalLogs, color: '#16a34a' },
-        { label: '累计工时', value: totalHours, color: '#14b8a6' },
+        ...(isCustomer ? [] : [
+          { label: '日志总数', value: totalLogs, color: '#16a34a' },
+          { label: '累计工时', value: totalHours, color: '#14b8a6' }
+        ]),
         { label: '待客户确认', value: pendingCustomerApprovalCount, color: '#7c3aed' },
         { label: '巡检异常数', value: abnormalCount, color: '#ea580c' },
         { label: '巡检逾期数', value: overdueCount, color: '#dc2626' }
@@ -6828,8 +7885,8 @@
       document.getElementById('dashboardMetrics').innerHTML = `
         <div class="card metric-card" data-link-tab="projects" data-link-subtab="list"><div class="muted">项目数量</div><div class="metric-value">${totalProjects}</div><div class="muted">点击查看项目列表</div></div>
         <div class="card metric-card" data-link-tab="assets" data-link-subtab="list"><div class="muted">资产总数</div><div class="metric-value">${totalAssets}</div><div class="muted">点击查看资产列表</div></div>
-        <div class="card metric-card" data-link-tab="logs" data-link-subtab="list"><div class="muted">日志总数</div><div class="metric-value">${totalLogs}</div><div class="muted">点击查看日志列表</div></div>
-        <div class="card metric-card" data-link-tab="reports"><div class="muted">累计工时</div><div class="metric-value">${totalHours}</div><div class="muted">点击查看报表统计</div></div>
+        ${isCustomer ? '' : `<div class="card metric-card" data-link-tab="logs" data-link-subtab="list"><div class="muted">日志总数</div><div class="metric-value">${totalLogs}</div><div class="muted">点击查看日志列表</div></div>
+        <div class="card metric-card" data-link-tab="reports" data-link-subtab="workload"><div class="muted">累计工时</div><div class="metric-value">${totalHours}</div><div class="muted">点击查看报表统计</div></div>`}
         <div class="card metric-card" data-link-tab="governance" data-link-subtab="approvals"><div class="muted">待客户确认</div><div class="metric-value">${pendingCustomerApprovalCount}</div><div class="muted">点击查看变更审批</div></div>
         <div class="card metric-card" data-link-tab="assetOps" data-link-subtab="inspection"><div class="muted">巡检执行率</div><div class="metric-value">${executionRate}</div><div class="muted">当前周期已执行/应执行</div></div>
         <div class="card metric-card" data-link-tab="assetOps" data-link-subtab="inspection"><div class="muted">巡检异常数</div><div class="metric-value">${abnormalCount}</div><div class="muted">当前周期异常巡检</div></div>
@@ -6875,13 +7932,13 @@
     function renderWorkbench() {
       const role = state.user?.role || '';
       const panels = [];
-      const today = new Date(); today.setHours(0, 0, 0, 0);
+      const todayKey = formatLocalDateKey(new Date());
 
       if (role === 'admin' || role === 'engineer') {
         const pendingApprovals = filterByUserProject(state.approvals).filter(a => a.status === '待运维审批').length;
         const pendingTasks = filterByUserProject(state.aiInspectionTasks).filter(t => t.status === '待执行' || t.status === '执行中').length;
-        const todayInspections = filterByUserProject(state.inspectionPlans).filter(p => p.nextDate && new Date(`${p.nextDate}T00:00:00`).getTime() === today.getTime() && p.status !== '已完成').length;
-        const expiredMaintenance = filterByUserProject(state.assets).filter(a => a.maintainExpiryDate && new Date(`${a.maintainExpiryDate}T00:00:00`) < today).length;
+        const todayInspections = filterByUserProject(state.inspectionPlans).filter(p => p.nextDate === todayKey && p.status !== '已完成').length;
+        const expiredMaintenance = filterByUserProject(state.assets).filter(a => a.maintainExpiryDate && a.maintainExpiryDate < todayKey).length;
         const pendingIncidents = filterByUserProject(state.incidents).filter(i => i.status !== '已关闭' && i.status !== '已解决').length;
         const pendingChanges = filterByUserProject(state.changeRecords).filter(c => c.status === '待运维审批').length;
         panels.push({ title: '待审批', count: pendingApprovals, color: '#ea580c', link: 'governance', linkSubtab: 'approvals' });
@@ -6908,7 +7965,7 @@
 
     async function showConfigBackupDiff(id1, id2) {
       try {
-        const result = await api(`/api/ai-inspection/config-backup/records/diff?id1=${id1}&id2=${id2}`);
+        const result = await api('/api/ai-inspection/config-backup/records/diff', { method: 'POST', body: JSON.stringify({ id1, id2 }) });
         document.getElementById('diffRec1Info').textContent = `${result.record1.filename || '版本A'} (${result.record1.createdAt})`;
         document.getElementById('diffRec2Info').textContent = `${result.record2.filename || '版本B'} (${result.record2.createdAt})`;
         const driftIcon = result.hasDrift ? '&#9888;' : '&#10003;';
@@ -6950,7 +8007,7 @@
       document.getElementById('dashboardNextBtn').disabled = state.dashboardPage >= totalPages;
     }
 
-    async function refreshReports() {
+    function renderLegacyReports() {
       const period = document.getElementById('reportPeriod').value;
       const dimension = getAvailableReportDimension();
       const rows = dimension === 'inspection'
@@ -6960,10 +8017,10 @@
           : buildUserReportRows(period);
       document.getElementById('reportDimensionHeader').textContent = dimension === 'project' || dimension === 'inspection' ? '项目' : '人员';
       document.getElementById('reportRelatedHeader').textContent = dimension === 'project' || dimension === 'inspection' ? '项目周期' : '项目';
-      document.getElementById('reportMetric1Header').textContent = dimension === 'inspection' ? '执行次数' : '日志数';
-      document.getElementById('reportMetric2Header').textContent = dimension === 'inspection' ? '异常次数' : '工时';
-      document.getElementById('reportMetric3Header').textContent = dimension === 'inspection' ? '正常次数' : '资产数';
-      document.getElementById('reportMetric4Header').textContent = dimension === 'inspection' ? '覆盖计划' : '知识数';
+      document.getElementById('reportMetric1Header').textContent = dimension === 'inspection' ? '巡检对象' : '项目现状';
+      document.getElementById('reportMetric2Header').textContent = dimension === 'inspection' ? '执行产出' : '周期产出';
+      document.getElementById('reportMetric3Header').textContent = dimension === 'inspection' ? '异常整改' : '周期工时';
+      document.getElementById('reportMetric4Header').textContent = dimension === 'inspection' ? '覆盖计划' : '知识沉淀';
       document.getElementById('reportActionHeader').textContent = '操作';
       const reportPageSize = 10;
       const reportTotalPages = Math.max(1, Math.ceil(rows.length / reportPageSize));
@@ -6977,14 +8034,34 @@
           <td>${esc(item.related)}</td>
           <td>${esc(item.totalLogs)}</td>
           <td>${esc(item.totalHours)}</td>
-          <td>${esc(item.assetCount)}</td>
-          <td>${esc(item.kbCount)}</td>
+          <td>${esc(item.metric3)}</td>
+          <td>${esc(item.metric4)}</td>
           <td>${dimension === 'inspection' ? `<button class="secondary" onclick='openReport(${JSON.stringify(item.htmlHref)})'>查看HTML</button> <button class="secondary" onclick='downloadReport(${JSON.stringify(item.csvHref)}, ${JSON.stringify(`inspection_report_${item.id}.csv`)})'>下载CSV</button>` : `<button class="secondary" onclick='openReport(${JSON.stringify(item.htmlHref)})'>查看HTML</button> <button class="secondary" onclick='downloadReport(${JSON.stringify(item.href)}, ${JSON.stringify(`report_${item.id}.pptx`)})'>${esc(item.actionLabel || '下载PPTX')}</button>`}</td>
         </tr>
       `).join('') || '<tr><td colspan="7">暂无数据</td></tr>';
       document.getElementById('reportPageInfo').textContent = `第 ${state.reportPage} / ${reportTotalPages} 页`;
       document.getElementById('reportPrevBtn').disabled = state.reportPage <= 1;
       document.getElementById('reportNextBtn').disabled = state.reportPage >= reportTotalPages;
+    }
+
+    async function refreshReports() {
+      fillWorkloadProjectSelect();
+      fillWorkReportProjectSelect();
+      fillWorkReportFilterProjectSelect();
+      fillWorkReportFilterUserSelect();
+      toggleWorkloadCustomRange();
+      const editorCard = document.getElementById('workReportEditorCard');
+      if (editorCard) editorCard.classList.toggle('hidden', state.user?.role === 'customer');
+      const overviewCard = document.getElementById('workReportOverviewCard');
+      if (overviewCard) overviewCard.classList.toggle('hidden', state.user?.role !== 'admin');
+      if (state.user?.role !== 'customer') {
+        await refreshWorkloadBoard();
+      }
+      await refreshWorkReportList();
+      if (state.user?.role === 'admin') {
+        await refreshWorkReportOverview();
+      }
+      renderLegacyReports();
     }
 
     function formatAppVersion(version) {
@@ -7023,7 +8100,8 @@
             <div>${esc(item.name)}</div>
             <div class="muted">${esc(item.createdAt)}</div>
           </div>
-          <a href="${esc(item.href)}">下载</a>
+          <button class="secondary" type="button" data-action="download-system-backup" data-href="${attrEsc(item.href)}" data-filename="${attrEsc(item.name)}">下载</button>
+          <button class="secondary" type="button" data-action="restore-system-backup" data-filename="${attrEsc(item.name)}">恢复</button>
         </div>
       `).join('') || '<div class="muted">暂无备份文件</div>';
       renderSystemServices();
@@ -7074,6 +8152,7 @@
       { key: 'logs', path: '/api/logs' },
       { key: 'kb', path: '/api/kb' },
       { key: 'documents', path: '/api/documents' },
+      { key: 'workReports', path: '/api/work-reports' },
       { key: 'inspectionPlans', path: '/api/inspection-plans' },
       { key: 'inspectionExecutions', path: '/api/inspection-executions' },
       { key: 'spareParts', path: '/api/spare-parts' },
@@ -7084,10 +8163,8 @@
       { key: 'aiInspectionTargets', path: '/api/ai-inspection/targets' },
       { key: 'aiInspectionTemplates', path: '/api/ai-inspection/templates' },
       { key: 'aiInspectionTasks', path: '/api/ai-inspection/tasks' },
-      { key: 'aiInspectionResults', path: '/api/ai-inspection/results' },
       { key: 'configBackupPlans', path: '/api/ai-inspection/config-backup/plans' },
       { key: 'configBackupRecords', path: '/api/ai-inspection/config-backup/records' },
-      { key: 'notifications', path: '/api/notifications' },
       { key: 'auditLogs', path: '/api/audit-logs' }
     ];
 
@@ -7095,12 +8172,106 @@
       BASE_DATA_ENDPOINTS.forEach(endpoint => {
         state[endpoint.key] = [];
       });
+      state.aiInspectionResults = [];
+      state.aiInspectionResultTotal = 0;
+      state.aiInspectionResultTotalPages = 1;
+      state.aiInspectionResultPage = 1;
+      state.aiInspectionReportRows = [];
+      state.aiInspectionReportTotal = 0;
+      state.aiInspectionReportTotalPages = 1;
+      state.aiInspectionReportPage = 1;
+      state.notifications = [];
+      state.notificationTotal = 0;
+      state.notificationUnread = 0;
+      state.notificationTotalPages = 1;
+      state.notificationPage = 1;
+    }
+
+    function withQuery(path, extra) {
+      const url = new URL(path, window.location.origin);
+      Object.entries(extra || {}).forEach(([key, value]) => url.searchParams.set(key, value));
+      return `${url.pathname}${url.search}`;
+    }
+
+    async function apiCollection(path, options = {}) {
+      const first = await api(withQuery(path, { all: '1' }), options);
+      if (Array.isArray(first?.data)) {
+        const total = Number(first.total || first.data.length);
+        if (first.all || first.totalPages === 1 || first.data.length >= total) return first;
+      } else if (Array.isArray(first)) {
+        return { data: first };
+      }
+      const pageSize = 100;
+      let page = 1;
+      let all = [];
+      let totalPages = 1;
+      do {
+        const result = await api(withQuery(path, { page: String(page), pageSize: String(pageSize) }), options);
+        const batch = Array.isArray(result?.data) ? result.data : [];
+        all = all.concat(batch);
+        totalPages = Number(result?.totalPages || (batch.length < pageSize ? page : page + 1));
+        page += 1;
+      } while (page <= totalPages && page <= 1000);
+      return { data: all, total: all.length, page: 1, pageSize: all.length, totalPages: 1, all: true };
+    }
+
+    async function loadNotifications(options = {}) {
+      const page = Math.max(1, Number(options.page || state.notificationPage || 1));
+      const result = await api(withQuery('/api/notifications', { page: String(page), pageSize: '10' }), { silent: true });
+      state.notifications = Array.isArray(result?.data) ? result.data : [];
+      state.notificationTotal = Number(result?.total || 0);
+      state.notificationUnread = Number(result?.unreadTotal || 0);
+      state.notificationTotalPages = Math.max(1, Number(result?.totalPages || 1));
+      state.notificationPage = Math.min(Math.max(1, Number(result?.page || page)), state.notificationTotalPages);
+      return result;
+    }
+
+    async function loadAiInspectionResults(options = {}) {
+      const page = Math.max(1, Number(options.page || state.aiInspectionResultPage || 1));
+      const query = {
+        page: String(page),
+        pageSize: '5',
+        sortDirection: 'desc',
+        sortBy: 'createdAt'
+      };
+      const level = document.getElementById('aiResultLevelFilter')?.value || '';
+      const keyword = (document.getElementById('aiResultSearch')?.value || '').trim();
+      if (level) query.level = level;
+      if (keyword) query.q = keyword;
+      const result = await api(withQuery('/api/ai-inspection/results', query), { silent: true });
+      state.aiInspectionResults = Array.isArray(result?.data) ? result.data : [];
+      state.aiInspectionResultTotal = Number(result?.total || 0);
+      state.aiInspectionResultTotalPages = Math.max(1, Number(result?.totalPages || 1));
+      state.aiInspectionResultPage = Math.min(Math.max(1, Number(result?.page || page)), state.aiInspectionResultTotalPages);
+      return result;
+    }
+
+    async function loadAiInspectionReports(options = {}) {
+      const page = Math.max(1, Number(options.page || state.aiInspectionReportPage || 1));
+      const query = {
+        page: String(page),
+        pageSize: '5',
+        sortDirection: 'desc',
+        sortBy: 'createdAt',
+        excludeProbeError: '1'
+      };
+      const level = document.getElementById('aiReportLevelFilter')?.value || '';
+      const keyword = (document.getElementById('aiReportSearch')?.value || '').trim();
+      if (level) query.level = level;
+      if (keyword) query.q = keyword;
+      const result = await api(withQuery('/api/ai-inspection/results', query), { silent: true });
+      state.aiInspectionReportRows = Array.isArray(result?.data) ? result.data : [];
+      state.aiInspectionReportTotal = Number(result?.total || 0);
+      state.aiInspectionReportTotalPages = Math.max(1, Number(result?.totalPages || 1));
+      state.aiInspectionReportPage = Math.min(Math.max(1, Number(result?.page || page)), state.aiInspectionReportTotalPages);
+      return result;
     }
 
     async function loadBaseData(options = {}) {
-      const endpoints = BASE_DATA_ENDPOINTS;
+      const endpoints = BASE_DATA_ENDPOINTS.filter(ep => ep.key !== 'auditLogs' || state.user?.role === 'admin');
       if (options.clearBeforeLoad) clearBaseDataState();
-      const results = await Promise.allSettled(endpoints.map(ep => api(ep.path, { silent: true })));
+      await loadLogDictionaries();
+      const results = await Promise.allSettled(endpoints.map(ep => apiCollection(ep.path, { silent: true })));
       let firstAuthError = null;
       const failedEndpoints = [];
       results.forEach((result, i) => {
@@ -7120,6 +8291,28 @@
         setMessage('globalStatus', `部分数据加载失败: ${failedEndpoints.join(', ')}`);
       }
 
+      try {
+        await loadNotifications({ page: options.clearBeforeLoad ? 1 : (state.notificationPage || 1) });
+      } catch (error) {
+        if (error.message === '请先登录') throw error;
+        state.notifications = state.notifications || [];
+        failedEndpoints.push('/api/notifications');
+        setMessage('globalStatus', `部分数据加载失败: ${failedEndpoints.join(', ')}`);
+      }
+
+      try {
+        await Promise.all([
+          loadAiInspectionResults({ page: options.clearBeforeLoad ? 1 : (state.aiInspectionResultPage || 1) }),
+          loadAiInspectionReports({ page: options.clearBeforeLoad ? 1 : (state.aiInspectionReportPage || 1) })
+        ]);
+      } catch (error) {
+        if (error.message === '请先登录') throw error;
+        state.aiInspectionResults = state.aiInspectionResults || [];
+        state.aiInspectionReportRows = state.aiInspectionReportRows || [];
+        failedEndpoints.push('/api/ai-inspection/results');
+        setMessage('globalStatus', `部分数据加载失败: ${failedEndpoints.join(', ')}`);
+      }
+
       state.auditLogPage = 1;
       state.inspectionExecutionPage = 1;
       state.changeRecordPage = 1;
@@ -7128,10 +8321,11 @@
       state.assetPage = 1;
       state.projectPage = 1;
       state.userPage = 1;
-      state.notificationPage = 1;
       state.sparePartPage = 1;
       state.approvalPage = 1;
       state.reportPage = 1;
+      state.workloadPage = 1;
+      state.workReportListPage = 1;
       state.inspectionPlanPage = 1;
       state.sparePartMovementPage = 1;
       state.incidentPage = 1;
@@ -7164,8 +8358,6 @@
       toggleInspectionIssueFields();
       renderGovernance();
       await refreshDashboard();
-      await refreshReports();
-      await refreshSystemManagement();
     }
 
     async function boot(options = {}) {
@@ -7181,14 +8373,14 @@
           state.systemConfig = session.systemConfig || state.systemConfig;
         }
         renderNav();
-        await refreshAppVersion();
-        await loadBaseData();
-        startSystemLoadAutoRefresh();
-        startIdleLogoutTracking();
         showAppView();
         connectWebSocket();
+        startIdleLogoutTracking();
         setMessage('loginMessage', '');
         switchTab('dashboard');
+        refreshAppVersion();
+        await loadBaseData();
+        startSystemLoadAutoRefresh();
       } catch (error) {
         const isAuthError = error.message === '请先登录';
         if (isAuthError) {
@@ -7210,12 +8402,15 @@
         setMessage('loginMessage', `初始化失败：${error.message}`, 'error');
       }
     }
+    window.boot = boot;
 
     async function refreshCaptcha() {
       try {
         const result = await api('/api/captcha');
-        state.captchaToken = result.token;
-        document.getElementById('captchaImg').src = result.svg;
+        state.captchaToken = result.token || '';
+        window.__captchaToken = result.token || '';
+        state.captchaCsrf = result.csrfToken || '';
+        paintCaptcha(document.getElementById('captchaImg'), result.svg);
         document.getElementById('loginCaptchaInput').value = '';
       } catch (error) {
         setMessage('loginMessage', error.message, 'error');
@@ -7227,8 +8422,10 @@
     async function refreshLdapCaptcha() {
       try {
         const result = await api('/api/captcha');
-        state.ldapCaptchaToken = result.token;
-        document.getElementById('ldapCaptchaImg').src = result.svg;
+        state.ldapCaptchaToken = result.token || '';
+        window.__ldapCaptchaToken = result.token || '';
+        state.ldapCaptchaCsrf = result.csrfToken || '';
+        paintCaptcha(document.getElementById('ldapCaptchaImg'), result.svg);
         document.getElementById('ldapCaptchaInput').value = '';
       } catch (error) {
         document.getElementById('ldapError').textContent = error.message;
@@ -7245,6 +8442,25 @@
     }
 
     loadRememberedUsername();
+
+    window.addEventListener('load', () => {
+      state.captchaToken = state.captchaToken || window.__captchaToken || '';
+      state.ldapCaptchaToken = state.ldapCaptchaToken || window.__ldapCaptchaToken || '';
+      state.captchaCsrf = state.captchaCsrf || window.__captchaCsrf || '';
+      state.ldapCaptchaCsrf = state.ldapCaptchaCsrf || window.__ldapCaptchaCsrf || '';
+      const captchaText = document.getElementById('captchaImg').textContent.trim();
+      const captchaReady = Boolean(document.querySelector('#captchaImg img'));
+      if (!state.captchaToken || !captchaReady || captchaText === '加载中' || captchaText === '刷新失败') {
+        refreshCaptcha();
+      }
+      const params = new URLSearchParams(window.location.search);
+      if (params.get('auth') === 'pending') {
+        setMessage('loginMessage', '账号尚未通过管理员审批，请联系管理员', 'error');
+        params.delete('auth');
+        const query = params.toString();
+        history.replaceState({}, '', `${window.location.pathname}${query ? `?${query}` : ''}${window.location.hash || ''}`);
+      }
+    });
 
     function openModal(id) {
       const el = document.getElementById(id);
@@ -7359,11 +8575,7 @@
       document.getElementById('forgotPwdError1').textContent = '';
       try {
         const result = await api('/api/forgot-password/verify', { method: 'POST', body: JSON.stringify({ username }) });
-        if (!result.question) {
-          document.getElementById('forgotPwdError1').textContent = result.message || '如账号存在且已设置安全问题，将返回对应验证问题';
-          return;
-        }
-        document.getElementById('forgotQuestionLabel').textContent = result.question;
+        document.getElementById('forgotQuestionLabel').textContent = result.question || '请输入您设置的安全问题答案';
         document.getElementById('forgotPwdStep1').classList.add('hidden');
         document.getElementById('forgotPwdStep2').classList.remove('hidden');
       } catch (error) {
@@ -7381,6 +8593,10 @@
       if (newPassword.length < 8 || !/[a-zA-Z]/.test(newPassword) || !/\d/.test(newPassword) || !/[^a-zA-Z0-9]/.test(newPassword)) { document.getElementById('forgotPwdError2').textContent = '密码至少8位，需包含字母、数字和特殊字符'; return; }
       try {
         const result = await api('/api/forgot-password/reset', { method: 'POST', body: JSON.stringify({ username, securityAnswer, newPassword }) });
+        if (!result.reset) {
+          document.getElementById('forgotPwdError2').textContent = result.message || '如验证信息正确，密码将被重置';
+          return;
+        }
         closeModal('forgotPwdModal');
         setMessage('loginMessage', result.message || '密码重置成功');
         resetForgotPwdModal();
@@ -7409,6 +8625,7 @@
       try {
         const result = await api('/api/captcha');
         state.regCaptchaToken = result.token;
+        state.regCaptchaCsrf = result.csrfToken || '';
         document.getElementById('regCaptchaImg').src = result.svg;
       } catch (_) {}
     }
@@ -7417,6 +8634,7 @@
       try {
         const result = await api('/api/captcha');
         state.regCaptchaToken = result.token;
+        state.regCaptchaCsrf = result.csrfToken || '';
         document.getElementById('regCaptchaImg').src = result.svg;
         document.getElementById('regCaptchaInput').value = '';
       } catch (_) {}
@@ -7442,9 +8660,13 @@
       if (!securityQuestion) { err('请输入安全问题'); return; }
       if (!securityAnswer) { err('请输入安全问题答案'); return; }
       try {
-        const result = await api('/api/register', { method: 'POST', body: JSON.stringify({ username, name, password, phone, securityQuestion, securityAnswer, captchaToken: state.regCaptchaToken || '', captcha }) });
+        const result = await api('/api/register', {
+          method: 'POST',
+          headers: { 'X-Captcha-Token': state.regCaptchaToken || '', 'X-CSRF-Token': state.regCaptchaCsrf || '' },
+          body: JSON.stringify({ username, name, password, phone, securityQuestion, securityAnswer, captchaToken: state.regCaptchaToken || '', captcha })
+        });
         closeModal('registerModal');
-        setMessage('loginMessage', result.message || '注册成功，请登录');
+        setMessage('loginMessage', result.message || '提交成功，请等待管理员审批');
         ['regUsername','regName','regPassword','regPhone','regSecurityQuestion','regSecurityAnswer','regCaptchaInput'].forEach(id => {
           const el = document.getElementById(id);
           if (el) el.value = '';
@@ -7463,9 +8685,15 @@
       if (!username || !password) { document.getElementById('ldapError').textContent = '请输入用户名和密码'; return; }
       if (!captcha) { document.getElementById('ldapError').textContent = '请输入验证码'; return; }
       try {
-        const result = await api('/api/auth/ldap', { method: 'POST', body: JSON.stringify({ username, password, captchaToken: state.ldapCaptchaToken || '', captcha }) });
+        const captchaToken = state.ldapCaptchaToken || window.__ldapCaptchaToken || '';
+        const result = await api('/api/auth/ldap', {
+          method: 'POST',
+          headers: { 'X-Captcha-Token': captchaToken, 'X-CSRF-Token': state.ldapCaptchaCsrf || window.__ldapCaptchaCsrf || '' },
+          body: JSON.stringify({ username, password, captchaToken, captcha })
+        });
         state.user = result.user;
         state.systemConfig = result.systemConfig || state.systemConfig;
+        state.csrfToken = result.csrfToken || state.csrfToken;
         closeModal('ldapModal');
         setMessage('loginMessage', 'LDAP 登录成功');
         document.getElementById('ldapUsername').value = '';
@@ -7508,13 +8736,22 @@
       openModal('unconfiguredModal');
     }
 
-    els.loginForm.addEventListener('submit', async event => {
+    async function handleLoginSubmit(event) {
       event.preventDefault();
+      const submitButton = els.loginForm.querySelector('button[type="submit"]');
+      if (submitButton) {
+        submitButton.disabled = true;
+        submitButton.textContent = '登录中...';
+      }
       const formData = new FormData(event.target);
       const body = Object.fromEntries(formData.entries());
-      body.captchaToken = state.captchaToken || '';
+      body.captchaToken = state.captchaToken || window.__captchaToken || '';
       if (!body.captcha || !String(body.captcha).trim()) {
         setMessage('loginMessage', '请输入验证码', 'error');
+        if (submitButton) {
+          submitButton.disabled = false;
+          submitButton.textContent = '登录';
+        }
         return;
       }
       try {
@@ -7530,20 +8767,35 @@
         }
         state.user = result.user;
         state.systemConfig = result.systemConfig || state.systemConfig;
-        setMessage('loginMessage', '登录成功');
-        await boot({ skipSession: true, preserveAppOnError: true });
+        state.csrfToken = result.csrfToken || state.csrfToken;
+        setMessage('loginMessage', '登录成功，正在进入系统...');
+        try {
+          await boot({ skipSession: true, preserveAppOnError: true });
+        } catch (error) {
+          console.error(error);
+          throw new Error(`登录后初始化失败：${error.message}`);
+        }
       } catch (error) {
-        refreshCaptcha();
+        await refreshCaptcha();
         setMessage('loginMessage', error.message, 'error');
+        if (submitButton) {
+          submitButton.disabled = false;
+          submitButton.textContent = '登录';
+        }
       }
-    });
+    }
+
+    els.loginForm.addEventListener('submit', handleLoginSubmit);
 
     els.logoutBtn.addEventListener('click', async () => {
       stopSystemLoadAutoRefresh();
-      localStorage.removeItem('rememberedUsername');
-      await api('/api/logout', { method: 'POST', body: '{}' });
-      state.user = null;
-      location.reload();
+      try {
+        await api('/api/logout', { method: 'POST', body: '{}' });
+      } finally {
+        setSessionTokenFallback('');
+        state.user = null;
+        location.reload();
+      }
     });
 
     const changePwdModal = document.getElementById('changePwdModal');
@@ -7566,6 +8818,10 @@
       const confirmPassword = fd.get('confirmPassword');
       if (newPassword !== confirmPassword) {
         setMessage('changePwdMessage', '两次输入的新密码不一致', 'error');
+        return;
+      }
+      if (String(newPassword).length < 8 || !/[a-zA-Z]/.test(newPassword) || !/\d/.test(newPassword) || !/[^a-zA-Z0-9]/.test(newPassword)) {
+        setMessage('changePwdMessage', '密码至少8位，需包含字母、数字和特殊字符', 'error');
         return;
       }
       try {
@@ -7609,9 +8865,12 @@
       fillLogDispatcherOptions(event.target.value);
     });
     document.getElementById('edLogProjectId').addEventListener('change', event => {
+      fillEdLogAssetSelect(event.target.value);
       fillEdLogAssigneeOptions(event.target.value);
       fillEdLogDispatcherOptions(event.target.value);
     });
+    document.getElementById('logTicketType').addEventListener('change', () => applyLogProcessTemplate('', { force: false }));
+    document.getElementById('edLogTicketType').addEventListener('change', () => applyLogProcessTemplate('ed', { force: false }));
     document.getElementById('inspectionProjectId').addEventListener('change', event => {
       fillInspectionAssetSelect(event.target.value);
       fillInspectionPlanOwnerSelect('inspectionPlanOwnerId', event.target.value);
@@ -7719,22 +8978,22 @@
       renderAiInspection();
     });
     document.getElementById('aiInspectionResultPrevBtn').addEventListener('click', () => {
-      state.aiInspectionResultPage = Math.max(1, state.aiInspectionResultPage - 1);
-      renderAiInspection();
+      const page = Math.max(1, (state.aiInspectionResultPage || 1) - 1);
+      loadAiInspectionResults({ page }).then(() => renderAiInspection());
     });
     document.getElementById('aiInspectionResultNextBtn').addEventListener('click', () => {
-      const totalPages = Math.max(1, Math.ceil(filterByUserProject(state.aiInspectionResults).length / 5));
-      state.aiInspectionResultPage = Math.min(totalPages, state.aiInspectionResultPage + 1);
-      renderAiInspection();
+      const totalPages = Math.max(1, Number(state.aiInspectionResultTotalPages || 1));
+      const page = Math.min(totalPages, (state.aiInspectionResultPage || 1) + 1);
+      loadAiInspectionResults({ page }).then(() => renderAiInspection());
     });
     document.getElementById('aiInspectionReportPrevBtn').addEventListener('click', () => {
-      state.aiInspectionReportPage = Math.max(1, state.aiInspectionReportPage - 1);
-      renderAiInspection();
+      const page = Math.max(1, (state.aiInspectionReportPage || 1) - 1);
+      loadAiInspectionReports({ page }).then(() => renderAiInspection());
     });
     document.getElementById('aiInspectionReportNextBtn').addEventListener('click', () => {
-      const totalPages = Math.max(1, Math.ceil(filterByUserProject(state.aiInspectionResults).length / 5));
-      state.aiInspectionReportPage = Math.min(totalPages, state.aiInspectionReportPage + 1);
-      renderAiInspection();
+      const totalPages = Math.max(1, Number(state.aiInspectionReportTotalPages || 1));
+      const page = Math.min(totalPages, (state.aiInspectionReportPage || 1) + 1);
+      loadAiInspectionReports({ page }).then(() => renderAiInspection());
     });
     document.getElementById('configBackupPlanPrevBtn').addEventListener('click', () => {
       state.configBackupPlanPage = Math.max(1, state.configBackupPlanPage - 1);
@@ -7948,13 +9207,50 @@
       renderAssetOps();
     });
     document.getElementById('notificationPrevBtn').addEventListener('click', () => {
-      state.notificationPage = Math.max(1, state.notificationPage - 1);
-      renderGovernance();
+      const nextPage = Math.max(1, state.notificationPage - 1);
+      if (nextPage === state.notificationPage) return;
+      loadNotifications({ page: nextPage }).then(() => renderGovernance()).catch(error => {
+        setMessage('notificationMessage', error.message, 'error');
+      });
     });
     document.getElementById('notificationNextBtn').addEventListener('click', () => {
-      const totalPages = Math.max(1, Math.ceil(filterByUserProject(state.notifications).length / 10));
-      state.notificationPage = Math.min(totalPages, state.notificationPage + 1);
-      renderGovernance();
+      const nextPage = Math.min(state.notificationTotalPages || 1, state.notificationPage + 1);
+      if (nextPage === state.notificationPage) return;
+      loadNotifications({ page: nextPage }).then(() => renderGovernance()).catch(error => {
+        setMessage('notificationMessage', error.message, 'error');
+      });
+    });
+    document.getElementById('notificationTable').addEventListener('click', async event => {
+      const button = event.target.closest('button[data-action="mark-notification-read"]');
+      if (!button) return;
+      try {
+        await api(`/api/notifications/${button.dataset.id}/read`, { method: 'POST', body: JSON.stringify({}) });
+        await loadNotifications({ page: state.notificationPage || 1 });
+        renderGovernance();
+        setMessage('notificationMessage', '通知已标记为已读');
+      } catch (error) {
+        setMessage('notificationMessage', error.message, 'error');
+      }
+    });
+    document.getElementById('notificationMarkAllReadBtn').addEventListener('click', async () => {
+      try {
+        const result = await api('/api/notifications/read-all', { method: 'POST', body: JSON.stringify({}) });
+        await loadNotifications({ page: state.notificationPage || 1 });
+        renderGovernance();
+        setMessage('notificationMessage', result.message || '已标记全部通知为已读');
+      } catch (error) {
+        setMessage('notificationMessage', error.message, 'error');
+      }
+    });
+    document.getElementById('notificationClearReadBtn').addEventListener('click', async () => {
+      try {
+        const result = await api('/api/notifications/read', { method: 'DELETE', body: JSON.stringify({}) });
+        await loadNotifications({ page: 1 });
+        renderGovernance();
+        setMessage('notificationMessage', result.message || '已清理已读通知');
+      } catch (error) {
+        setMessage('notificationMessage', error.message, 'error');
+      }
     });
     document.getElementById('approvalPrevBtn').addEventListener('click', () => {
       state.approvalPage = Math.max(1, state.approvalPage - 1);
@@ -7972,6 +9268,141 @@
     document.getElementById('reportNextBtn').addEventListener('click', () => {
       state.reportPage = Math.min(state.reportPage + 1, state.reportTotalPages || 1);
       refreshReports();
+    });
+    document.getElementById('workloadPeriod').addEventListener('change', () => {
+      toggleWorkloadCustomRange();
+      refreshReports();
+    });
+    document.getElementById('refreshWorkloadBtn').addEventListener('click', refreshReports);
+    document.getElementById('workloadPrevBtn').addEventListener('click', () => {
+      state.workloadPage = Math.max(1, state.workloadPage - 1);
+      renderWorkloadTable();
+    });
+    document.getElementById('workloadNextBtn').addEventListener('click', () => {
+      const totalPages = Math.max(1, Math.ceil((state.workloadRows || []).length / 10));
+      state.workloadPage = Math.min(totalPages, state.workloadPage + 1);
+      renderWorkloadTable();
+    });
+    document.getElementById('exportWorkloadBtn').addEventListener('click', () => {
+      const params = getWorkloadQuery();
+      downloadReport(`/api/reports/workload/export?${params.toString()}`, `workload_${formatLocalDateKey(new Date())}.csv`, { method: 'POST' });
+    });
+    document.getElementById('workReportOverviewTrendUnit').addEventListener('change', () => {
+      if (state.user?.role === 'admin') refreshWorkReportOverview();
+    });
+    document.getElementById('refreshWorkReportOverviewBtn').addEventListener('click', () => {
+      if (state.user?.role === 'admin') refreshWorkReportOverview();
+    });
+    document.getElementById('exportWorkReportOverviewBtn').addEventListener('click', () => {
+      const params = getWorkReportOverviewQuery();
+      downloadReport(`/api/reports/work-reports/overview/export?${params.toString()}`, `work_report_overview_${formatLocalDateKey(new Date())}.csv`, { method: 'POST' });
+    });
+    document.getElementById('workReportPendingTable').addEventListener('click', event => {
+      const row = event.target.closest('tr[data-user-id]');
+      if (!row) return;
+      openPendingWorkReportFromOverview({
+        id: row.getAttribute('data-id') || '',
+        reportType: row.getAttribute('data-report-type') || '',
+        projectId: row.getAttribute('data-project-id') || '',
+        userId: row.getAttribute('data-user-id') || ''
+      });
+    });
+    document.getElementById('exportWorkReportListBtn').addEventListener('click', () => {
+      const params = getWorkReportQuery();
+      downloadReport(`/api/reports/work-reports/export?${params.toString()}`, `work_reports_${formatLocalDateKey(new Date())}.csv`, { method: 'POST' });
+    });
+    document.getElementById('refreshWorkReportListBtn').addEventListener('click', refreshWorkReportList);
+    document.getElementById('workReportListPrevBtn').addEventListener('click', () => {
+      state.workReportListPage = Math.max(1, state.workReportListPage - 1);
+      renderWorkReportList();
+    });
+    document.getElementById('workReportListNextBtn').addEventListener('click', () => {
+      const totalPages = Math.max(1, Math.ceil((state.workReports || []).length / 10));
+      state.workReportListPage = Math.min(totalPages, state.workReportListPage + 1);
+      renderWorkReportList();
+    });
+    document.getElementById('workReportFilterType').addEventListener('change', async () => {
+      await refreshWorkReportList();
+      if (state.user?.role === 'admin') await refreshWorkReportOverview();
+    });
+    document.getElementById('workReportFilterStatus').addEventListener('change', async () => {
+      await refreshWorkReportList();
+      if (state.user?.role === 'admin') await refreshWorkReportOverview();
+    });
+    document.getElementById('workReportFilterProject').addEventListener('change', async () => {
+      fillWorkReportFilterUserSelect();
+      await refreshWorkReportList();
+      if (state.user?.role === 'admin') await refreshWorkReportOverview();
+    });
+    document.getElementById('workReportFilterUser').addEventListener('change', async () => {
+      await refreshWorkReportList();
+      if (state.user?.role === 'admin') await refreshWorkReportOverview();
+    });
+    document.getElementById('saveWorkReportBtn').addEventListener('click', async () => {
+      try {
+        await saveWorkReport(false);
+      } catch (error) {
+        setMessage('workReportEditorMessage', error.message, 'error');
+      }
+    });
+    document.getElementById('submitWorkReportBtn').addEventListener('click', async () => {
+      try {
+        await saveWorkReport(true);
+      } catch (error) {
+        setMessage('workReportEditorMessage', error.message, 'error');
+      }
+    });
+    document.getElementById('resetWorkReportBtn').addEventListener('click', resetWorkReportForm);
+    document.getElementById('workReportTable').addEventListener('click', async event => {
+      const button = event.target.closest('button[data-action]');
+      if (!button) return;
+      const report = state.workReports.find(item => item.id === button.dataset.id);
+      if (!report) return;
+      try {
+        if (button.dataset.action === 'view-work-report') {
+          renderWorkReportDetail(report.id);
+          return;
+        }
+        if (button.dataset.action === 'edit-work-report') {
+          populateWorkReportForm(report);
+          renderWorkReportDetail(report.id);
+          return;
+        }
+        if (button.dataset.action === 'delete-work-report') {
+          const confirmed = await showConfirm('确认删除该草稿工作汇报？');
+          if (!confirmed) return;
+          await api(`/api/work-reports/${report.id}`, { method: 'DELETE' });
+          showToast('工作汇报草稿已删除');
+        }
+        if (button.dataset.action === 'submit-work-report') {
+          const validationError = validateWorkReportPayload({
+            projectId: report.projectId,
+            anchorDate: report.rangeStart,
+            summary: String(report.summary || '').trim(),
+            completedWork: String(report.completedWork || '').trim(),
+            pendingWork: String(report.pendingWork || '').trim(),
+            nextPlan: String(report.nextPlan || '').trim()
+          });
+          if (validationError) throw new Error(validationError);
+          await api(`/api/work-reports/${report.id}/submit`, { method: 'POST', body: JSON.stringify({}) });
+        }
+        if (button.dataset.action === 'approve-work-report') {
+          await reviewWorkReport(report.id, 'approved');
+          return;
+        }
+        if (button.dataset.action === 'return-work-report') {
+          await reviewWorkReport(report.id, 'returned');
+          return;
+        }
+        if (button.dataset.action === 'lock-work-report') {
+          await reviewWorkReport(report.id, 'locked');
+          return;
+        }
+        await loadBaseData();
+        await refreshReports();
+      } catch (error) {
+        showToast(error.message, 'error');
+      }
     });
 
     document.getElementById('dashboardMetrics').addEventListener('click', event => {
@@ -8121,8 +9552,10 @@
         ticketType: document.getElementById('edLogTicketType').value,
         assignee: document.getElementById('edLogAssignee').value.trim(),
         projectId: document.getElementById('edLogProjectId').value,
+        assetId: document.getElementById('edLogAssetId').value,
         relatedTarget: document.getElementById('edLogRelatedTarget').value.trim(),
         event: document.getElementById('edLogEvent').value.trim(),
+        result: document.getElementById('edLogResult').value,
         process: document.getElementById('edLogProcess').value.trim(),
         conclusion: document.getElementById('edLogConclusion').value.trim(),
         durationHours: document.getElementById('edLogDurationHours').value,
@@ -8135,6 +9568,8 @@
       if (!data.conclusion) { msg.textContent = '请输入结论'; msg.className = 'message error'; return; }
       if (!data.durationHours && data.durationHours !== 0) { msg.textContent = '请输入工单用时'; msg.className = 'message error'; return; }
       try {
+        const confirmed = await confirmLogQualityWarnings(data);
+        if (!confirmed) return;
         await api(`/api/logs/${id}`, { method: 'PUT', body: JSON.stringify(data) });
         closeModal('logEditModal');
         state.logs = (await api('/api/logs')).data;
@@ -8685,13 +10120,13 @@
           const isError = result.result.level === '严重' && result.result.probeError;
           setMessage('aiInspectionTaskMessage', isError ? `巡检执行失败: ${result.result.summary}` : `智能巡检执行完成：${result.result.level}，得分 ${result.result.score}`, isError ? 'error' : 'success');
           await loadBaseData();
-          openTabWithSubtab('aiInspection', 'tasks');
+          if (state.currentTab === 'aiInspection') openTabWithSubtab('aiInspection', 'tasks');
           return;
         }
         if (button.dataset.action === 'view-ai-report') {
           const w = window.open('', '_blank');
           w.document.write('加载中...');
-          const resp = await api(`/api/reports/ai-inspection/results/${button.dataset.id}/html`);
+          const resp = await api(`/api/reports/ai-inspection/results/${button.dataset.id}/html`, { method: 'POST', body: '{}' });
           w.document.open();
           w.document.write(resp);
           w.document.close();
@@ -8727,7 +10162,7 @@
         if (button.dataset.action === 'view-ai-report') {
           const w = window.open('', '_blank');
           w.document.write('加载中...');
-          const resp = await api(`/api/reports/ai-inspection/results/${button.dataset.id}/html`);
+          const resp = await api(`/api/reports/ai-inspection/results/${button.dataset.id}/html`, { method: 'POST', body: '{}' });
           w.document.open();
           w.document.write(resp);
           w.document.close();
@@ -8836,11 +10271,15 @@
     });
     ['aiResultSearch', 'aiResultLevelFilter'].forEach(id => {
       const el = document.getElementById(id);
-      if (el) el.addEventListener('input', () => { state.aiInspectionResultPage = 1; renderAiInspection(); });
+      if (el) el.addEventListener('input', () => {
+        loadAiInspectionResults({ page: 1 }).then(() => renderAiInspection());
+      });
     });
     ['aiReportSearch', 'aiReportLevelFilter'].forEach(id => {
       const el = document.getElementById(id);
-      if (el) el.addEventListener('input', () => { state.aiInspectionReportPage = 1; renderAiInspection(); });
+      if (el) el.addEventListener('input', () => {
+        loadAiInspectionReports({ page: 1 }).then(() => renderAiInspection());
+      });
     });
 
     document.getElementById('approvalTable').addEventListener('click', async event => {
@@ -8917,12 +10356,36 @@
       try {
         const formData = new FormData();
         formData.append('package', file);
+        let previousVersion = '';
+        try {
+          const before = await api('/api/system/upgrade/status');
+          previousVersion = before.currentVersion || '';
+        } catch (_) {}
         const data = await api('/api/system/upgrade', { method: 'POST', body: formData });
         setMessage('systemUpgradeMessage', data.message + '，页面即将自动刷新...', 'success');
         fileInput.value = '';
         button.disabled = true;
         button.textContent = '系统重启中...';
-        setTimeout(() => { location.reload(); }, 5000);
+        const pollUpgrade = async () => {
+          const deadline = Date.now() + 90000;
+          while (Date.now() < deadline) {
+            await new Promise(resolve => setTimeout(resolve, 2000));
+            try {
+              const status = await api('/api/system/upgrade/status');
+              if (status.currentVersion && previousVersion && status.currentVersion !== previousVersion) {
+                location.reload();
+                return;
+              }
+              if (!status.hasPending && !status.ready) {
+                location.reload();
+                return;
+              }
+              button.textContent = status.hasPending ? '正在应用升级...' : '系统重启中...';
+            } catch (_) {}
+          }
+          location.reload();
+        };
+        pollUpgrade();
       } catch (error) {
         setMessage('systemUpgradeMessage', error.message, 'error');
         button.disabled = false;
@@ -8959,7 +10422,27 @@
       }
     });
     document.getElementById('systemExportBtn').addEventListener('click', () => {
-      window.location.href = '/api/system/export';
+      downloadReport('/api/system/export', `onsite-ops-export-${formatLocalDateKey(new Date())}.json`, { method: 'POST' });
+    });
+    document.getElementById('systemBackupList').addEventListener('click', async event => {
+      const downloadBtn = event.target.closest('button[data-action="download-system-backup"]');
+      if (downloadBtn) {
+        downloadReport(downloadBtn.dataset.href, downloadBtn.dataset.filename || 'backup.json', { method: 'POST' });
+        return;
+      }
+      const restoreBtn = event.target.closest('button[data-action="restore-system-backup"]');
+      if (!restoreBtn) return;
+      const filename = restoreBtn.dataset.filename;
+      if (!filename) return;
+      if (!await showConfirm(`确认从磁盘备份恢复 ${filename} 吗？当前数据会先自动备份。`)) return;
+      try {
+        const result = await api(`/api/system/backups/${encodeURIComponent(filename)}/restore`, { method: 'POST', body: '{}' });
+        setMessage('systemBackupMessage', result.message || '磁盘备份恢复成功');
+        await loadBaseData();
+        await refreshSystemManagement();
+      } catch (error) {
+        setMessage('systemBackupMessage', error.message, 'error');
+      }
     });
     document.getElementById('systemResetBtn').addEventListener('click', async event => {
       const button = event.currentTarget;
@@ -9052,10 +10535,93 @@
         state.systemConfig = result.systemConfig || state.systemConfig;
         renderSystemSettings();
         resetIdleLogoutTimer();
-        setMessage('systemSettingsMessage', `${result.message}，当前空闲退出时间：${getWebIdleLogoutMinutes()} 分钟，HTTPS 端口：${state.systemConfig.httpsPort}`);
+        setMessage('systemSettingsMessage', result.message);
         await refreshSystemManagement();
       } catch (error) {
         setMessage('systemSettingsMessage', error.message, 'error');
+      } finally {
+        button.disabled = false;
+        button.textContent = originalText;
+      }
+    });
+    document.getElementById('saveWorkReportReminderBtn').addEventListener('click', async event => {
+      const dailyReportReminderHourInput = document.getElementById('dailyReportReminderHour');
+      const weeklyReportReminderDaysInput = document.getElementById('weeklyReportReminderDays');
+      const monthlyReportReminderDaysInput = document.getElementById('monthlyReportReminderDays');
+      const dailyLowHoursThresholdInput = document.getElementById('dailyLowHoursThreshold');
+      const dailyHighHoursThresholdInput = document.getElementById('dailyHighHoursThreshold');
+      const noLogStreakDaysInput = document.getElementById('noLogStreakDays');
+      const projectInactiveDaysInput = document.getElementById('projectInactiveDays');
+      const dailyReportReminderHourValue = Number(dailyReportReminderHourInput.value);
+      const weeklyReportReminderDaysValue = Number(weeklyReportReminderDaysInput.value);
+      const monthlyReportReminderDaysValue = Number(monthlyReportReminderDaysInput.value);
+      const dailyLowHoursThresholdValue = Number(dailyLowHoursThresholdInput.value);
+      const dailyHighHoursThresholdValue = Number(dailyHighHoursThresholdInput.value);
+      const noLogStreakDaysValue = Number(noLogStreakDaysInput.value);
+      const projectInactiveDaysValue = Number(projectInactiveDaysInput.value);
+      if (!Number.isFinite(dailyReportReminderHourValue) || dailyReportReminderHourValue < 0 || dailyReportReminderHourValue > 23) {
+        setMessage('workReportReminderMessage', '请输入 0 到 23 之间的日报提醒时间', 'error');
+        dailyReportReminderHourInput.focus();
+        return;
+      }
+      if (!Number.isFinite(weeklyReportReminderDaysValue) || weeklyReportReminderDaysValue < 0 || weeklyReportReminderDaysValue > 30) {
+        setMessage('workReportReminderMessage', '请输入 0 到 30 之间的周报提前提醒天数', 'error');
+        weeklyReportReminderDaysInput.focus();
+        return;
+      }
+      if (!Number.isFinite(monthlyReportReminderDaysValue) || monthlyReportReminderDaysValue < 0 || monthlyReportReminderDaysValue > 31) {
+        setMessage('workReportReminderMessage', '请输入 0 到 31 之间的月报提前提醒天数', 'error');
+        monthlyReportReminderDaysInput.focus();
+        return;
+      }
+      if (!Number.isFinite(dailyLowHoursThresholdValue) || dailyLowHoursThresholdValue < 0 || dailyLowHoursThresholdValue > 24) {
+        setMessage('workReportReminderMessage', '请输入 0 到 24 之间的低工时阈值', 'error');
+        dailyLowHoursThresholdInput.focus();
+        return;
+      }
+      if (!Number.isFinite(dailyHighHoursThresholdValue) || dailyHighHoursThresholdValue < 0 || dailyHighHoursThresholdValue > 24) {
+        setMessage('workReportReminderMessage', '请输入 0 到 24 之间的高工时阈值', 'error');
+        dailyHighHoursThresholdInput.focus();
+        return;
+      }
+      if (dailyHighHoursThresholdValue < dailyLowHoursThresholdValue) {
+        setMessage('workReportReminderMessage', '高工时阈值需要大于或等于低工时阈值', 'error');
+        dailyHighHoursThresholdInput.focus();
+        return;
+      }
+      if (!Number.isFinite(noLogStreakDaysValue) || noLogStreakDaysValue < 1 || noLogStreakDaysValue > 30) {
+        setMessage('workReportReminderMessage', '请输入 1 到 30 之间的连续无记录天数', 'error');
+        noLogStreakDaysInput.focus();
+        return;
+      }
+      if (!Number.isFinite(projectInactiveDaysValue) || projectInactiveDaysValue < 1 || projectInactiveDaysValue > 90) {
+        setMessage('workReportReminderMessage', '请输入 1 到 90 之间的项目无人填报天数', 'error');
+        projectInactiveDaysInput.focus();
+        return;
+      }
+      const button = event.currentTarget;
+      const originalText = button.textContent;
+      button.disabled = true;
+      button.textContent = '保存中...';
+      try {
+        const result = await api('/api/system/settings', {
+          method: 'POST',
+          body: JSON.stringify({
+            dailyReportReminderHour: dailyReportReminderHourValue,
+            weeklyReportReminderDays: weeklyReportReminderDaysValue,
+            monthlyReportReminderDays: monthlyReportReminderDaysValue,
+            dailyLowHoursThreshold: dailyLowHoursThresholdValue,
+            dailyHighHoursThreshold: dailyHighHoursThresholdValue,
+            noLogStreakDays: noLogStreakDaysValue,
+            projectInactiveDays: projectInactiveDaysValue
+          })
+        });
+        state.systemConfig = result.systemConfig || state.systemConfig;
+        renderSystemSettings();
+        setMessage('workReportReminderMessage', `${result.message}，当前为日报 ${state.systemConfig.dailyReportReminderHour} 点、周报提前 ${state.systemConfig.weeklyReportReminderDays} 天、月报提前 ${state.systemConfig.monthlyReportReminderDays} 天、低工时 ${state.systemConfig.dailyLowHoursThreshold} 小时、高工时 ${state.systemConfig.dailyHighHoursThreshold} 小时`);
+        await refreshSystemManagement();
+      } catch (error) {
+        setMessage('workReportReminderMessage', error.message, 'error');
       } finally {
         button.disabled = false;
         button.textContent = originalText;
@@ -9234,6 +10800,8 @@
       const data = Object.fromEntries(new FormData(event.target).entries());
       if (!data.id && !data.password) { setMessage('userMessage', '请输入密码', 'error'); return; }
       if (!data.id && data.password && (data.password.length < 8 || !/[a-zA-Z]/.test(data.password) || !/\d/.test(data.password) || !/[^a-zA-Z0-9]/.test(data.password))) { setMessage('userMessage', '密码至少8位，需包含字母、数字和特殊字符', 'error'); return; }
+      if (!data.id && !String(data.securityQuestion || '').trim()) { setMessage('userMessage', '请填写安全问题', 'error'); return; }
+      if (!data.id && !String(data.securityAnswer || '').trim()) { setMessage('userMessage', '请填写安全问题答案', 'error'); return; }
       if (!data.role) { setMessage('userMessage', '请选择角色', 'error'); return; }
       if (!data.projectId) { setMessage('userMessage', '请选择关联项目', 'error'); return; }
       if (!data.startDate) { setMessage('userMessage', '请选择开始日期', 'error'); return; }
@@ -9500,6 +11068,8 @@
       const data = Object.fromEntries(new FormData(event.target).entries());
       if (data.durationHours !== undefined && Number(data.durationHours) < 0) { setMessage('logMessage', '工单用时不能为负数', 'error'); return; }
       try {
+        const confirmed = await confirmLogQualityWarnings(data);
+        if (!confirmed) return;
         await api('/api/logs', { method: 'POST', body: JSON.stringify(data) });
         resetLogForm();
         setMessage('logMessage', '日志创建成功');
@@ -9668,6 +11238,11 @@
     renderAiInspectionTemplateMetricEditor(getAiInspectionDefaultMetrics('server'));
     renderAiInspectionTaskMetricEditor([]);
     document.querySelector('#aiInspectionTaskForm [name="executedAt"]').value = new Date().toISOString().slice(0, 16);
+    document.getElementById('workloadAnchorDate').value = formatLocalDateKey(new Date());
+    document.getElementById('workloadStartDate').value = formatLocalDateKey(new Date());
+    document.getElementById('workloadEndDate').value = formatLocalDateKey(new Date());
+    resetWorkReportForm();
+    toggleWorkloadCustomRange();
     syncAiInspectionTargetProtocolOptions();
 
     boot();
