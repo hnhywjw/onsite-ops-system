@@ -770,6 +770,19 @@
       border-radius: 12px;
       background: #f8fafc;
     }
+    .system-upgrade-log-item {
+      align-items: flex-start;
+    }
+    .system-upgrade-log-status {
+      font-weight: 600;
+      white-space: nowrap;
+    }
+    .system-upgrade-log-status.accepted {
+      color: #027a48;
+    }
+    .system-upgrade-log-status.failed {
+      color: #b42318;
+    }
     .status-with-indicator {
       display: inline-flex;
       align-items: center;
@@ -2781,7 +2794,7 @@
             <div class="card">
               <h3 style="margin-top:0;">软件升级</h3>
               <div class="muted">当前版本：<span id="systemCurrentVersion">-</span></div>
-              <p class="muted">上传升级包（.tar.gz），系统将自动应用升级并重启容器。</p>
+              <p class="muted">上传升级包（.tar.gz）。开发环境校验 manifest 与 SHA256；生产环境还须使用与 UPGRADE_SIGNING_KEY 一致的 HMAC 签名包，系统将自动应用并重启。</p>
               <label style="margin-top:14px;">
                 <input id="systemUpgradeFile" type="file" accept=".tar.gz,.tgz,application/gzip,application/x-gzip" />
               </label>
@@ -2789,6 +2802,8 @@
                 <button class="primary" id="systemUpgradeBtn" type="button">上传升级包并升级</button>
               </div>
               <div id="systemUpgradeMessage"></div>
+              <div class="muted" style="margin-top:14px;">升级日志</div>
+              <div id="systemUpgradeLogList" class="system-backup-list"></div>
             </div>
             <div class="card">
               <h3 style="margin-top:0;">数据导入</h3>
@@ -8081,6 +8096,31 @@
       }
     }
 
+    function upgradeLogStatusLabel(status) {
+      return status === 'accepted' ? '已接收' : '失败';
+    }
+
+    async function refreshUpgradeLogs() {
+      const listEl = document.getElementById('systemUpgradeLogList');
+      if (!listEl || state.user.role !== 'admin') return;
+      try {
+        const result = await api('/api/system/upgrade/logs');
+        const rows = Array.isArray(result.data) ? result.data : [];
+        listEl.innerHTML = rows.map(item => `
+          <div class="system-backup-item system-upgrade-log-item">
+            <div>
+              <div>${esc(item.createdAt || '-')} · ${esc(item.operatorName || '-')}</div>
+              <div class="muted">${esc(item.filename || '-')} · ${esc(item.fromVersion || '-')} → ${esc(item.toVersion || '-')}</div>
+              <div class="muted">${esc(item.message || '')}</div>
+            </div>
+            <div class="system-upgrade-log-status ${item.status === 'accepted' ? 'accepted' : 'failed'}">${esc(upgradeLogStatusLabel(item.status))}</div>
+          </div>
+        `).join('') || '<div class="muted">暂无升级日志</div>';
+      } catch (_) {
+        listEl.innerHTML = '<div class="muted">升级日志加载失败</div>';
+      }
+    }
+
     async function refreshSystemManagement() {
       if (state.user.role !== 'admin') return;
       const [info, services, load] = await Promise.all([
@@ -8108,6 +8148,7 @@
       renderSystemLoad();
       renderSystemSettings();
       renderSystemAuditLogs();
+      await refreshUpgradeLogs();
     }
 
     function stopSystemLoadAutoRefresh() {
@@ -10390,6 +10431,7 @@
         setMessage('systemUpgradeMessage', error.message, 'error');
         button.disabled = false;
         button.textContent = originalText;
+        await refreshUpgradeLogs();
       }
     });
     document.getElementById('systemImportBtn').addEventListener('click', async () => {

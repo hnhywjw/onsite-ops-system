@@ -460,6 +460,9 @@ async function main() {
   const invalidUpgrade = await fetch(base + '/api/system/upgrade', { method: 'POST', headers: withCsrf({ cookie }, 'POST'), body: invalidUpgradeForm });
   const invalidUpgradeData = await invalidUpgrade.json();
   assert(invalidUpgrade.status === 400 && /签名|SHA256/.test(String(invalidUpgradeData.message || '')), `升级包完整性校验未生效: ${invalidUpgrade.status} ${String(invalidUpgradeData.message || '')}`);
+  const upgradeLogsAfterInvalid = await request('/api/system/upgrade/logs', { headers: { cookie } });
+  assert(upgradeLogsAfterInvalid.status === 200 && Array.isArray(upgradeLogsAfterInvalid.data.data), '升级日志接口失败');
+  assert(upgradeLogsAfterInvalid.data.data.some(item => item.status === 'failed' && /签名|SHA256/.test(String(item.message || ''))), '失败升级未写入升级日志');
   const projectId = projects.data.data[0]?.id || '';
   const assetId = assets.data.data.find(item => item.projectId === projectId)?.id || '';
   const approverId = users.data.data.find(item => item.role === 'admin')?.id || '';
@@ -490,6 +493,8 @@ async function main() {
   assert(Number(engineerSession.data.systemConfig?.webIdleLogoutMinutes) >= 1, '工程师会话应返回超时配置');
   const engineerAudit = await request('/api/audit-logs?all=1', { headers: { cookie: engineerCookie } });
   assert(engineerAudit.status === 403, '工程师不应读取审计日志');
+  const engineerUpgradeLogs = await request('/api/system/upgrade/logs', { headers: { cookie: engineerCookie } });
+  assert(engineerUpgradeLogs.status === 403, '工程师不应读取升级日志');
   const engineerWorkReports = await request(`/api/work-reports?projectId=${encodeURIComponent(projectId)}&userId=${encodeURIComponent(engineerAccount.id)}`, { headers: { cookie } });
   assert(engineerWorkReports.status === 200, '查询工程师工作汇报失败');
   const existingEngineerReports = engineerWorkReports.data.data || [];

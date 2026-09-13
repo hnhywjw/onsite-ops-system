@@ -54,7 +54,7 @@ const dbConfig = {
   password: process.env.MYSQL_PASSWORD || 'onsite_ops_password',
   database: process.env.MYSQL_DATABASE || 'onsite_ops_system'
 };
-const dbCollectionKeys = ['users', 'projects', 'assets', 'assetRelations', 'topologyLayouts', 'logs', 'inspectionPlans', 'inspectionExecutions', 'spareParts', 'sparePartMovements', 'changeRecords', 'incidentRecords', 'approvals', 'notifications', 'auditLogs', 'knowledgeBase', 'documents', 'workReports', 'aiInspectionTargets', 'aiInspectionTemplates', 'aiInspectionTasks', 'aiInspectionResults', 'configBackupPlans', 'configBackupRecords', 'sessions', 'systemConfig', 'runtimeState'];
+const dbCollectionKeys = ['users', 'projects', 'assets', 'assetRelations', 'topologyLayouts', 'logs', 'inspectionPlans', 'inspectionExecutions', 'spareParts', 'sparePartMovements', 'changeRecords', 'incidentRecords', 'approvals', 'notifications', 'auditLogs', 'upgradeLogs', 'knowledgeBase', 'documents', 'workReports', 'aiInspectionTargets', 'aiInspectionTemplates', 'aiInspectionTasks', 'aiInspectionResults', 'configBackupPlans', 'configBackupRecords', 'sessions', 'systemConfig', 'runtimeState'];
 const objectCollectionKeys = ['topologyLayouts', 'systemConfig', 'runtimeState'];
 const OBJECT_ROOT_ID = '__root__';
 
@@ -148,7 +148,7 @@ const loginRateLimitLockMs = parseInt(process.env.LOGIN_RATE_LIMIT_LOCK_MS, 10) 
 const loginRateLimitMaxAttempts = parseInt(process.env.LOGIN_RATE_LIMIT_MAX_ATTEMPTS, 10) || 5;
 const webSocketHeartbeatIntervalMs = parseInt(process.env.WS_HEARTBEAT_INTERVAL_MS, 10) || 30000;
 const isProduction = process.env.NODE_ENV === 'production';
-const upgradeSigningKey = process.env.UPGRADE_SIGNING_KEY || '';
+const upgradeSigningKeyEnv = String(process.env.UPGRADE_SIGNING_KEY || '').trim();
 const allowedBackupCommands = (process.env.CONFIG_BACKUP_ALLOWED_COMMANDS || 'show running-config,show startup-config,display current-configuration,cat /etc/os-release')
   .split(',')
   .map(item => item.trim())
@@ -189,6 +189,32 @@ fs.mkdirSync(notificationArchiveDir, { recursive: true });
 fs.mkdirSync(httpsCertDir, { recursive: true });
 fs.mkdirSync(documentsUploadDir, { recursive: true });
 
+function resolveRuntimeUpgradeSigningKey() {
+  if (upgradeSigningKeyEnv.length >= 32) return upgradeSigningKeyEnv;
+  if (isProduction) return upgradeSigningKeyEnv;
+  const keyPath = path.join(dataDir, 'upgrade-signing.key');
+  try {
+    if (fs.existsSync(keyPath)) {
+      const stored = String(fs.readFileSync(keyPath, 'utf8') || '').trim();
+      if (stored.length >= 32) return stored;
+    }
+  } catch (error) {
+    console.warn('读取 upgrade-signing.key 失败:', error.message);
+  }
+  const generated = crypto.randomBytes(32).toString('hex');
+  try {
+    fs.writeFileSync(keyPath, generated, { encoding: 'utf8', mode: 0o600 });
+  } catch (error) {
+    console.warn('写入 upgrade-signing.key 失败:', error.message);
+  }
+  return generated;
+}
+
+const upgradeSigningKey = resolveRuntimeUpgradeSigningKey();
+if (!upgradeSigningKeyEnv && !isProduction) {
+  console.warn('WARNING: UPGRADE_SIGNING_KEY 环境变量未设置，已使用 data/upgrade-signing.key。生产环境请显式设置 UPGRADE_SIGNING_KEY。');
+}
+
 function validateProductionConfiguration() {
   if (!isProduction) return;
   const problems = [];
@@ -199,7 +225,7 @@ function validateProductionConfiguration() {
   if (!process.env.INITIAL_ENGINEER_SECURITY_ANSWER || process.env.INITIAL_ENGINEER_SECURITY_ANSWER === 'blue') problems.push('INITIAL_ENGINEER_SECURITY_ANSWER 必须设置为生产安全答案');
   if (!process.env.ENCRYPTION_KEY || process.env.ENCRYPTION_KEY.length < 32) problems.push('ENCRYPTION_KEY 必须设置且长度不少于 32 位');
   if (!process.env.DOCUMENT_TOKEN_SECRET || process.env.DOCUMENT_TOKEN_SECRET.length < 32) console.warn('WARNING: DOCUMENT_TOKEN_SECRET 环境变量未设置，文档访问令牌重启后将失效。请在生产环境中设置 DOCUMENT_TOKEN_SECRET。');
-  if (!upgradeSigningKey || upgradeSigningKey.length < 32) problems.push('UPGRADE_SIGNING_KEY 必须设置且长度不少于 32 位');
+  if (!upgradeSigningKeyEnv || upgradeSigningKeyEnv.length < 32) problems.push('UPGRADE_SIGNING_KEY 必须设置且长度不少于 32 位');
   if (problems.length) {
     throw new Error(`生产配置不安全：${problems.join('；')}`);
   }
@@ -782,6 +808,7 @@ function seed() {
     approvals: [],
     notifications: [],
     auditLogs: [],
+    upgradeLogs: [],
     workReports: [],
     sessions: [],
     systemConfig: {
@@ -2082,6 +2109,17 @@ function normalizeDb(raw = {}) {
       detail: item.detail || '',
       createdAt: item.createdAt || now()
     })),
+    upgradeLogs: (raw.upgradeLogs || []).map(item => ({
+      id: item.id || id('upgrade-log'),
+      operatorId: item.operatorId || '',
+      operatorName: item.operatorName || '',
+      filename: item.filename || '',
+      fromVersion: item.fromVersion || '',
+      toVersion: item.toVersion || '',
+      status: item.status === 'accepted' ? 'accepted' : 'failed',
+      message: item.message || '',
+      createdAt: item.createdAt || now()
+    })),
     knowledgeBase: (raw.knowledgeBase || []).map(item => ({
       id: item.id || id('kb'),
       title: item.title || '',
@@ -3155,6 +3193,40 @@ function appendAuditLog(db, user, action, targetType, targetId, detail, projectI
   if (db.auditLogs.length > 10000) {
     db.auditLogs = db.auditLogs.slice(-5000);
   }
+}
+
+function sanitizeUpgradeFilename(filename) {
+  const base = path.basename(String(filename || '').replace(/\\/g, '/'));
+  return base.slice(0, 180);
+}
+
+async function appendUpgradeLog(db, user, fields = {}) {
+  db.upgradeLogs = db.upgradeLogs || [];
+  db.upgradeLogs.push({
+    id: id('upgrade-log'),
+    operatorId: user.id || '',
+    operatorName: user.name || user.username || '',
+    filename: sanitizeUpgradeFilename(fields.filename),
+    fromVersion: String(fields.fromVersion || packageInfo.version || ''),
+    toVersion: String(fields.toVersion || ''),
+    status: fields.status === 'accepted' ? 'accepted' : 'failed',
+    message: String(fields.message || '').slice(0, 500),
+    createdAt: now()
+  });
+  if (db.upgradeLogs.length > 200) {
+    db.upgradeLogs = db.upgradeLogs.slice(-200);
+  }
+  await writeDb(db);
+}
+
+async function rejectUpgradeUpload(res, db, user, filename, message, extra = {}) {
+  await appendUpgradeLog(db, user, {
+    filename,
+    status: 'failed',
+    message,
+    toVersion: extra.toVersion || ''
+  });
+  return json(res, 400, { message });
 }
 
 function createNotification(db, projectId, title, content, level = 'info', category = '') {
@@ -6072,22 +6144,24 @@ function validateUpgradePackageIntegrity(pendingDir) {
   if (!upgradeSigningKey || upgradeSigningKey.length < 32) {
     throw new Error('系统未配置升级签名密钥');
   }
-  if (!manifest.signature || !String(manifest.signature).trim()) {
-    throw new Error('升级包缺少签名');
-  }
-  const normalizedChecksums = files.reduce((result, file) => {
-    result[file] = String(checksumMap[file] || '').trim().toLowerCase();
-    return result;
-  }, {});
-  const payload = JSON.stringify(canonicalizeJson({
-    version: manifest.version || '',
-    files,
-    sha256: normalizedChecksums
-  }));
-  const expectedSignature = crypto.createHmac('sha256', upgradeSigningKey).update(payload).digest('hex');
-  const receivedSignature = String(manifest.signature).trim().toLowerCase();
-  if (receivedSignature.length !== expectedSignature.length || !crypto.timingSafeEqual(Buffer.from(receivedSignature), Buffer.from(expectedSignature))) {
-    throw new Error('升级包签名校验失败');
+  const receivedSignature = String(manifest.signature || '').trim().toLowerCase();
+  if (isProduction || receivedSignature) {
+    if (!receivedSignature) {
+      throw new Error('升级包缺少签名');
+    }
+    const normalizedChecksums = files.reduce((result, file) => {
+      result[file] = String(checksumMap[file] || '').trim().toLowerCase();
+      return result;
+    }, {});
+    const payload = JSON.stringify(canonicalizeJson({
+      version: manifest.version || '',
+      files,
+      sha256: normalizedChecksums
+    }));
+    const expectedSignature = crypto.createHmac('sha256', upgradeSigningKey).update(payload).digest('hex');
+    if (receivedSignature.length !== expectedSignature.length || !crypto.timingSafeEqual(Buffer.from(receivedSignature), Buffer.from(expectedSignature))) {
+      throw new Error('升级包签名校验失败');
+    }
   }
 
   return {
@@ -9622,10 +9696,10 @@ const requestHandler = async (req, res) => {
       if (!user) return;
       const contentType = req.headers['content-type'] || '';
       if (!contentType.includes('multipart/form-data')) {
-        return json(res, 400, { message: '请上传升级包文件（tar.gz 格式）' });
+        return rejectUpgradeUpload(res, db, user, '', '请上传升级包文件（tar.gz 格式）');
       }
       const boundary = contentType.split('boundary=')[1];
-      if (!boundary) return json(res, 400, { message: '无效的上传格式' });
+      if (!boundary) return rejectUpgradeUpload(res, db, user, '', '无效的上传格式');
       const rawBody = await new Promise((resolve, reject) => {
         const chunks = [];
         const maxBytes = 100 * 1024 * 1024;
@@ -9643,7 +9717,8 @@ const requestHandler = async (req, res) => {
       });
       const parts = parseMultipart(rawBody, boundary);
       const pkgPart = parts.find(part => (part.name === 'package' || part.name === 'file') && part.filename);
-      if (!pkgPart) return json(res, 400, { message: '请上传升级包文件' });
+      if (!pkgPart) return rejectUpgradeUpload(res, db, user, '', '请上传升级包文件');
+      const upgradeFilename = sanitizeUpgradeFilename(pkgPart.filename);
 
       const upgradesDir = path.join(dataDir, 'upgrades');
       const pendingDir = path.join(upgradesDir, 'pending');
@@ -9662,14 +9737,14 @@ const requestHandler = async (req, res) => {
           const normalized = entry.replace(/^\.\//, '').replace(/\/+$/, '');
           if (normalized.startsWith('/') || normalized.includes('..')) {
             try { fs.unlinkSync(tempArchive); } catch (_) {}
-            return json(res, 400, { message: `升级包包含非法路径：${entry}` });
+            return rejectUpgradeUpload(res, db, user, upgradeFilename, `升级包包含非法路径：${entry}`);
           }
         }
         execSync(`tar -xzf "${tempArchive}" -C "${pendingDir}"`, { timeout: 30000 });
       } catch (error) {
         try { fs.unlinkSync(tempArchive); } catch (_) {}
         cleanUpgradeDir(pendingDir);
-        return json(res, 400, { message: `升级包解压失败：${error.message}` });
+        return rejectUpgradeUpload(res, db, user, upgradeFilename, `升级包解压失败：${error.message}`);
       } finally {
         try { fs.unlinkSync(tempArchive); } catch (_) {}
       }
@@ -9692,7 +9767,7 @@ const requestHandler = async (req, res) => {
         const symlinks = scanForSymlinks(pendingDir);
         if (symlinks.length > 0) {
           cleanUpgradeDir(pendingDir);
-          return json(res, 400, { message: '升级包包含符号链接，拒绝解压' });
+          return rejectUpgradeUpload(res, db, user, upgradeFilename, '升级包包含符号链接，拒绝解压');
         }
       }
 
@@ -9700,14 +9775,14 @@ const requestHandler = async (req, res) => {
           !fs.existsSync(path.join(pendingDir, 'package.json')) ||
           !fs.statSync(path.join(pendingDir, 'public')).isDirectory()) {
         cleanUpgradeDir(pendingDir);
-        return json(res, 400, { message: '升级包缺少必要文件（server.js / package.json / public/）' });
+        return rejectUpgradeUpload(res, db, user, upgradeFilename, '升级包缺少必要文件（server.js / package.json / public/）');
       }
 
       try {
         validateUpgradePackageIntegrity(pendingDir);
       } catch (error) {
         cleanUpgradeDir(pendingDir);
-        return json(res, 400, { message: error.message });
+        return rejectUpgradeUpload(res, db, user, upgradeFilename, error.message);
       }
 
       let upgradeVersion = 'unknown';
@@ -9723,7 +9798,12 @@ const requestHandler = async (req, res) => {
       }));
 
       appendAuditLog(db, user, 'upgrade', 'system', '', `上传升级包 v${upgradeVersion}，系统即将自动重启完成升级`);
-      await writeDb(db);
+      await appendUpgradeLog(db, user, {
+        filename: upgradeFilename,
+        status: 'accepted',
+        toVersion: upgradeVersion,
+        message: `升级包 v${upgradeVersion} 已接收，系统将自动应用升级并重启`
+      });
 
       const applyAndRestart = () => {
         if (!isProduction) {
@@ -9769,6 +9849,25 @@ const requestHandler = async (req, res) => {
       res.end(body);
       setTimeout(applyAndRestart, 800);
       return;
+    }
+
+    if (req.method === 'GET' && pathname === '/api/system/upgrade/logs') {
+      const user = requireAdmin(req, res, db);
+      if (!user) return;
+      const logs = [...(db.upgradeLogs || [])]
+        .sort((a, b) => String(b.createdAt || '').localeCompare(String(a.createdAt || '')))
+        .slice(0, 50)
+        .map(item => ({
+          id: item.id,
+          operatorName: item.operatorName || '',
+          filename: item.filename || '',
+          fromVersion: item.fromVersion || '',
+          toVersion: item.toVersion || '',
+          status: item.status || 'failed',
+          message: item.message || '',
+          createdAt: item.createdAt || ''
+        }));
+      return json(res, 200, { data: logs, total: logs.length });
     }
 
     if (req.method === 'GET' && pathname === '/api/system/upgrade/status') {
