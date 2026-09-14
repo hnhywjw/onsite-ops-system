@@ -33,6 +33,9 @@ const documentsUploadDir = path.join(uploadsDir, 'documents');
 const sessionMaxAgeSeconds = parseInt(process.env.SESSION_MAX_AGE_SECONDS, 10) || 7 * 24 * 60 * 60;
 const defaultWebIdleLogoutMinutes = parseInt(process.env.WEB_IDLE_LOGOUT_MINUTES, 10) || 30;
 const defaultHttpsPort = Number(process.env.HTTPS_PORT || 3443);
+const sessionActivityPersistIntervalMs = parseInt(process.env.SESSION_ACTIVITY_PERSIST_INTERVAL_MS, 10) || 30 * 1000;
+let lastSessionActivityPersistMs = 0;
+let sessionActivityPersistQueue = Promise.resolve();
 const maintenanceIntervalMs = parseInt(process.env.MAINTENANCE_INTERVAL_MS, 10) || 60 * 1000;
 let systemTimezoneOffsetMinutes = 480;
 const defaultDailyReportReminderHour = 12;
@@ -148,6 +151,7 @@ const loginRateLimitLockMs = parseInt(process.env.LOGIN_RATE_LIMIT_LOCK_MS, 10) 
 const loginRateLimitMaxAttempts = parseInt(process.env.LOGIN_RATE_LIMIT_MAX_ATTEMPTS, 10) || 5;
 const webSocketHeartbeatIntervalMs = parseInt(process.env.WS_HEARTBEAT_INTERVAL_MS, 10) || 30000;
 const isProduction = process.env.NODE_ENV === 'production';
+const allowedUserRoles = ['admin', 'engineer', 'viewer', 'auditor', 'customer'];
 const upgradeSigningKeyEnv = String(process.env.UPGRADE_SIGNING_KEY || '').trim();
 const allowedBackupCommands = (process.env.CONFIG_BACKUP_ALLOWED_COMMANDS || 'show running-config,show startup-config,display current-configuration,cat /etc/os-release')
   .split(',')
@@ -380,7 +384,7 @@ async function verifyOidcIdToken(idToken, oidcConfig, expected = {}) {
   if (payload.iss !== expected.issuer) throw new Error('Invalid ID token issuer');
   const aud = Array.isArray(payload.aud) ? payload.aud : [payload.aud];
   if (!aud.includes(expected.clientId)) throw new Error('Invalid ID token audience');
-  if (payload.exp && Number(payload.exp) * 1000 <= nowMs()) throw new Error('ID token expired');
+  if (!payload.exp || Number(payload.exp) * 1000 <= nowMs()) throw new Error('ID token expired');
   if (expected.nonce && payload.nonce !== expected.nonce) throw new Error('Invalid ID token nonce');
   return payload;
 }
@@ -585,33 +589,47 @@ async function ldapAuthenticate(ldapUrlStr, baseDn, bindDn, bindPassword, userna
       sendLdapMessage(messageId, { type: 'bind', version: 3, name: bindDn || userDn, password: bindDn ? bindPassword : password });
     });
 
-    let bindResultReceived = false;
+    if (!password) {
+      conn.end();
+      return resolve(null);
+    }
+    let ldapPhase = 'bind';
+    let pendingLdapEntry = null;
     conn.on('ldap_result', (result) => {
-      if (!bindResultReceived) {
-        bindResultReceived = true;
+      if (ldapPhase === 'bind') {
         if (result.resultCode !== 0) {
           conn.end();
           return resolve(null);
         }
-        if (bindDn) {
-          messageId = 2;
-          sendLdapMessage(messageId, { type: 'search', baseObject: baseDn, scope: 2, attribute: 'cn', value: username });
-        } else {
+        if (!bindDn) {
           conn.end();
           return resolve({ displayName: username, email: '', phone: '' });
         }
+        ldapPhase = 'search';
+        messageId = 2;
+        sendLdapMessage(messageId, { type: 'search', baseObject: baseDn, scope: 2, attribute: 'cn', value: username });
+        return;
+      }
+      if (ldapPhase === 'search') {
+        if (!result.entries || result.entries.length === 0) {
+          conn.end();
+          return resolve(null);
+        }
+        pendingLdapEntry = result.entries[0];
+        const targetDn = pendingLdapEntry._dn || userDn;
+        ldapPhase = 'userbind';
+        messageId = 3;
+        sendLdapMessage(messageId, { type: 'bind', version: 3, name: targetDn, password });
         return;
       }
       conn.end();
-      if (result.entries && result.entries.length > 0) {
-        const entry = result.entries[0];
-        return resolve({
-          displayName: (entry.cn && entry.cn[0]) || username,
-          email: (entry.mail && entry.mail[0]) || '',
-          phone: (entry.telephoneNumber && entry.telephoneNumber[0]) || (entry.mobile && entry.mobile[0]) || ''
-        });
-      }
-      return resolve(null);
+      if (result.resultCode !== 0 || !pendingLdapEntry) return resolve(null);
+      const entry = pendingLdapEntry;
+      return resolve({
+        displayName: (entry.cn && entry.cn[0]) || username,
+        email: (entry.mail && entry.mail[0]) || '',
+        phone: (entry.telephoneNumber && entry.telephoneNumber[0]) || (entry.mobile && entry.mobile[0]) || ''
+      });
     });
 
     conn.on('data', (data) => {
@@ -1355,12 +1373,297 @@ function sanitizeAssetForApi(asset, viewer) {
   if (viewer && viewer.role === 'customer') {
     delete result.monitorHost;
     delete result.installationLocation;
+    delete result.serialNumber;
+    delete result.notes;
+    delete result.snmpPort;
+    delete result.hasSnmpCommunity;
   }
   return result;
 }
 
+const RACK_UNIT_MIN = 1;
+const RACK_UNIT_MAX = 48;
+const DEFAULT_CABINET_UNITS = 42;
+const UNASSIGNED_CABINET_NAME = '未分配机柜';
+
+const snmpMetricCache = {};
+
+function parseOptionalRackUnit(value, fieldLabel) {
+  if (value === undefined || value === null || String(value).trim() === '') return { value: null };
+  const n = Number(value);
+  if (!Number.isInteger(n) || n < RACK_UNIT_MIN || n > RACK_UNIT_MAX) {
+    return { error: `${fieldLabel}须为 ${RACK_UNIT_MIN}-${RACK_UNIT_MAX} 的整数` };
+  }
+  return { value: n };
+}
+
+function readCabinetFields(body = {}) {
+  const start = parseOptionalRackUnit(body.rackUnitStart, '起始U位');
+  if (start.error) return start;
+  const size = parseOptionalRackUnit(body.rackUnitSize, '占用U数');
+  if (size.error) return size;
+  const rackUnitStart = start.value;
+  const rackUnitSize = size.value === null ? 1 : size.value;
+  if (rackUnitStart !== null && rackUnitStart + rackUnitSize - 1 > RACK_UNIT_MAX) {
+    return { error: '起始U位与占用U数合计不能超过48' };
+  }
+  return {
+    cabinetName: String(body.cabinetName || '').trim(),
+    rackUnitStart,
+    rackUnitSize
+  };
+}
+
+const ASSET_TYPE_OPTIONS = ['网络设备', '安全设备', '服务器', '存储', '监控', 'UPS配电', '空调系统', '其它'];
+const ASSET_MONITOR_TYPES = ['ping', 'tcp', 'snmp'];
+const ASSET_RESERVED_IDS = new Set(['import', 'cabinet-layout', 'topology-layout', 'topology', 'monitor-status']);
+const ASSET_IMPORT_MAX_ROWS = 500;
+
+function parseAssetIdFromPath(pathname) {
+  const parts = String(pathname || '').split('/').filter(Boolean);
+  if (parts.length !== 3 || parts[0] !== 'api' || parts[1] !== 'assets') return '';
+  const assetId = parts[2];
+  if (!assetId || ASSET_RESERVED_IDS.has(assetId)) return '';
+  return assetId;
+}
+
+function readMonitorFields(body = {}, existing = null) {
+  const monitorEnabled = body.monitorEnabled !== undefined
+    ? (body.monitorEnabled === true || body.monitorEnabled === 'true')
+    : Boolean(existing && existing.monitorEnabled);
+  let monitorType = String(body.monitorType || existing?.monitorType || 'ping').trim().toLowerCase();
+  if (!ASSET_MONITOR_TYPES.includes(monitorType)) monitorType = 'ping';
+  const monitorHost = body.monitorHost !== undefined
+    ? String(body.monitorHost || '').trim()
+    : String(existing?.monitorHost || '').trim();
+  if (monitorHost && !validateHost(monitorHost)) return { error: '监控地址格式无效' };
+  if (monitorEnabled && !monitorHost) return { error: '启用监控时必须填写监控地址' };
+  const monitorPortRaw = body.monitorPort !== undefined ? body.monitorPort : existing?.monitorPort;
+  const monitorPort = monitorPortRaw === undefined || monitorPortRaw === null ? '' : String(monitorPortRaw).trim();
+  if (monitorPort && !validatePort(monitorPort)) return { error: '监控端口无效' };
+  if (monitorEnabled && monitorType === 'tcp' && !validatePort(monitorPort)) return { error: 'TCP 监测必须填写有效端口' };
+  let snmpCommunity = existing ? String(existing.snmpCommunity || '') : '';
+  if (body.snmpCommunity !== undefined) {
+    const nextCommunity = String(body.snmpCommunity || '').trim();
+    if (nextCommunity) snmpCommunity = nextCommunity;
+  }
+  const snmpPortRaw = body.snmpPort !== undefined ? body.snmpPort : (existing?.snmpPort || '161');
+  const snmpPort = String(snmpPortRaw || '').trim() || '161';
+  if (snmpPort && !validatePort(snmpPort)) return { error: 'SNMP 端口无效' };
+  return { monitorEnabled, monitorType, monitorHost, monitorPort, snmpCommunity, snmpPort };
+}
+
+function readImportedMonitorFields(row = {}) {
+  const enabledRaw = String(row.monitorEnabled ?? row['启用监控'] ?? '').trim().toLowerCase();
+  const monitorTypeRaw = String(row.monitorType || row['监控方式'] || '').trim().toLowerCase();
+  const monitorHost = String(row.monitorHost || row['监控地址/IP'] || row['监控地址'] || '').trim();
+  const monitorPort = String(row.monitorPort || row['端口号'] || '').trim();
+  const snmpCommunity = String(row.snmpCommunity || row['SNMP团体字'] || '').trim();
+  const snmpPort = String(row.snmpPort || row['SNMP端口'] || '').trim();
+  const monitorType = ASSET_MONITOR_TYPES.includes(monitorTypeRaw) ? monitorTypeRaw : 'ping';
+  const monitorEnabled = ['true', '1', 'yes', '是', '启用'].includes(enabledRaw) || Boolean(monitorHost);
+  return readMonitorFields({
+    monitorEnabled,
+    monitorType,
+    monitorHost,
+    monitorPort,
+    snmpCommunity,
+    snmpPort
+  });
+}
+
+function sanitizeTopologyPositions(raw) {
+  if (!raw || typeof raw !== 'object' || Array.isArray(raw)) return { error: '布局数据格式无效' };
+  const keys = Object.keys(raw);
+  if (keys.length > 2000) return { error: '拓扑节点数量超出限制' };
+  const positions = {};
+  for (const key of keys) {
+    if (typeof key !== 'string' || !key || key.length > 80) continue;
+    const pos = raw[key];
+    if (!pos || typeof pos !== 'object') continue;
+    const x = Number(pos.x);
+    const y = Number(pos.y);
+    if (!Number.isFinite(x) || !Number.isFinite(y)) continue;
+    positions[key] = {
+      x: Math.min(100, Math.max(0, x)),
+      y: Math.min(100, Math.max(0, y))
+    };
+  }
+  return { positions };
+}
+
+function collectAssetDeleteBlockers(db, assetId) {
+  const warnings = [];
+  const pushIf = (count, text) => { if (count) warnings.push(`有 ${count} ${text}`); };
+  pushIf((db.aiInspectionTargets || []).filter(item => item.assetId === assetId).length, '个巡检对象引用了该资产');
+  pushIf((db.spareParts || []).filter(item => item.assetId === assetId).length, '条备件记录引用了该资产');
+  pushIf((db.sparePartMovements || []).filter(item => item.assetId === assetId).length, '条备件出入库记录引用了该资产');
+  pushIf((db.changeRecords || []).filter(item => item.assetId === assetId).length, '条变更记录引用了该资产');
+  pushIf((db.inspectionPlans || []).filter(item => item.assetId === assetId).length, '条巡检计划引用了该资产');
+  pushIf((db.incidentRecords || []).filter(item => item.assetId === assetId).length, '条故障记录引用了该资产');
+  pushIf((db.logs || []).filter(item => item.assetId === assetId).length, '条运维日志引用了该资产');
+  return warnings;
+}
+
+function resolveCabinetName(asset) {
+  const named = String(asset.cabinetName || '').trim();
+  if (named) return named;
+  const location = String(asset.installationLocation || '').trim();
+  if (!location) return '';
+  const match = location.match(/([^-\n]*机柜[^-\n]*)/);
+  return match ? match[1].trim() : '';
+}
+
+function emptySnmpMetrics() {
+  return {
+    uptimeSeconds: null,
+    cpuPercent: null,
+    memoryPercent: null,
+    diskPercent: null,
+    trafficInBps: null,
+    trafficOutBps: null,
+    collectedAt: null
+  };
+}
+
+function publicSnmpMetrics(asset) {
+  if (!asset || !asset.monitorEnabled || asset.monitorType !== 'snmp') return emptySnmpMetrics();
+  const cached = snmpMetricCache[asset.id];
+  if (!cached) return emptySnmpMetrics();
+  return {
+    uptimeSeconds: cached.uptimeSeconds ?? null,
+    cpuPercent: cached.cpuPercent ?? null,
+    memoryPercent: cached.memoryPercent ?? null,
+    diskPercent: cached.diskPercent ?? null,
+    trafficInBps: cached.trafficInBps ?? null,
+    trafficOutBps: cached.trafficOutBps ?? null,
+    collectedAt: cached.collectedAt ?? null
+  };
+}
+
+function layoutDeviceFromAsset(asset) {
+  const start = Number.isInteger(asset.rackUnitStart) ? asset.rackUnitStart : 1;
+  const size = Number.isInteger(asset.rackUnitSize) && asset.rackUnitSize > 0 ? asset.rackUnitSize : 1;
+  const monitor = getMonitorStatus(asset.id);
+  return {
+    assetId: asset.id,
+    name: asset.name || '',
+    type: asset.type || '',
+    rackUnitStart: start,
+    rackUnitSize: size,
+    conflict: false,
+    monitorStatus: asset.monitorEnabled ? ((monitor && monitor.status) || 'unknown') : 'unknown',
+    metrics: publicSnmpMetrics(asset)
+  };
+}
+
+function markLayoutConflicts(devices) {
+  for (let i = 0; i < devices.length; i += 1) {
+    const a = devices[i];
+    const aEnd = a.rackUnitStart + a.rackUnitSize - 1;
+    for (let j = i + 1; j < devices.length; j += 1) {
+      const b = devices[j];
+      const bEnd = b.rackUnitStart + b.rackUnitSize - 1;
+      if (a.rackUnitStart <= bEnd && b.rackUnitStart <= aEnd) {
+        a.conflict = true;
+        b.conflict = true;
+      }
+    }
+  }
+}
+
+function buildCabinetLayoutPayload(assets) {
+  const groups = new Map();
+  const unassigned = [];
+  for (const asset of assets) {
+    const device = layoutDeviceFromAsset(asset);
+    const cabinet = resolveCabinetName(asset);
+    if (!cabinet) {
+      unassigned.push(device);
+      continue;
+    }
+    if (!groups.has(cabinet)) groups.set(cabinet, []);
+    groups.get(cabinet).push(device);
+  }
+  const cabinets = [...groups.entries()]
+    .sort((a, b) => a[0].localeCompare(b[0], 'zh'))
+    .map(([name, devices]) => {
+      markLayoutConflicts(devices);
+      const maxUnit = devices.reduce((max, item) => Math.max(max, item.rackUnitStart + item.rackUnitSize - 1), 0);
+      devices.sort((a, b) => b.rackUnitStart - a.rackUnitStart || a.name.localeCompare(b.name, 'zh'));
+      return { name, unitCount: Math.max(DEFAULT_CABINET_UNITS, maxUnit), devices };
+    });
+  return { cabinets, unassigned };
+}
+
+function sanitizeInspectionPlanForViewer(plan, viewer) {
+  if (!plan) return plan;
+  if (!viewer || viewer.role !== 'customer') return plan;
+  return {
+    id: plan.id,
+    title: plan.title,
+    cycle: plan.cycle,
+    nextDate: plan.nextDate,
+    status: plan.status,
+    projectId: plan.projectId,
+    createdAt: plan.createdAt
+  };
+}
+
+function sanitizeInspectionExecutionForViewer(item, viewer) {
+  if (!item) return item;
+  if (!viewer || viewer.role !== 'customer') return item;
+  return {
+    id: item.id,
+    planId: item.planId,
+    projectId: item.projectId,
+    executedAt: item.executedAt,
+    result: item.result,
+    nextDate: item.nextDate,
+    createdAt: item.createdAt
+  };
+}
+
+function sanitizeChangeRecordForViewer(item, viewer) {
+  if (!item) return item;
+  if (!viewer || viewer.role !== 'customer') return item;
+  return {
+    ...item,
+    title: '',
+    content: '',
+    assetId: '',
+    rejectionReason: ''
+  };
+}
+
 const DOCUMENT_SECRET_FIELDS = ['accessPasswordHash', 'loginPasswordHash', 'loginPasswordEncrypted', 'attachmentPath'];
 const DOCUMENT_PROTECTED_FIELDS = ['serialNumber', 'managementIp', 'managementPort', 'loginAccount', 'managementMethod'];
+
+function readDocumentAccessToken(req) {
+  return String(req.headers['x-document-access-token'] || '').trim();
+}
+
+function verifyDocumentAccessToken(rawToken, docId, userId) {
+  if (!rawToken) return { ok: false, message: '访问令牌无效' };
+  try {
+    const decoded = Buffer.from(rawToken, 'base64url').toString('utf8');
+    const lastColon = decoded.lastIndexOf(':');
+    if (lastColon === -1) return { ok: false, message: '访问令牌无效' };
+    const payload = decoded.slice(0, lastColon);
+    const sig = decoded.slice(lastColon + 1);
+    const expectedSig = crypto.createHmac('sha256', DOCUMENT_TOKEN_SECRET).update(payload).digest('hex');
+    if (sig.length !== expectedSig.length || !crypto.timingSafeEqual(Buffer.from(sig), Buffer.from(expectedSig))) {
+      return { ok: false, message: '访问令牌无效' };
+    }
+    const parts = payload.split(':');
+    if (parts[0] !== docId || parts[1] !== userId) return { ok: false, message: '访问令牌与资料不匹配' };
+    const tokenTime = parseInt(parts[2], 10);
+    if (nowMs() - tokenTime > 10 * 60 * 1000) return { ok: false, message: '访问链接已过期，请重新验证密码' };
+    return { ok: true };
+  } catch (_) {
+    return { ok: false, message: '访问令牌无效' };
+  }
+}
 
 function sanitizeDocumentForApi(doc, revealProtected = false) {
   const sanitized = { ...doc };
@@ -1576,13 +1879,45 @@ function isPrivateOrReservedIp(ip) {
   return true;
 }
 
+function isBlockedSsrfIp(ip) {
+  const mappedV4 = extractIpv4FromMapped(ip);
+  if (mappedV4) return isBlockedSsrfIp(mappedV4);
+  if (net.isIP(ip) === 4) {
+    const value = ipv4ToInt(ip);
+    const ranges = [
+      ['0.0.0.0', '0.255.255.255'],
+      ['100.64.0.0', '100.127.255.255'],
+      ['127.0.0.0', '127.255.255.255'],
+      ['169.254.0.0', '169.254.255.255'],
+      ['192.0.0.0', '192.0.0.255'],
+      ['192.0.2.0', '192.0.2.255'],
+      ['198.18.0.0', '198.19.255.255'],
+      ['198.51.100.0', '198.51.100.255'],
+      ['203.0.113.0', '203.0.113.255'],
+      ['224.0.0.0', '239.255.255.255'],
+      ['240.0.0.0', '255.255.255.255']
+    ];
+    return ranges.some(([start, end]) => value >= ipv4ToInt(start) && value <= ipv4ToInt(end));
+  }
+  if (net.isIP(ip) === 6) {
+    const normalized = ip.toLowerCase();
+    return normalized === '::1'
+      || normalized === '::'
+      || normalized.startsWith('fe80:')
+      || normalized.startsWith('ff')
+      || normalized.startsWith('2001:db8:')
+      || normalized.startsWith('2001:0db8:');
+  }
+  return true;
+}
+
 async function assertPublicHttpTarget(url, expectedHost) {
   if (!['http:', 'https:'].includes(url.protocol)) throw new Error('仅允许 HTTP/HTTPS 地址');
   if (url.username || url.password) throw new Error('备份地址禁止包含用户名或密码');
   if (url.hostname !== expectedHost) throw new Error('Web 备份地址必须与巡检对象地址一致');
   const records = net.isIP(url.hostname) ? [{ address: url.hostname }] : await dns.lookup(url.hostname, { all: true });
   const allowLocalTestTarget = !isProduction && ['127.0.0.1', 'localhost'].includes(url.hostname);
-  if (!allowLocalTestTarget && (!records.length || records.some(record => isPrivateOrReservedIp(record.address)))) {
+  if (!allowLocalTestTarget && (!records.length || records.some(record => isBlockedSsrfIp(record.address)))) {
     throw new Error('Web 备份地址指向受限网络');
   }
 }
@@ -1637,10 +1972,22 @@ function hostKeyAlreadyKnown(host, port) {
   }
 }
 
+function sshMinimalEnv(extra = {}) {
+  return {
+    PATH: process.env.PATH || '/usr/bin:/bin:/usr/sbin:/sbin',
+    HOME: sshRuntimeDir(),
+    LANG: process.env.LANG || 'C',
+    ...extra
+  };
+}
+
 function ensureSshKnownHost(host, port) {
-  return new Promise(resolve => {
+  return new Promise((resolve, reject) => {
     if (hostKeyAlreadyKnown(host, port)) return resolve();
-    execFile('ssh-keyscan', ['-p', String(port), '-T', '4', host], { timeout: 8000, maxBuffer: 1024 * 1024 }, (error, stdout) => {
+    if (isProduction) {
+      return reject(new Error('目标主机指纹未登记，请先将主机公钥写入 data/ssh-runtime/known_hosts'));
+    }
+    execFile('ssh-keyscan', ['-p', String(port), '-T', '4', host], { timeout: 8000, maxBuffer: 1024 * 1024, env: sshMinimalEnv() }, (error, stdout) => {
       if (!error && stdout && String(stdout).trim()) {
         fs.appendFileSync(sshKnownHostsPath(), stdout.endsWith('\n') ? stdout : `${stdout}\n`, { mode: 0o600 });
       }
@@ -1668,13 +2015,12 @@ function executeSSHCheck(host, port, username, secret, options = {}) {
       ];
       let executable = 'ssh';
       let args = sshArgs;
-      const execEnv = { ...process.env };
+      const execEnv = sshMinimalEnv();
       if (options.privateKey) {
         fs.writeFileSync(keyFile, secret || '', { mode: 0o600 });
         args = ['-o', 'BatchMode=yes', '-o', 'IdentitiesOnly=yes', '-i', keyFile, ...sshArgs];
       } else {
         executable = 'sshpass';
-        delete execEnv.SSHPASS;
         execEnv.SSHPASS = secret || '';
         args = ['-e', 'ssh', '-o', 'PreferredAuthentications=password', '-o', 'PubkeyAuthentication=no', ...sshArgs];
       }
@@ -1684,7 +2030,7 @@ function executeSSHCheck(host, port, username, secret, options = {}) {
         resolve({ success: true, stdout: stdout || '', stderr: '' });
       });
     };
-    ensureSshKnownHost(host, port).then(run).catch(() => run());
+    ensureSshKnownHost(host, port).then(run).catch(error => resolve({ success: false, stdout: '', stderr: error.message || '主机指纹未登记' }));
   });
 }
 
@@ -1791,11 +2137,14 @@ function parseSnmpVarBind(buf) {
       const lenInfo = decodeBerLength(buf, offset + 1);
       const start = offset + 1 + lenInfo.size;
       const next = start + lenInfo.length;
-      if (tag === 0x06) result.oid = decodeBerOid(buf.slice(start, next));
-      else if (tag === 0x04 || tag === 0x44) result.value = buf.slice(start, next).toString('utf8');
-      else if (tag === 0x02) {
+      if (tag === 0x06) {
+        const decoded = decodeBerOid(buf.slice(start, next));
+        if (!result.oid.length) result.oid = decoded;
+        else result.value = decoded;
+      } else if (tag === 0x04 || tag === 0x44) result.value = buf.slice(start, next).toString('utf8');
+      else if (tag === 0x02 || tag === 0x41 || tag === 0x42 || tag === 0x43 || tag === 0x46 || tag === 0x47) {
         let n = 0;
-        for (let i = start; i < next; i += 1) n = (n << 8) + buf[i];
+        for (let i = start; i < next; i += 1) n = n * 256 + buf[i];
         result.value = n;
       } else if (tag === 0x30 || tag === 0xa2) walk(start, next);
       offset = next;
@@ -1807,6 +2156,7 @@ function parseSnmpVarBind(buf) {
 
 function snmpUdpRequest(host, port, community, oid, timeoutMs, encodeFn) {
   return new Promise(resolve => {
+    if (!validateHost(host) || !validatePort(port) || !String(community || '').trim()) return resolve(null);
     const socket = dgram.createSocket('udp4');
     const requestId = crypto.randomInt(1, 0x7fffffff);
     const packet = encodeFn(community, requestId, oid);
@@ -1886,6 +2236,17 @@ async function snmpWalkSubtree(host, port, community, oid, timeoutMs = 4000) {
   return snmpWalkSubtreeUdp(host, port, community, oid, timeoutMs);
 }
 
+function isDocumentAttachmentPathSafe(filePath) {
+  if (!filePath) return false;
+  return isPathInsideDirectory(documentsUploadDir, filePath);
+}
+
+function normalizeDocumentAttachmentPath(filePath) {
+  const raw = String(filePath || '').trim();
+  if (!raw) return '';
+  return isDocumentAttachmentPathSafe(raw) ? path.resolve(raw) : '';
+}
+
 function normalizeDb(raw = {}) {
   const currentTime = Date.now();
   const projects = (raw.projects || []).map(project => ({
@@ -1903,7 +2264,7 @@ function normalizeDb(raw = {}) {
     id: user.id || id('user'),
     username: user.username || '',
     passwordHash: user.passwordHash || hash(crypto.randomUUID()),
-    role: ['admin', 'engineer', 'viewer', 'auditor', 'customer'].includes(user.role) ? user.role : 'engineer',
+    role: allowedUserRoles.includes(user.role) ? user.role : 'engineer',
     name: user.name || user.username || '',
     phone: user.phone || '',
     idCard: user.idCard || '',
@@ -1949,11 +2310,14 @@ function normalizeDb(raw = {}) {
       maintainExpiryDate: asset.maintainExpiryDate || '',
       installationLocation: asset.installationLocation || asset.location || '',
       notes: asset.notes || '',
+      cabinetName: String(asset.cabinetName || '').trim(),
+      rackUnitStart: parseOptionalRackUnit(asset.rackUnitStart, '起始U位').value ?? null,
+      rackUnitSize: parseOptionalRackUnit(asset.rackUnitSize, '占用U数').value || 1,
       monitorEnabled: asset.monitorEnabled === true || asset.monitorEnabled === 'true',
       monitorType: asset.monitorType || 'ping',
       monitorHost: asset.monitorHost || '',
       monitorPort: asset.monitorPort || '',
-      snmpCommunity: asset.snmpCommunity || 'public',
+      snmpCommunity: asset.snmpCommunity || '',
       snmpPort: asset.snmpPort || '161',
       createdAt: asset.createdAt || now()
     })),
@@ -2150,7 +2514,7 @@ function normalizeDb(raw = {}) {
       loginPasswordHash: item.loginPasswordHash || '',
       loginPasswordEncrypted: item.loginPasswordEncrypted || '',
       attachmentName: item.attachmentName || '',
-      attachmentPath: item.attachmentPath || '',
+      attachmentPath: normalizeDocumentAttachmentPath(item.attachmentPath || ''),
       attachmentSize: item.attachmentSize || 0,
       accessPasswordHash: item.accessPasswordHash || '',
       createdBy: item.createdBy || '',
@@ -2280,6 +2644,7 @@ function normalizeDb(raw = {}) {
       token: item.token || '',
       userId: item.userId || '',
       createdAt: item.createdAt || now(),
+      lastActivityAt: item.lastActivityAt || item.createdAt || now(),
       expiresAt: item.expiresAt || new Date(currentTime + sessionMaxAgeSeconds * 1000).toISOString()
     })).filter(item => item.token && item.userId && Date.parse(item.expiresAt) > currentTime),
     topologyLayouts: (raw.topologyLayouts && typeof raw.topologyLayouts === 'object' && !Array.isArray(raw.topologyLayouts))
@@ -2388,6 +2753,7 @@ function fillMissingSnapshotSecrets(raw, currentDb) {
       token: currentSessionToken,
       userId: preservedUser.id,
       createdAt: currentSession.createdAt || now(),
+      lastActivityAt: currentSession.lastActivityAt || now(),
       expiresAt: currentSession.expiresAt || new Date(Date.now() + sessionMaxAgeSeconds * 1000).toISOString()
     }] : []
   });
@@ -2404,6 +2770,7 @@ function buildImportedDbPreservingCurrentSession(raw, currentUser, currentSessio
     token: currentSessionToken,
     userId: currentUser.id,
     createdAt: currentSession.createdAt || now(),
+    lastActivityAt: currentSession.lastActivityAt || now(),
     expiresAt: currentSession.expiresAt || new Date(Date.now() + sessionMaxAgeSeconds * 1000).toISOString()
   }] : [];
   return nextDb;
@@ -2411,7 +2778,7 @@ function buildImportedDbPreservingCurrentSession(raw, currentUser, currentSessio
 
 function collectDocumentAttachments(documents) {
   return (documents || []).flatMap(doc => {
-    if (!doc.attachmentPath || !fs.existsSync(doc.attachmentPath)) return [];
+    if (!doc.attachmentPath || !isDocumentAttachmentPathSafe(doc.attachmentPath) || !fs.existsSync(doc.attachmentPath)) return [];
     return [{
       documentId: doc.id,
       attachmentName: doc.attachmentName || path.basename(doc.attachmentPath),
@@ -2701,7 +3068,16 @@ async function writeDb(db, options = {}) {
   await previousLock;
   try {
     let writeTarget = db;
-    if (db._seq !== undefined && db._seq < dbSequence) {
+    if (options.sessionActivityByToken instanceof Map) {
+      writeTarget = readDbInternalSync();
+      for (const session of writeTarget.sessions || []) {
+        const activity = options.sessionActivityByToken.get(session.token);
+        if (activity && String(activity) > String(session.lastActivityAt || '')) {
+          session.lastActivityAt = activity;
+        }
+      }
+      writeTarget._normalized = true;
+    } else if (db._seq !== undefined && db._seq < dbSequence) {
       const latest = readDbInternalSync();
       const replaceCollections = new Set(options.replaceCollections || []);
       for (const key of dbCollectionKeys) {
@@ -3030,7 +3406,13 @@ function parseCookies(req) {
       .filter(Boolean)
       .map(item => {
         const index = item.indexOf('=');
-        return [item.slice(0, index), decodeURIComponent(item.slice(index + 1))];
+        const key = item.slice(0, index);
+        const raw = item.slice(index + 1);
+        let value = raw;
+        try {
+          value = decodeURIComponent(raw);
+        } catch (_) {}
+        return [key, value];
       })
   );
 }
@@ -3113,6 +3495,25 @@ function getSessionToken(req) {
   return String(cookies.sessionToken || '').trim();
 }
 
+function getIdleLimitMs(db) {
+  const minutes = Number(db?.systemConfig?.webIdleLogoutMinutes);
+  const resolved = Number.isFinite(minutes) && minutes >= 1 ? minutes : defaultWebIdleLogoutMinutes;
+  return resolved * 60 * 1000;
+}
+
+function persistSessionActivity(db) {
+  const ts = Date.now();
+  if (ts - lastSessionActivityPersistMs < sessionActivityPersistIntervalMs) return;
+  lastSessionActivityPersistMs = ts;
+  const activityByToken = new Map();
+  for (const item of db.sessions || []) {
+    if (item && item.token && item.lastActivityAt) activityByToken.set(item.token, item.lastActivityAt);
+  }
+  sessionActivityPersistQueue = sessionActivityPersistQueue
+    .then(() => writeDb(db, { silent: true, sessionActivityByToken: activityByToken }))
+    .catch(() => {});
+}
+
 function getAuthUser(req, db) {
   const token = getSessionToken(req);
   if (!token) {
@@ -3126,8 +3527,14 @@ function getAuthUser(req, db) {
   if (!Number.isFinite(expiresMs) || expiresMs <= Date.now()) {
     return null;
   }
+  const lastActivityMs = Date.parse(session.lastActivityAt || session.createdAt);
+  if (Number.isFinite(lastActivityMs) && Date.now() - lastActivityMs > getIdleLimitMs(db)) {
+    return null;
+  }
   const user = db.users.find(item => item.id === session.userId) || null;
   if (!user || user.status === 'disabled' || user.status === 'pending' || user.status === 'rejected') return null;
+  session.lastActivityAt = new Date().toISOString();
+  persistSessionActivity(db);
   return user;
 }
 
@@ -3148,6 +3555,20 @@ function requireAdmin(req, res, db) {
     return null;
   }
   return user;
+}
+
+function requireAuditReader(req, res, db) {
+  const user = requireAuth(req, res, db);
+  if (!user) return null;
+  if (user.role !== 'admin' && user.role !== 'auditor') {
+    json(res, 403, { message: '需要审计权限' });
+    return null;
+  }
+  return user;
+}
+
+function verifyAdminStepUp(user, password) {
+  return Boolean(user && password) && verifyPassword(String(password), user.passwordHash);
 }
 
 function requireEditor(req, res, db) {
@@ -3226,7 +3647,7 @@ async function rejectUpgradeUpload(res, db, user, filename, message, extra = {})
     message,
     toVersion: extra.toVersion || ''
   });
-  return json(res, 400, { message });
+  return json(res, extra.status || 400, { message });
 }
 
 function createNotification(db, projectId, title, content, level = 'info', category = '') {
@@ -3603,10 +4024,14 @@ function recordForgotPasswordAttempt(db, rateKey) {
   forgotPasswordRateLimitMap.set(rateKey, state);
 }
 
+function isEncryptedRequest(req) {
+  const forwardedProto = String(req.headers['x-forwarded-proto'] || '').split(',')[0].trim().toLowerCase();
+  return forwardedProto === 'https' || Boolean(req.socket?.encrypted);
+}
+
 function shouldUseSecureCookies(req, systemConfig = {}) {
-  const forwardedProto = String(req.headers['x-forwarded-proto'] || '').trim().toLowerCase();
   const host = String(req.headers.host || '').trim().toLowerCase();
-  if (forwardedProto === 'https' || Boolean(req.socket?.encrypted)) return true;
+  if (isEncryptedRequest(req)) return true;
   if (host.endsWith('.monkeycode-ai.online')) return true;
   const httpsLoginEnabled = normalizeSystemConfig(systemConfig).httpsLoginEnabled;
   return httpsLoginEnabled;
@@ -3913,13 +4338,12 @@ function executeSSHCommand(host, port, username, secret, command, options = {}) 
       ];
       let executable = 'ssh';
       let args = sshArgs;
-      const execEnv = { ...process.env };
+      const execEnv = sshMinimalEnv();
       if (options.privateKey) {
         fs.writeFileSync(keyFile, secret || '', { mode: 0o600 });
         args = ['-o', 'BatchMode=yes', '-o', 'IdentitiesOnly=yes', '-i', keyFile, ...sshArgs];
       } else {
         executable = 'sshpass';
-        delete execEnv.SSHPASS;
         execEnv.SSHPASS = secret || '';
         args = ['-e', 'ssh', '-o', 'PreferredAuthentications=password', '-o', 'PubkeyAuthentication=no', ...sshArgs];
       }
@@ -3929,7 +4353,7 @@ function executeSSHCommand(host, port, username, secret, command, options = {}) 
         resolve({ success: true, stdout: stdout || '', stderr: '' });
       });
     };
-    ensureSshKnownHost(host, port).then(run).catch(() => run());
+    ensureSshKnownHost(host, port).then(run).catch(error => resolve({ success: false, stdout: '', stderr: error.message || '主机指纹未登记' }));
   });
 }
 
@@ -6085,6 +6509,57 @@ function canonicalizeJson(value) {
   return value;
 }
 
+function compareSemver(left, right) {
+  const parse = value => String(value || '0').split(/[.+-]/).map(part => parseInt(part, 10) || 0);
+  const a = parse(left);
+  const b = parse(right);
+  const len = Math.max(a.length, b.length);
+  for (let i = 0; i < len; i += 1) {
+    if ((a[i] || 0) > (b[i] || 0)) return 1;
+    if ((a[i] || 0) < (b[i] || 0)) return -1;
+  }
+  return 0;
+}
+
+const upgradeApplyFiles = ['server.js', 'package.json', 'Dockerfile', 'docker-compose.yml', 'docker-compose.prod.yml', 'pptx-template.json', 'docker-entrypoint.sh'];
+const upgradeApplyDirs = ['public', 'scripts'];
+
+function writeUpgradeSha256Sums(pendingDir) {
+  const manifestPath = path.join(pendingDir, 'manifest.json');
+  const manifest = JSON.parse(fs.readFileSync(manifestPath, 'utf8'));
+  const checksumMap = manifest.sha256 && typeof manifest.sha256 === 'object' ? manifest.sha256 : {};
+  const lines = Object.keys(checksumMap).sort().map(file => `${String(checksumMap[file] || '').trim().toLowerCase()}  ${file}`);
+  fs.writeFileSync(path.join(pendingDir, 'SHA256SUMS'), lines.join('\n') + '\n');
+}
+
+function applyPendingUpgradeFiles(pendingDir, appDir) {
+  const applied = [];
+  const failed = [];
+  for (const file of upgradeApplyFiles) {
+    const src = path.join(pendingDir, file);
+    if (!fs.existsSync(src) || !fs.statSync(src).isFile()) continue;
+    try {
+      fs.copyFileSync(src, path.join(appDir, file));
+      applied.push(file);
+    } catch (error) {
+      failed.push(`${file}: ${error.message}`);
+    }
+  }
+  for (const dir of upgradeApplyDirs) {
+    const src = path.join(pendingDir, dir);
+    if (!fs.existsSync(src) || !fs.statSync(src).isDirectory()) continue;
+    const dest = path.join(appDir, dir);
+    try {
+      fs.rmSync(dest, { recursive: true, force: true });
+      fs.cpSync(src, dest, { recursive: true });
+      applied.push(dir);
+    } catch (error) {
+      failed.push(`${dir}: ${error.message}`);
+    }
+  }
+  return { applied, failed };
+}
+
 function validateUpgradePackageIntegrity(pendingDir) {
   const manifestPath = path.join(pendingDir, 'manifest.json');
   if (!fs.existsSync(manifestPath)) {
@@ -6217,7 +6692,7 @@ const requestHandler = async (req, res) => {
 
     tryLazyInitHttps(db);
 
-    if (db.systemConfig?.httpLoginDisabled && !req.socket.encrypted) {
+    if (db.systemConfig?.httpLoginDisabled && !isEncryptedRequest(req)) {
       const loginPaths = ['/api/login', '/api/register', '/api/forgot-password', '/api/captcha', '/api/auth'];
       if (loginPaths.some(p => pathname.startsWith(p))) {
         return json(res, 403, { message: 'HTTP 登录已禁用，请使用 HTTPS 登录' });
@@ -6244,12 +6719,17 @@ const requestHandler = async (req, res) => {
     if (req.method === 'POST' && pathname === '/api/login') {
       const body = await readBody(req);
       const username = String(body.username || '').trim();
-      if (!verifyCaptchaToken(body.captchaToken, body.captcha)) {
-        return json(res, 401, { message: '验证码错误' });
-      }
       const rateLimitState = getLoginRateLimitState(db, req, username);
       if (rateLimitState.blocked) {
         return json(res, 429, { message: loginBlockedMessage(rateLimitState.retryAfterMs) }, rateLimitResponseHeaders(rateLimitState.retryAfterMs));
+      }
+      if (!verifyCaptchaToken(body.captchaToken, body.captcha)) {
+        const failedState = registerLoginFailure(db, req, username);
+        await writeDb(db, { silent: true });
+        if (failedState.lockedUntil > nowMs()) {
+          return json(res, 429, { message: loginBlockedMessage(failedState.lockedUntil - nowMs()) }, rateLimitResponseHeaders(failedState.lockedUntil - nowMs()));
+        }
+        return json(res, 401, { message: '验证码错误' });
       }
       const user = db.users.find(item => item.username === username);
       if (!user || !verifyPassword(body.password, user.passwordHash)) {
@@ -6276,7 +6756,7 @@ const requestHandler = async (req, res) => {
       const token = crypto.randomBytes(24).toString('hex');
       const expiresAt = new Date(nowMs() + sessionMaxAgeSeconds * 1000).toISOString();
       db.sessions = (db.sessions || []).filter(item => item.userId !== user.id && Date.parse(item.expiresAt) > nowMs());
-      db.sessions.push({ token, userId: user.id, createdAt: now(), expiresAt });
+      db.sessions.push({ token, userId: user.id, createdAt: now(), lastActivityAt: now(), expiresAt });
       await writeDb(db, { silent: true, replaceCollections: ['sessions'] });
       return json(res, 200, { user: sanitizeUser(user), systemConfig: presentSystemConfig(user, db.systemConfig), csrfToken: getSessionCsrfToken(token) }, { 'Set-Cookie': buildSessionCookie(req, token, db.systemConfig) });
     }
@@ -6495,7 +6975,7 @@ const requestHandler = async (req, res) => {
         const token = crypto.randomBytes(24).toString('hex');
         const expiresAt = new Date(nowMs() + sessionMaxAgeSeconds * 1000).toISOString();
         db.sessions = (db.sessions || []).filter(item => item.userId !== localUser.id && Date.parse(item.expiresAt) > nowMs());
-        db.sessions.push({ token, userId: localUser.id, createdAt: now(), expiresAt });
+        db.sessions.push({ token, userId: localUser.id, createdAt: now(), lastActivityAt: now(), expiresAt });
         await writeDb(db, { replaceCollections: ['sessions'] });
         res.writeHead(302, buildSecurityHeaders({
           Location: '/',
@@ -6515,15 +6995,20 @@ const requestHandler = async (req, res) => {
       const body = await readBody(req);
       const username = String(body.username || '').trim();
       const password = String(body.password || '');
+      const rateLimitState = getLoginRateLimitState(db, req, username);
+      if (rateLimitState.blocked) {
+        return json(res, 429, { message: loginBlockedMessage(rateLimitState.retryAfterMs) }, rateLimitResponseHeaders(rateLimitState.retryAfterMs));
+      }
       if (!verifyCaptchaToken(body.captchaToken, body.captcha)) {
+        const failedState = registerLoginFailure(db, req, username);
+        await writeDb(db, { silent: true });
+        if (failedState.lockedUntil > nowMs()) {
+          return json(res, 429, { message: loginBlockedMessage(failedState.lockedUntil - nowMs()) }, rateLimitResponseHeaders(failedState.lockedUntil - nowMs()));
+        }
         return json(res, 401, { message: '验证码错误' });
       }
       if (!username || !password) {
         return json(res, 400, { message: '请输入用户名和密码' });
-      }
-      const rateLimitState = getLoginRateLimitState(db, req, username);
-      if (rateLimitState.blocked) {
-        return json(res, 429, { message: loginBlockedMessage(rateLimitState.retryAfterMs) }, rateLimitResponseHeaders(rateLimitState.retryAfterMs));
       }
       try {
         const ldapUser = await ldapAuthenticate(ldapUrl, ldapBaseDn, ldapBindDn, ldapBindPassword, username, password);
@@ -6573,7 +7058,7 @@ const requestHandler = async (req, res) => {
         const token = crypto.randomBytes(24).toString('hex');
         const expiresAt = new Date(nowMs() + sessionMaxAgeSeconds * 1000).toISOString();
         db.sessions = (db.sessions || []).filter(item => item.userId !== localUser.id && Date.parse(item.expiresAt) > nowMs());
-        db.sessions.push({ token, userId: localUser.id, createdAt: now(), expiresAt });
+        db.sessions.push({ token, userId: localUser.id, createdAt: now(), lastActivityAt: now(), expiresAt });
         await writeDb(db, { silent: !createdLocalUser, replaceCollections: ['sessions'] });
         return json(res, 200, {
           user: sanitizeUser(localUser),
@@ -6612,8 +7097,15 @@ const requestHandler = async (req, res) => {
         const u = (db.users || []).find(x => x.id === s.userId);
         if (u && u.status === 'active') {
           seenUserIds.add(s.userId);
-          if (user.role === 'admin' || u.projectId === user.projectId || u.id === user.id) {
-            onlineUsers.push({ id: u.id, username: u.username, name: u.name, role: u.role });
+          if (user.role === 'customer') {
+            if (u.id === user.id) onlineUsers.push({ id: u.id, username: u.username, name: u.name, role: u.role });
+          } else if (user.role === 'admin' || u.projectId === user.projectId || u.id === user.id) {
+            onlineUsers.push({
+              id: u.id,
+              username: user.role === 'admin' || u.id === user.id ? u.username : '',
+              name: u.name,
+              role: u.role
+            });
           }
         }
       }
@@ -6727,7 +7219,7 @@ const requestHandler = async (req, res) => {
         id: id('user'),
         username: body.username,
         passwordHash: hash(body.password),
-        role: body.role || 'engineer',
+        role: allowedUserRoles.includes(body.role) ? body.role : 'engineer',
         name: body.name,
         phone: body.phone || '',
         idCard: body.idCard || '',
@@ -6759,16 +7251,15 @@ const requestHandler = async (req, res) => {
         return json(res, 400, { message: '该账号无需审批' });
       }
       const body = await readBody(req);
-      const allowedRoles = ['admin', 'engineer', 'customer', 'viewer'];
       const nextRole = String(body.role || 'viewer').trim();
-      if (!allowedRoles.includes(nextRole)) {
+      if (!allowedUserRoles.includes(nextRole)) {
         return json(res, 400, { message: '无效的角色' });
       }
-      if (body.projectId && !requireExistingProject(body.projectId, db)) {
-        return json(res, 400, { message: '关联项目不存在' });
+      if (!body.projectId || !requireExistingProject(body.projectId, db)) {
+        return json(res, 400, { message: '审批通过前必须指定有效项目' });
       }
       target.role = nextRole;
-      if (body.projectId) target.projectId = body.projectId;
+      target.projectId = body.projectId;
       target.status = 'active';
       appendAuditLog(db, approver, 'update', 'user', target.id, `审批通过账号 ${target.name}，角色 ${nextRole}`, target.projectId);
       await writeDb(db);
@@ -6847,13 +7338,19 @@ const requestHandler = async (req, res) => {
         return json(res, 400, { message: '关联项目不存在' });
       }
       target.username = body.username || target.username;
-      target.role = body.role || target.role;
+      const nextRole = body.role ? String(body.role) : target.role;
+      if (body.role && !allowedUserRoles.includes(nextRole)) {
+        return json(res, 400, { message: '无效的角色' });
+      }
+      const nextProjectId = body.projectId || '';
+      const roleOrProjectChanged = nextRole !== target.role || nextProjectId !== (target.projectId || '');
+      target.role = nextRole;
       target.name = body.name || target.name;
       target.phone = body.phone || '';
       target.idCard = body.idCard || '';
       target.email = body.email || '';
       target.wechat = body.wechat || '';
-      target.projectId = body.projectId || '';
+      target.projectId = nextProjectId;
       target.startDate = body.startDate || '';
       target.endDate = body.endDate || '';
       if (body.securityQuestion !== undefined) {
@@ -6872,7 +7369,7 @@ const requestHandler = async (req, res) => {
         target.passwordHash = hash(body.password);
       }
       appendAuditLog(db, user, 'update', 'user', target.id, `修改人员 ${target.name}`, target.projectId);
-      if (body.password) {
+      if (body.password || roleOrProjectChanged) {
         db.sessions = (db.sessions || []).filter(item => item.userId !== target.id);
         await writeDb(db, { replaceCollections: ['sessions'] });
       } else {
@@ -6919,11 +7416,21 @@ const requestHandler = async (req, res) => {
       const body = await readBody(req);
       const projectId = user.role === 'admin' ? body.projectId : user.projectId;
       if (!requireExistingProject(projectId, db)) return json(res, 400, { message: '关联项目不存在' });
+      const cabinetFields = readCabinetFields(body);
+      if (cabinetFields.error) return json(res, 400, { message: cabinetFields.error });
+      const name = String(body.name || '').trim();
+      if (!name) return json(res, 400, { message: '资产名称不能为空' });
+      const type = String(body.type || '').trim();
+      if (type && ASSET_TYPE_OPTIONS.length && !ASSET_TYPE_OPTIONS.includes(type) && type.length > 40) {
+        return json(res, 400, { message: '资产类型无效' });
+      }
+      const monitorFields = readMonitorFields(body);
+      if (monitorFields.error) return json(res, 400, { message: monitorFields.error });
       const item = {
         id: id('asset'),
         projectId,
-        type: body.type || '',
-        name: body.name || '',
+        type,
+        name,
         brand: body.brand || '',
         model: body.model || '',
         owner: body.owner || '',
@@ -6933,19 +7440,22 @@ const requestHandler = async (req, res) => {
         maintainExpiryDate: body.maintainExpiryDate || '',
         installationLocation: body.installationLocation || '',
         notes: body.notes || '',
-        monitorEnabled: body.monitorEnabled === true || body.monitorEnabled === 'true',
-        monitorType: body.monitorType || 'ping',
-        monitorHost: body.monitorHost || '',
-        monitorPort: body.monitorPort || '',
-        snmpCommunity: body.snmpCommunity || 'public',
-        snmpPort: body.snmpPort || '161',
+        cabinetName: cabinetFields.cabinetName,
+        rackUnitStart: cabinetFields.rackUnitStart,
+        rackUnitSize: cabinetFields.rackUnitSize,
+        monitorEnabled: monitorFields.monitorEnabled,
+        monitorType: monitorFields.monitorType,
+        monitorHost: monitorFields.monitorHost,
+        monitorPort: monitorFields.monitorPort,
+        snmpCommunity: monitorFields.snmpCommunity,
+        snmpPort: monitorFields.snmpPort,
         createdBy: user.id,
         createdAt: now()
       };
       db.assets.push(item);
       appendAuditLog(db, user, 'create', 'asset', item.id, `创建资产 ${item.name}`, projectId);
       await writeDb(db);
-      return json(res, 201, sanitizeAssetForApi(item));
+      return json(res, 201, sanitizeAssetForApi(item, user));
     }
 
     if (req.method === 'POST' && pathname === '/api/assets/import') {
@@ -6954,6 +7464,7 @@ const requestHandler = async (req, res) => {
       const body = await readBody(req);
       const rows = Array.isArray(body.assets) ? body.assets : [];
       if (!rows.length) return json(res, 400, { message: '导入数据为空' });
+      if (rows.length > ASSET_IMPORT_MAX_ROWS) return json(res, 400, { message: `单次最多导入 ${ASSET_IMPORT_MAX_ROWS} 条` });
       const results = { created: 0, skipped: 0, errors: [] };
       for (let i = 0; i < rows.length; i++) {
         const row = rows[i];
@@ -6995,6 +7506,22 @@ const requestHandler = async (req, res) => {
         if (rawDate != null && rawDate !== '' && !maintainExpiryDate && !results.errors.slice(-1)[0]?.includes('维保到期日')) {
           results.errors.push(`${rowLabel}: 维保到期日格式无法识别，请使用YYYY-MM-DD格式`);
         }
+        const cabinetFields = readCabinetFields({
+          cabinetName: row.cabinetName || row['机柜名称'] || '',
+          rackUnitStart: row.rackUnitStart ?? row['起始U'] ?? row['起始U位'],
+          rackUnitSize: row.rackUnitSize ?? row['占用U'] ?? row['占用U数']
+        });
+        if (cabinetFields.error) {
+          results.errors.push(`${rowLabel}: ${cabinetFields.error}`);
+          results.skipped++;
+          continue;
+        }
+        const monitorFields = readImportedMonitorFields(row);
+        if (monitorFields.error) {
+          results.errors.push(`${rowLabel}: ${monitorFields.error}`);
+          results.skipped++;
+          continue;
+        }
         const item = {
           id: id('asset'),
           projectId,
@@ -7009,6 +7536,15 @@ const requestHandler = async (req, res) => {
           maintainExpiryDate,
           installationLocation: row.installationLocation || row['安装位置'] || '',
           notes: row.notes || row['备注'] || '',
+          cabinetName: cabinetFields.cabinetName,
+          rackUnitStart: cabinetFields.rackUnitStart,
+          rackUnitSize: cabinetFields.rackUnitSize,
+          monitorEnabled: monitorFields.monitorEnabled,
+          monitorType: monitorFields.monitorType,
+          monitorHost: monitorFields.monitorHost,
+          monitorPort: monitorFields.monitorPort,
+          snmpCommunity: monitorFields.snmpCommunity,
+          snmpPort: monitorFields.snmpPort,
           createdBy: user.id,
           createdAt: now()
         };
@@ -7023,16 +7559,25 @@ const requestHandler = async (req, res) => {
     if (req.method === 'PUT' && pathname.startsWith('/api/assets/')) {
       const user = requireEditor(req, res, db);
       if (!user) return;
-      const assetId = pathname.split('/')[3];
+      const assetId = parseAssetIdFromPath(pathname);
       const target = db.assets.find(item => item.id === assetId);
       if (!target) return json(res, 404, { message: '资产不存在' });
       if (user.role !== 'admin' && target.projectId !== user.projectId) return json(res, 403, { message: '无权修改该资产' });
       const body = await readBody(req);
       const projectId = user.role === 'admin' ? (body.projectId || target.projectId) : user.projectId;
       if (!requireExistingProject(projectId, db)) return json(res, 400, { message: '关联项目不存在' });
+      const cabinetFields = readCabinetFields({
+        cabinetName: body.cabinetName !== undefined ? body.cabinetName : target.cabinetName,
+        rackUnitStart: body.rackUnitStart !== undefined ? body.rackUnitStart : target.rackUnitStart,
+        rackUnitSize: body.rackUnitSize !== undefined ? body.rackUnitSize : target.rackUnitSize
+      });
+      if (cabinetFields.error) return json(res, 400, { message: cabinetFields.error });
+      if (body.name !== undefined && !String(body.name || '').trim()) return json(res, 400, { message: '资产名称不能为空' });
+      const monitorFields = readMonitorFields(body, target);
+      if (monitorFields.error) return json(res, 400, { message: monitorFields.error });
       target.projectId = projectId;
       target.type = body.type || target.type;
-      target.name = body.name || target.name;
+      target.name = body.name !== undefined ? String(body.name).trim() : target.name;
       target.brand = body.brand || '';
       target.model = body.model || '';
       target.owner = body.owner || '';
@@ -7045,41 +7590,41 @@ const requestHandler = async (req, res) => {
       target.maintainExpiryDate = body.maintainExpiryDate || '';
       target.installationLocation = body.installationLocation !== undefined ? body.installationLocation : target.installationLocation;
       target.notes = body.notes || '';
-      target.monitorEnabled = body.monitorEnabled === true || body.monitorEnabled === 'true';
-      target.monitorType = body.monitorType || target.monitorType || 'ping';
-      target.monitorHost = body.monitorHost !== undefined ? body.monitorHost : target.monitorHost || '';
-      target.monitorPort = body.monitorPort !== undefined ? body.monitorPort : target.monitorPort || '';
-      if (body.snmpCommunity !== undefined) {
-        const nextCommunity = String(body.snmpCommunity || '').trim();
-        if (nextCommunity) target.snmpCommunity = nextCommunity;
-      } else if (!target.snmpCommunity) {
-        target.snmpCommunity = 'public';
-      }
-      target.snmpPort = body.snmpPort !== undefined ? body.snmpPort : target.snmpPort || '161';
+      target.cabinetName = cabinetFields.cabinetName;
+      target.rackUnitStart = cabinetFields.rackUnitStart;
+      target.rackUnitSize = cabinetFields.rackUnitSize;
+      target.monitorEnabled = monitorFields.monitorEnabled;
+      target.monitorType = monitorFields.monitorType;
+      target.monitorHost = monitorFields.monitorHost;
+      target.monitorPort = monitorFields.monitorPort;
+      target.snmpCommunity = monitorFields.snmpCommunity;
+      target.snmpPort = monitorFields.snmpPort;
       appendAuditLog(db, user, 'update', 'asset', target.id, `修改资产 ${target.name}`, projectId);
       await writeDb(db);
-      return json(res, 200, sanitizeAssetForApi(target));
+      return json(res, 200, sanitizeAssetForApi(target, user));
     }
 
     if (req.method === 'DELETE' && pathname.startsWith('/api/assets/')) {
       const user = requireEditor(req, res, db);
       if (!user) return;
-      const assetId = pathname.split('/')[3];
+      const assetId = parseAssetIdFromPath(pathname);
       const index = db.assets.findIndex(item => item.id === assetId);
       if (index === -1) return json(res, 404, { message: '资产不存在' });
       const target = db.assets[index];
       if (!canDeleteOwnedRecord(user, target, target.createdBy || '')) return json(res, 403, { message: '仅支持删除自己创建的资产' });
-      const aiTargetRefs = (db.aiInspectionTargets || []).filter(item => item.assetId === assetId);
-      const sparePartMoveRefs = (db.sparePartMovements || []).filter(item => item.assetId === assetId);
-      const changeRecordRefs = (db.changeRecords || []).filter(item => item.assetId === assetId);
-      const warnings = [];
-      if (aiTargetRefs.length) warnings.push(`有 ${aiTargetRefs.length} 个巡检对象引用了该资产`);
-      if (sparePartMoveRefs.length) warnings.push(`有 ${sparePartMoveRefs.length} 条备件出入库记录引用了该资产`);
-      if (changeRecordRefs.length) warnings.push(`有 ${changeRecordRefs.length} 条变更记录引用了该资产`);
+      const warnings = collectAssetDeleteBlockers(db, assetId);
       if (warnings.length) {
         return json(res, 409, { message: '该资产存在关联数据: ' + warnings.join('; ') + '。请先删除关联数据后再删除资产。' });
       }
       db.assets.splice(index, 1);
+      db.assetRelations = (db.assetRelations || []).filter(item => item.sourceAssetId !== assetId && item.targetAssetId !== assetId);
+      if (db.topologyLayouts && db.topologyLayouts.positions) {
+        for (const key of Object.keys(db.topologyLayouts.positions)) {
+          const positions = db.topologyLayouts.positions[key];
+          if (positions && positions[assetId]) delete positions[assetId];
+        }
+      }
+      delete snmpMetricCache[assetId];
       appendAuditLog(db, user, 'delete', 'asset', assetId, `删除资产 ${target.name}`, target.projectId);
       await writeDb(db);
       return json(res, 200, { ok: true });
@@ -7184,6 +7729,24 @@ const requestHandler = async (req, res) => {
       return json(res, 200, { ok: true, relation: rel });
     }
 
+    if (req.method === 'GET' && pathname === '/api/assets/cabinet-layout') {
+      const user = requireAuth(req, res, db);
+      if (!user) return;
+      const list = filterByProjectScope(db.assets || [], user, item => item.projectId);
+      const payload = buildCabinetLayoutPayload(list);
+      if (user.role === 'customer') {
+        const stripSecrets = device => {
+          if (!device) return device;
+          delete device.monitorHost;
+          delete device.snmpCommunity;
+          return device;
+        };
+        payload.cabinets.forEach(cabinet => (cabinet.devices || []).forEach(stripSecrets));
+        payload.unassigned.forEach(stripSecrets);
+      }
+      return json(res, 200, payload);
+    }
+
     if (req.method === 'GET' && pathname === '/api/assets/topology-layout') {
       const user = requireAuth(req, res, db);
       if (!user) return;
@@ -7198,9 +7761,12 @@ const requestHandler = async (req, res) => {
       if (!user) return;
       const body = await readBody(req);
       const projectId = user.role === 'admin' ? (body.projectId || user.projectId) : user.projectId;
+      if (projectId && !requireExistingProject(projectId, db)) return json(res, 400, { message: '关联项目不存在' });
+      const layout = sanitizeTopologyPositions(body.positions);
+      if (layout.error) return json(res, 400, { message: layout.error });
       if (!db.topologyLayouts) db.topologyLayouts = { positions: {} };
       if (!db.topologyLayouts.positions) db.topologyLayouts.positions = {};
-      db.topologyLayouts.positions[projectId] = body.positions || {};
+      db.topologyLayouts.positions[projectId] = layout.positions;
       await writeDb(db);
       return json(res, 200, { ok: true });
     }
@@ -7213,11 +7779,13 @@ const requestHandler = async (req, res) => {
       const asset = db.assets.find(a => a.id === assetId);
       if (!asset) return json(res, 404, { message: '资产不存在' });
       if (!canViewProject(user, asset.projectId)) return json(res, 403, { message: '无权访问该资产' });
-      const host = asset.monitorHost || asset.installationLocation || '';
-      if (!host) return json(res, 200, { interfaces: [] });
+      const host = String(asset.monitorHost || '').trim();
+      if (!host || !validateHost(host)) return json(res, 200, { interfaces: [] });
+      const community = String(asset.snmpCommunity || '').trim();
+      if (!community) return json(res, 200, { interfaces: [] });
 
       try {
-        const ifList = await snmpWalkSubtree(host, parseInt(asset.snmpPort || '161', 10), asset.snmpCommunity || 'public', [1, 3, 6, 1, 2, 1, 2, 2, 1, 2], 5000);
+        const ifList = await snmpWalkSubtree(host, parseInt(asset.snmpPort || '161', 10), community, [1, 3, 6, 1, 2, 1, 2, 2, 1, 2], 5000);
         ifList.sort((a, b) => a.index - b.index);
         return json(res, 200, { interfaces: ifList.map(i => String(i.value)) });
       } catch (e) {
@@ -7347,11 +7915,28 @@ const requestHandler = async (req, res) => {
       if (reqUrl.searchParams.get('projectId')) list = list.filter(item => item.projectId === reqUrl.searchParams.get('projectId'));
       if (reqUrl.searchParams.get('userId')) list = list.filter(item => item.createdBy === reqUrl.searchParams.get('userId'));
       if (keyword) {
-        list = list.filter(item => [item.title, item.keywords, item.problem, item.solution].some(field => String(field || '').toLowerCase().includes(keyword)));
+        list = list.filter(item => {
+          const fields = user.role === 'customer'
+            ? [item.title, item.keywords, item.category, item.tags]
+            : [item.title, item.keywords, item.problem, item.solution];
+          return fields.some(field => String(field || '').toLowerCase().includes(keyword));
+        });
       }
       const query = Object.fromEntries(reqUrl.searchParams);
       const sorted = parseSortQuery(query, list, 'createdAt');
-      return json(res, 200, paginateResult(sorted, query));
+      const presented = user.role === 'customer'
+        ? sorted.map(item => ({
+          id: item.id,
+          title: item.title,
+          category: item.category || '',
+          tags: item.tags || '',
+          projectId: item.projectId,
+          createdAt: item.createdAt,
+          createdBy: item.createdBy,
+          hasContent: Boolean(item.content || item.problem || item.solution)
+        }))
+        : sorted;
+      return json(res, 200, paginateResult(presented, query));
     }
 
     if (req.method === 'POST' && pathname === '/api/kb') {
@@ -7436,24 +8021,10 @@ const requestHandler = async (req, res) => {
       if (!target) return json(res, 404, { message: '资料不存在' });
       if (user.role !== 'admin' && target.projectId !== user.projectId) return json(res, 403, { message: '无权访问该资料' });
       if (target.accessPasswordHash) {
-        const rawToken = reqUrl.searchParams.get('token') || '';
-        try {
-          const decoded = Buffer.from(rawToken, 'base64url').toString('utf8');
-          const lastColon = decoded.lastIndexOf(':');
-          if (lastColon === -1) return json(res, 403, { message: '访问令牌无效' });
-          const payload = decoded.slice(0, lastColon);
-          const sig = decoded.slice(lastColon + 1);
-          const expectedSig = crypto.createHmac('sha256', DOCUMENT_TOKEN_SECRET).update(payload).digest('hex');
-          if (sig.length !== expectedSig.length || !crypto.timingSafeEqual(Buffer.from(sig), Buffer.from(expectedSig))) return json(res, 403, { message: '访问令牌无效' });
-          const parts = payload.split(':');
-          if (parts[0] !== docId || parts[1] !== user.id) return json(res, 403, { message: '访问令牌与资料不匹配' });
-          const tokenTime = parseInt(parts[2], 10);
-          if (nowMs() - tokenTime > 10 * 60 * 1000) return json(res, 403, { message: '访问链接已过期，请重新验证密码' });
-        } catch (_) {
-          return json(res, 403, { message: '访问令牌无效' });
-        }
+        const verified = verifyDocumentAccessToken(readDocumentAccessToken(req), docId, user.id);
+        if (!verified.ok) return json(res, 403, { message: verified.message });
       }
-      return json(res, 200, sanitizeDocumentForApi(target, Boolean(target.accessPasswordHash)));
+      return json(res, 200, sanitizeDocumentForApi(target, user.role !== 'customer'));
     }
 
     if (req.method === 'POST' && pathname === '/api/documents') {
@@ -7707,11 +8278,12 @@ const requestHandler = async (req, res) => {
       } catch (_) {
         loginPassword = '';
       }
+      const canRevealLoginPassword = user.role === 'admin' || user.role === 'engineer';
       return json(res, 200, {
         ok: true,
         token,
         hasLoginPassword: Boolean(target.loginPasswordEncrypted),
-        loginPassword
+        loginPassword: canRevealLoginPassword ? loginPassword : ''
       });
     }
 
@@ -7722,21 +8294,9 @@ const requestHandler = async (req, res) => {
       const target = db.documents.find(item => item.id === docId);
       if (!target) return json(res, 404, { message: '资料不存在' });
       if (user.role !== 'admin' && target.projectId !== user.projectId) return json(res, 403, { message: '无权访问该资料' });
-      const rawToken = reqUrl.searchParams.get('token') || '';
-      try {
-        const decoded = Buffer.from(rawToken, 'base64url').toString('utf8');
-        const lastColon = decoded.lastIndexOf(':');
-        if (lastColon === -1) return json(res, 403, { message: '访问令牌无效' });
-        const payload = decoded.slice(0, lastColon);
-        const sig = decoded.slice(lastColon + 1);
-        const expectedSig = crypto.createHmac('sha256', DOCUMENT_TOKEN_SECRET).update(payload).digest('hex');
-        if (sig.length !== expectedSig.length || !crypto.timingSafeEqual(Buffer.from(sig), Buffer.from(expectedSig))) return json(res, 403, { message: '访问令牌无效' });
-        const parts = payload.split(':');
-        if (parts[0] !== docId || parts[1] !== user.id) return json(res, 403, { message: '访问令牌与资料不匹配' });
-        const tokenTime = parseInt(parts[2], 10);
-        if (nowMs() - tokenTime > 10 * 60 * 1000) return json(res, 403, { message: '访问链接已过期，请重新验证密码' });
-      } catch (_) {
-        return json(res, 403, { message: '访问令牌无效' });
+      if (target.accessPasswordHash) {
+        const verified = verifyDocumentAccessToken(readDocumentAccessToken(req), docId, user.id);
+        if (!verified.ok) return json(res, 403, { message: verified.message });
       }
       if (!target.attachmentPath || !fs.existsSync(target.attachmentPath)) {
         return json(res, 404, { message: '附件文件不存在' });
@@ -7767,7 +8327,7 @@ const requestHandler = async (req, res) => {
       if (!user) return;
       const today = formatDateKey(new Date());
       const list = filterByProjectScope(db.inspectionPlans || [], user, item => item.projectId)
-        .map(plan => ({ ...plan, nextDate: computeRolledInspectionNextDate(plan, today) }));
+        .map(plan => sanitizeInspectionPlanForViewer({ ...plan, nextDate: computeRolledInspectionNextDate(plan, today) }, user));
       const query = Object.fromEntries(reqUrl.searchParams);
       const sorted = parseSortQuery(query, list, 'createdAt');
       return json(res, 200, paginateResult(sorted, query));
@@ -7832,7 +8392,8 @@ const requestHandler = async (req, res) => {
     if (req.method === 'GET' && pathname === '/api/inspection-executions') {
       const user = requireAuth(req, res, db);
       if (!user) return;
-      const list = filterByProjectScope(db.inspectionExecutions || [], user, item => item.projectId);
+      const list = filterByProjectScope(db.inspectionExecutions || [], user, item => item.projectId)
+        .map(item => sanitizeInspectionExecutionForViewer(item, user));
       const query = Object.fromEntries(reqUrl.searchParams);
       const sorted = parseSortQuery(query, list, 'createdAt');
       return json(res, 200, paginateResult(sorted, query));
@@ -7923,6 +8484,10 @@ const requestHandler = async (req, res) => {
     if (req.method === 'GET' && pathname === '/api/spare-parts') {
       const user = requireAuth(req, res, db);
       if (!user) return;
+      if (user.role === 'customer') {
+        const query = Object.fromEntries(reqUrl.searchParams);
+        return json(res, 200, paginateResult([], query));
+      }
       const list = filterByProjectScope(db.spareParts || [], user, item => item.projectId);
       const query = Object.fromEntries(reqUrl.searchParams);
       const sorted = parseSortQuery(query, list, 'createdAt');
@@ -7932,6 +8497,10 @@ const requestHandler = async (req, res) => {
     if (req.method === 'GET' && pathname === '/api/spare-part-movements') {
       const user = requireAuth(req, res, db);
       if (!user) return;
+      if (user.role === 'customer') {
+        const query = Object.fromEntries(reqUrl.searchParams);
+        return json(res, 200, paginateResult([], query));
+      }
       const list = filterByProjectScope(db.sparePartMovements || [], user, item => item.projectId);
       const query = Object.fromEntries(reqUrl.searchParams);
       const sorted = parseSortQuery(query, list, 'createdAt');
@@ -8052,7 +8621,8 @@ const requestHandler = async (req, res) => {
       const list = filterByProjectScope(db.changeRecords || [], user, item => item.projectId);
       const query = Object.fromEntries(reqUrl.searchParams);
       const sorted = parseSortQuery(query, list, 'createdAt');
-      return json(res, 200, paginateResult(sorted, query));
+      const presented = sorted.map(item => sanitizeChangeRecordForViewer(item, user));
+      return json(res, 200, paginateResult(presented, query));
     }
 
     if (req.method === 'POST' && pathname === '/api/change-records') {
@@ -8183,7 +8753,10 @@ const requestHandler = async (req, res) => {
       const list = filterByProjectScope(db.incidentRecords || [], user, item => item.projectId);
       const query = Object.fromEntries(reqUrl.searchParams);
       const sorted = parseSortQuery(query, list, 'createdAt');
-      return json(res, 200, paginateResult(sorted, query));
+      const presented = user.role === 'customer'
+        ? sorted.map(item => ({ ...item, description: '', resolution: '' }))
+        : sorted;
+      return json(res, 200, paginateResult(presented, query));
     }
 
     if (req.method === 'POST' && pathname === '/api/incidents') {
@@ -8240,10 +8813,24 @@ const requestHandler = async (req, res) => {
     if (req.method === 'GET' && pathname === '/api/approvals') {
       const user = requireAuth(req, res, db);
       if (!user) return;
-      const list = filterByProjectScope(db.approvals || [], user, item => item.projectId);
+      let list = filterByProjectScope(db.approvals || [], user, item => item.projectId);
+      if (user.role === 'customer') list = list.filter(item => item.customerId === user.id);
       const query = Object.fromEntries(reqUrl.searchParams);
       const sorted = parseSortQuery(query, list, 'createdAt');
-      return json(res, 200, paginateResult(sorted, query));
+      const presented = user.role === 'customer'
+        ? sorted.map(item => ({
+          id: item.id,
+          title: item.title,
+          status: item.status,
+          currentStage: item.currentStage,
+          category: item.category,
+          relatedId: item.relatedId,
+          projectId: item.projectId,
+          createdAt: item.createdAt,
+          customerId: item.customerId
+        }))
+        : sorted;
+      return json(res, 200, paginateResult(presented, query));
     }
 
     if (req.method === 'POST' && pathname === '/api/approvals') {
@@ -8550,6 +9137,10 @@ const requestHandler = async (req, res) => {
     if (req.method === 'GET' && pathname === '/api/ai-inspection/tasks') {
       const user = requireAuth(req, res, db);
       if (!user) return;
+      if (user.role === 'customer') {
+        const query = Object.fromEntries(reqUrl.searchParams);
+        return json(res, 200, paginateResult([], query));
+      }
       const referenceMs = Date.now();
       const resultMap = new Map();
       let changed = false;
@@ -8694,6 +9285,10 @@ const requestHandler = async (req, res) => {
     if (req.method === 'GET' && pathname === '/api/ai-inspection/config-backup/plans') {
       const user = requireAuth(req, res, db);
       if (!user) return;
+      if (user.role === 'customer') {
+        const query = Object.fromEntries(reqUrl.searchParams);
+        return json(res, 200, paginateResult([], query));
+      }
       const list = filterByProjectScope(db.configBackupPlans || [], user, item => item.projectId);
       const query = Object.fromEntries(reqUrl.searchParams);
       if (!query.sortDirection) query.sortDirection = 'desc';
@@ -8784,6 +9379,10 @@ const requestHandler = async (req, res) => {
     if (req.method === 'GET' && pathname === '/api/ai-inspection/config-backup/records') {
       const user = requireAuth(req, res, db);
       if (!user) return;
+      if (user.role === 'customer') {
+        const query = Object.fromEntries(reqUrl.searchParams);
+        return json(res, 200, paginateResult([], query));
+      }
       const list = filterByProjectScope(db.configBackupRecords || [], user, item => item.projectId)
         .map(item => ({ ...item, content: undefined }));
       const query = Object.fromEntries(reqUrl.searchParams);
@@ -8872,9 +9471,10 @@ const requestHandler = async (req, res) => {
         const keyword = String(query.q).toLowerCase();
         list = list.filter(item => {
           const target = (db.aiInspectionTargets || []).find(entry => entry.id === item.targetId);
-          return String(item.summary || '').toLowerCase().includes(keyword)
-            || String(item.risk || '').toLowerCase().includes(keyword)
-            || String(item.suggestion || '').toLowerCase().includes(keyword)
+          const presented = sanitizeAiInspectionResultForViewer(item, user);
+          return String(presented.summary || '').toLowerCase().includes(keyword)
+            || String(presented.risk || '').toLowerCase().includes(keyword)
+            || String(presented.suggestion || '').toLowerCase().includes(keyword)
             || String(target?.name || '').toLowerCase().includes(keyword);
         });
       }
@@ -8977,9 +9577,11 @@ const requestHandler = async (req, res) => {
     }
 
     if (req.method === 'GET' && pathname === '/api/audit-logs') {
-      const user = requireAdmin(req, res, db);
+      const user = requireAuditReader(req, res, db);
       if (!user) return;
-      const list = db.auditLogs || [];
+      const list = user.role === 'admin'
+        ? (db.auditLogs || [])
+        : (db.auditLogs || []).filter(item => !item.projectId || item.projectId === user.projectId);
       const query = Object.fromEntries(reqUrl.searchParams);
       if (!query.sortDirection) query.sortDirection = 'desc';
       const sorted = parseSortQuery(query, list, 'createdAt');
@@ -9358,8 +9960,10 @@ const requestHandler = async (req, res) => {
       } catch (error) {
         return json(res, 400, { message: `证书或私钥无效：${error.message}` });
       }
-      fs.writeFileSync(httpsCertPath, certContent, 'utf8');
-      fs.writeFileSync(httpsKeyPath, keyContent, 'utf8');
+      fs.writeFileSync(httpsCertPath, certContent, { encoding: 'utf8', mode: 0o600 });
+      fs.writeFileSync(httpsKeyPath, keyContent, { encoding: 'utf8', mode: 0o600 });
+      try { fs.chmodSync(httpsCertPath, 0o600); } catch (_) {}
+      try { fs.chmodSync(httpsKeyPath, 0o600); } catch (_) {}
       db.systemConfig = normalizeSystemConfig({
         ...db.systemConfig,
         httpsCertFilename: path.basename(certPart.filename),
@@ -9382,6 +9986,10 @@ const requestHandler = async (req, res) => {
       const user = requireAdmin(req, res, db);
       if (!user) return;
       const body = await readBody(req, importBodyLimitBytes);
+      if (!verifyAdminStepUp(user, body && body.password)) {
+        return json(res, 401, { message: '管理员密码错误' });
+      }
+      delete body.password;
       if (!body || typeof body !== 'object' || Array.isArray(body)) {
         return json(res, 400, { message: '导入数据格式无效，需为有效的 JSON 对象' });
       }
@@ -9470,6 +10078,10 @@ const requestHandler = async (req, res) => {
     if (req.method === 'POST' && pathname.startsWith('/api/system/backups/') && pathname.endsWith('/restore')) {
       const user = requireAdmin(req, res, db);
       if (!user) return;
+      const restoreBody = await readBody(req);
+      if (!verifyAdminStepUp(user, restoreBody && restoreBody.password)) {
+        return json(res, 401, { message: '管理员密码错误' });
+      }
       const parts = pathname.split('/');
       const rawFilename = parts[4] || '';
       const filename = path.basename(decodeURIComponent(rawFilename));
@@ -9499,7 +10111,7 @@ const requestHandler = async (req, res) => {
       }
       const sessionToken = getSessionToken(req);
       const currentSession = (db.sessions || []).find(item => item.token === sessionToken) || null;
-      const nextDb = buildImportedDbPreservingCurrentSession(snapshot, user, sessionToken, currentSession);
+      const nextDb = buildImportedDbPreservingCurrentSession(fillMissingSnapshotSecrets(snapshot, db), user, sessionToken, currentSession);
       restoreDocumentAttachments(nextDb, snapshot.documentAttachments || []);
       const backupFilename = `backup-before-restore-${now().replace(/[:.]/g, '-')}.json`;
       fs.writeFileSync(path.join(backupDir, backupFilename), JSON.stringify(serializeDbSnapshot(db), null, 2));
@@ -9716,12 +10328,18 @@ const requestHandler = async (req, res) => {
         req.on('error', reject);
       });
       const parts = parseMultipart(rawBody, boundary);
+      const passwordPart = parts.find(part => part.name === 'password');
+      const upgradePassword = passwordPart ? passwordPart.data.toString('utf8').replace(/\r?\n$/, '') : '';
+      if (!verifyAdminStepUp(user, upgradePassword)) {
+        return rejectUpgradeUpload(res, db, user, '', '管理员密码错误', { status: 401 });
+      }
       const pkgPart = parts.find(part => (part.name === 'package' || part.name === 'file') && part.filename);
       if (!pkgPart) return rejectUpgradeUpload(res, db, user, '', '请上传升级包文件');
       const upgradeFilename = sanitizeUpgradeFilename(pkgPart.filename);
 
       const upgradesDir = path.join(dataDir, 'upgrades');
       const pendingDir = path.join(upgradesDir, 'pending');
+      try { fs.rmSync(pendingDir, { recursive: true, force: true }); } catch (_) {}
       fs.mkdirSync(pendingDir, { recursive: true });
 
       function cleanUpgradeDir(dir) {
@@ -9790,6 +10408,16 @@ const requestHandler = async (req, res) => {
         const pkgJson = JSON.parse(fs.readFileSync(path.join(pendingDir, 'package.json'), 'utf8'));
         upgradeVersion = pkgJson.version || 'unknown';
       } catch (_) {}
+      if (!upgradeVersion || upgradeVersion === 'unknown' || compareSemver(upgradeVersion, packageInfo.version) <= 0) {
+        cleanUpgradeDir(pendingDir);
+        return rejectUpgradeUpload(res, db, user, upgradeFilename, `不允许安装低于或等于当前版本的升级包（当前 ${packageInfo.version}，升级包 ${upgradeVersion}）`, { toVersion: upgradeVersion });
+      }
+      try {
+        writeUpgradeSha256Sums(pendingDir);
+      } catch (error) {
+        cleanUpgradeDir(pendingDir);
+        return rejectUpgradeUpload(res, db, user, upgradeFilename, `写入 SHA256SUMS 失败：${error.message}`, { toVersion: upgradeVersion });
+      }
 
       fs.writeFileSync(path.join(upgradesDir, 'UPGRADE_READY'), JSON.stringify({
         version: upgradeVersion,
@@ -9807,36 +10435,25 @@ const requestHandler = async (req, res) => {
 
       const applyAndRestart = () => {
         if (!isProduction) {
-          console.error('[upgrade] 非生产环境，跳过自动重启。请手动重启服务以应用升级。');
+          console.error('[upgrade] 非生产环境，跳过自动落地与重启。请手动重启服务以应用升级。');
           return;
         }
         try {
           const appDir = path.resolve(__dirname);
           const pendingDir = path.join(dataDir, 'upgrades', 'pending');
           const readyFlag = path.join(dataDir, 'upgrades', 'UPGRADE_READY');
-          const entries = fs.readdirSync(pendingDir);
-          for (const entry of entries) {
-            const src = path.join(pendingDir, entry);
-            const dest = path.join(appDir, entry);
-            try {
-              if (fs.statSync(src).isDirectory()) {
-                if (entry === 'public' || entry === 'scripts') {
-                  fs.rmSync(dest, { recursive: true, force: true });
-                  fs.cpSync(src, dest, { recursive: true });
-                }
-              } else {
-                fs.copyFileSync(src, dest);
-              }
-              console.error(`[upgrade] Applied ${entry}`);
-            } catch (e) {
-              console.error(`[upgrade] Failed to apply ${entry}: ${e.message}`);
-            }
+          const result = applyPendingUpgradeFiles(pendingDir, appDir);
+          if (result.failed.length) {
+            console.error(`[upgrade] 升级未完整应用: ${result.failed.join('; ')}`);
+            return;
           }
+          result.applied.forEach(entry => console.error(`[upgrade] Applied ${entry}`));
           fs.rmSync(pendingDir, { recursive: true, force: true });
           try { fs.unlinkSync(readyFlag); } catch (_) {}
           console.error(`[upgrade] v${upgradeVersion} 升级完成，即将重启...`);
         } catch (e) {
           console.error(`[upgrade] 升级失败: ${e.message}`);
+          return;
         }
         process.exit(0);
       };
@@ -10023,6 +10640,7 @@ function sendToScopedWs(message, projectId) {
       const allowAll = !projectId;
       const isAdmin = ws.role === 'admin';
       const sameProject = Boolean(projectId) && ws.projectId === projectId;
+      if (ws.role === 'customer' && !sameProject) continue;
       if (allowAll || isAdmin || sameProject) ws.send(message);
     } catch (_) {
       stale.push(ws);
@@ -10082,8 +10700,8 @@ function setMonitorStatus(assetId, status) {
 function checkAssetPing(host, timeoutMs = 3000) {
   return new Promise(resolve => {
     try {
-      const safeHost = String(host || '').replace(/[^a-zA-Z0-9.\-]/g, '');
-      if (!safeHost) return resolve('offline');
+      const safeHost = String(host || '').trim();
+      if (!validateHost(safeHost)) return resolve('offline');
       const child = execFile('ping', ['-c', '1', '-W', '2', safeHost], { timeout: timeoutMs }, (err) => {
         resolve(err ? 'offline' : 'online');
       });
@@ -10097,6 +10715,7 @@ function checkAssetPing(host, timeoutMs = 3000) {
 function checkAssetTcp(host, port, timeoutMs = 3000) {
   return new Promise(resolve => {
     try {
+      if (!validateHost(host) || !validatePort(port)) return resolve('offline');
       const net = require('net');
       const socket = new net.Socket();
       socket.setTimeout(timeoutMs);
@@ -10111,7 +10730,9 @@ function checkAssetTcp(host, port, timeoutMs = 3000) {
 }
 
 async function checkAssetSnmp(host, asset, timeoutMs = 3000) {
-  const community = asset.snmpCommunity || 'public';
+  if (!validateHost(host)) return 'offline';
+  const community = String(asset.snmpCommunity || '').trim();
+  if (!community) return 'offline';
   const port = parseInt(asset.snmpPort || '161', 10);
   try {
     const vb = await snmpGetUdp(host, port, community, [1, 3, 6, 1, 2, 1, 1, 3, 0], timeoutMs);
@@ -10121,9 +10742,136 @@ async function checkAssetSnmp(host, asset, timeoutMs = 3000) {
   }
 }
 
+function snmpToNumber(value) {
+  if (value === undefined || value === null || value === '') return null;
+  const n = Number(value);
+  return Number.isFinite(n) ? n : null;
+}
+
+function oidMatches(value, expected) {
+  if (Array.isArray(value)) {
+    return expected.every((part, index) => value[index] === part) && value.length === expected.length;
+  }
+  return String(value || '').includes(expected.join('.'));
+}
+
+async function collectAssetSnmpMetrics(asset) {
+  const host = String(asset.monitorHost || '').trim();
+  const community = String(asset.snmpCommunity || '').trim();
+  if (!host || !validateHost(host) || !community) return;
+  const port = parseInt(asset.snmpPort || '161', 10);
+  const timeoutMs = 2000;
+  const metrics = emptySnmpMetrics();
+  const nowTs = Date.now();
+  try {
+    const up = await snmpGetUdp(host, port, community, [1, 3, 6, 1, 2, 1, 1, 3, 0], timeoutMs);
+    const ticks = snmpToNumber(up && up.value);
+    if (ticks !== null) metrics.uptimeSeconds = Math.floor(ticks / 100);
+  } catch (_) {}
+  try {
+    const idle = await snmpGetUdp(host, port, community, [1, 3, 6, 1, 4, 1, 2021, 11, 11, 0], timeoutMs);
+    const idlePct = snmpToNumber(idle && idle.value);
+    if (idlePct !== null) {
+      metrics.cpuPercent = Math.max(0, Math.min(100, 100 - idlePct));
+    } else {
+      const loads = await snmpWalkSubtreeUdp(host, port, community, [1, 3, 6, 1, 2, 1, 25, 3, 3, 1, 2], timeoutMs, 16);
+      const nums = loads.map(item => snmpToNumber(item.value)).filter(value => value !== null);
+      if (nums.length) metrics.cpuPercent = nums.reduce((sum, value) => sum + value, 0) / nums.length;
+    }
+  } catch (_) {}
+  let storageTypes = [];
+  let storageSizes = [];
+  let storageUsed = [];
+  try {
+    storageTypes = await snmpWalkSubtreeUdp(host, port, community, [1, 3, 6, 1, 2, 1, 25, 2, 3, 1, 2], timeoutMs, 32);
+    storageSizes = await snmpWalkSubtreeUdp(host, port, community, [1, 3, 6, 1, 2, 1, 25, 2, 3, 1, 5], timeoutMs, 32);
+    storageUsed = await snmpWalkSubtreeUdp(host, port, community, [1, 3, 6, 1, 2, 1, 25, 2, 3, 1, 6], timeoutMs, 32);
+  } catch (_) {}
+  const sizeMap = new Map(storageSizes.map(item => [item.index, snmpToNumber(item.value)]));
+  const usedMap = new Map(storageUsed.map(item => [item.index, snmpToNumber(item.value)]));
+  try {
+    const total = await snmpGetUdp(host, port, community, [1, 3, 6, 1, 4, 1, 2021, 4, 5, 0], timeoutMs);
+    const avail = await snmpGetUdp(host, port, community, [1, 3, 6, 1, 4, 1, 2021, 4, 6, 0], timeoutMs);
+    const totalN = snmpToNumber(total && total.value);
+    const availN = snmpToNumber(avail && avail.value);
+    if (totalN && totalN > 0 && availN !== null) {
+      metrics.memoryPercent = Math.max(0, Math.min(100, ((totalN - availN) / totalN) * 100));
+    }
+  } catch (_) {}
+  if (metrics.memoryPercent === null) {
+    const hrRam = [1, 3, 6, 1, 2, 1, 25, 2, 1, 2];
+    for (const item of storageTypes) {
+      if (!oidMatches(item.value, hrRam)) continue;
+      const size = sizeMap.get(item.index);
+      const used = usedMap.get(item.index);
+      if (size && size > 0 && used !== null) {
+        metrics.memoryPercent = Math.max(0, Math.min(100, (used / size) * 100));
+        break;
+      }
+    }
+  }
+  const hrDisk = [1, 3, 6, 1, 2, 1, 25, 2, 1, 4];
+  let maxDisk = null;
+  for (const item of storageTypes) {
+    if (!oidMatches(item.value, hrDisk)) continue;
+    const size = sizeMap.get(item.index);
+    const used = usedMap.get(item.index);
+    if (size && size > 0 && used !== null) {
+      const pct = (used / size) * 100;
+      if (maxDisk === null || pct > maxDisk) maxDisk = pct;
+    }
+  }
+  if (maxDisk !== null) metrics.diskPercent = Math.max(0, Math.min(100, maxDisk));
+  try {
+    const statusList = await snmpWalkSubtreeUdp(host, port, community, [1, 3, 6, 1, 2, 1, 2, 2, 1, 8], timeoutMs, 64);
+    const typeList = await snmpWalkSubtreeUdp(host, port, community, [1, 3, 6, 1, 2, 1, 2, 2, 1, 3], timeoutMs, 64);
+    let inList = await snmpWalkSubtreeUdp(host, port, community, [1, 3, 6, 1, 2, 1, 31, 1, 1, 1, 6], timeoutMs, 64);
+    let outList = await snmpWalkSubtreeUdp(host, port, community, [1, 3, 6, 1, 2, 1, 31, 1, 1, 1, 10], timeoutMs, 64);
+    if (!inList.length && !outList.length) {
+      inList = await snmpWalkSubtreeUdp(host, port, community, [1, 3, 6, 1, 2, 1, 2, 2, 1, 10], timeoutMs, 64);
+      outList = await snmpWalkSubtreeUdp(host, port, community, [1, 3, 6, 1, 2, 1, 2, 2, 1, 16], timeoutMs, 64);
+    }
+    const typeMap = new Map(typeList.map(item => [item.index, snmpToNumber(item.value)]));
+    const upIndexes = new Set(statusList.filter(item => snmpToNumber(item.value) === 1).map(item => item.index));
+    let inSum = 0;
+    let outSum = 0;
+    let counted = false;
+    for (const item of inList) {
+      if (!upIndexes.has(item.index) || typeMap.get(item.index) === 24) continue;
+      const n = snmpToNumber(item.value);
+      if (n !== null) {
+        inSum += n;
+        counted = true;
+      }
+    }
+    for (const item of outList) {
+      if (!upIndexes.has(item.index) || typeMap.get(item.index) === 24) continue;
+      const n = snmpToNumber(item.value);
+      if (n !== null) outSum += n;
+    }
+    if (counted) {
+      const prev = snmpMetricCache[asset.id];
+      if (prev && prev._ts && nowTs > prev._ts) {
+        const dt = (nowTs - prev._ts) / 1000;
+        let din = inSum - (prev._inOctets || 0);
+        let dout = outSum - (prev._outOctets || 0);
+        if (din < 0) din = inSum;
+        if (dout < 0) dout = outSum;
+        metrics.trafficInBps = din / dt;
+        metrics.trafficOutBps = dout / dt;
+      }
+      metrics._inOctets = inSum;
+      metrics._outOctets = outSum;
+      metrics._ts = nowTs;
+    }
+  } catch (_) {}
+  metrics.collectedAt = new Date(nowTs).toISOString();
+  snmpMetricCache[asset.id] = metrics;
+}
+
 async function checkAssetMonitor(asset) {
   if (!asset.monitorEnabled) return;
-  const host = asset.monitorHost || asset.installationLocation || '';
+  const host = String(asset.monitorHost || '').trim();
   if (!host) {
     setMonitorStatus(asset.id, 'unknown');
     return;
@@ -10176,6 +10924,9 @@ async function runAssetMonitorScheduler() {
     const monitoredAssets = (db.assets || []).filter(a => a.monitorEnabled && a.monitorHost);
     for (const asset of monitoredAssets) {
       await checkAssetMonitor(asset);
+      if (asset.monitorType === 'snmp') {
+        try { await collectAssetSnmpMetrics(asset); } catch (_) {}
+      }
     }
   } catch (error) {
     console.warn('Asset monitor scheduler error:', error.message);
@@ -10234,10 +10985,10 @@ async function getAssetSnmpPortMap(asset) {
   const key = asset.id;
   const cached = portStatusCache[key];
   if (cached && (Date.now() - cached.timestamp < 120000)) return cached.map;
-  const host = asset.monitorHost;
-  if (!host) return {};
+  const host = String(asset.monitorHost || '').trim();
+  const community = String(asset.snmpCommunity || '').trim();
+  if (!host || !validateHost(host) || !community) return {};
   try {
-    const community = asset.snmpCommunity || 'public';
     const port = parseInt(asset.snmpPort || '161', 10);
     const [descrList, statusList] = await Promise.all([
       snmpWalkSubtree(host, port, community, [1, 3, 6, 1, 2, 1, 2, 2, 1, 2], 4000),
@@ -10292,8 +11043,9 @@ async function runTrafficMonitorScheduler() {
     for (const rel of relations) {
       const srcAsset = assets.find(a => a.id === rel.sourceAssetId);
       if (!srcAsset || !srcAsset.monitorHost || !srcAsset.snmpCommunity) continue;
-      const host = srcAsset.monitorHost;
-      const community = srcAsset.snmpCommunity || 'public';
+      const host = String(srcAsset.monitorHost || '').trim();
+      const community = String(srcAsset.snmpCommunity || '').trim();
+      if (!host || !validateHost(host) || !community) continue;
       const port = parseInt(srcAsset.snmpPort || '161', 10);
       try {
         const inVb = await snmpGetUdp(host, port, community, [1, 3, 6, 1, 2, 1, 31, 1, 1, 1, 6, 1], 2000);

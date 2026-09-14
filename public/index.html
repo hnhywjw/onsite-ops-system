@@ -707,6 +707,113 @@
     .modal-box button.primary { background: var(--primary); color: #fff; }
     .modal-box button.secondary { background: var(--primary-weak); color: var(--primary); }
     .modal-box .modal-error { color: var(--danger); font-size: 13px; margin-top: 4px; }
+    .cabinet-layout-board {
+      display: flex;
+      gap: 18px;
+      overflow-x: auto;
+      padding: 8px 4px 16px;
+      align-items: flex-start;
+      min-height: 520px;
+    }
+    .cabinet-rack {
+      width: 196px;
+      flex-shrink: 0;
+      background: linear-gradient(180deg, #1e293b 0%, #0f172a 100%);
+      border: 1px solid #334155;
+      border-radius: 12px;
+      box-shadow: inset 0 1px 0 rgba(255,255,255,.06), 0 12px 24px rgba(15,23,42,.18);
+      color: #e2e8f0;
+    }
+    .cabinet-rack-title {
+      text-align: center;
+      padding: 10px 8px;
+      font-size: 13px;
+      font-weight: 700;
+      letter-spacing: .04em;
+      border-bottom: 1px solid #334155;
+      background: rgba(15,23,42,.55);
+    }
+    .cabinet-rack-body {
+      position: relative;
+      margin: 8px;
+      border: 1px solid #1e293b;
+      background: repeating-linear-gradient(180deg, #111827 0 15px, #0b1220 15px 16px);
+    }
+    .cabinet-unit-label {
+      position: absolute;
+      left: 0;
+      width: 28px;
+      font-size: 9px;
+      line-height: 16px;
+      text-align: center;
+      color: #64748b;
+      pointer-events: none;
+    }
+    .cabinet-device {
+      position: absolute;
+      left: 30px;
+      right: 4px;
+      border-radius: 4px;
+      display: flex;
+      align-items: center;
+      gap: 6px;
+      padding: 0 8px;
+      font-size: 11px;
+      color: #0f172a;
+      background: linear-gradient(180deg, #e2e8f0, #cbd5e1);
+      border: 1px solid #94a3b8;
+      cursor: pointer;
+      overflow: hidden;
+      z-index: 2;
+    }
+    .cabinet-device.conflict {
+      background: linear-gradient(180deg, #fecaca, #fca5a5);
+      border-color: #ef4444;
+    }
+    .cabinet-device-led {
+      width: 7px;
+      height: 7px;
+      border-radius: 50%;
+      flex-shrink: 0;
+      box-shadow: 0 0 6px currentColor;
+    }
+    .cabinet-device-led.online { color: #16a34a; background: #22c55e; }
+    .cabinet-device-led.offline { color: #dc2626; background: #ef4444; }
+    .cabinet-device-led.unknown { color: #94a3b8; background: #cbd5e1; }
+    .cabinet-device-name {
+      white-space: nowrap;
+      overflow: hidden;
+      text-overflow: ellipsis;
+      font-weight: 600;
+    }
+    .cabinet-unassigned {
+      min-width: 220px;
+      flex-shrink: 0;
+    }
+    .cabinet-unassigned-item {
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      padding: 8px 10px;
+      margin-bottom: 8px;
+      border: 1px solid var(--line);
+      border-radius: 8px;
+      background: #fff;
+      cursor: pointer;
+    }
+    #cabinetLayoutTooltip {
+      position: fixed;
+      z-index: 10000;
+      min-width: 180px;
+      max-width: 260px;
+      padding: 8px 10px;
+      border-radius: 8px;
+      background: #0f172a;
+      color: #e2e8f0;
+      font-size: 12px;
+      box-shadow: 0 8px 20px rgba(15,23,42,.28);
+      pointer-events: none;
+    }
     .system-actions {
       display: flex;
       gap: 10px;
@@ -734,10 +841,24 @@
     }
     .system-upgrade-grid {
       grid-template-columns: repeat(2, minmax(0, 1fr));
-      align-items: start;
+      align-items: stretch;
     }
     .system-upgrade-grid .card {
       padding: 14px 16px;
+    }
+    .system-upgrade-card {
+      display: flex;
+      flex-direction: column;
+      min-height: 100%;
+    }
+    .system-upgrade-card #systemUpgradeLogList {
+      flex: 1;
+    }
+    .system-upgrade-side {
+      display: flex;
+      flex-direction: column;
+      gap: 16px;
+      min-height: 100%;
     }
     .system-upgrade-grid h3 {
       margin-bottom: 8px;
@@ -753,7 +874,7 @@
       margin-top: 10px;
     }
     .system-backup-card {
-      grid-column: 1 / -1;
+      flex: 1;
     }
     .system-backup-list {
       display: grid;
@@ -772,6 +893,14 @@
     }
     .system-upgrade-log-item {
       align-items: flex-start;
+      padding: 8px 10px;
+    }
+    .system-upgrade-log-list {
+      display: grid;
+      gap: 8px;
+      margin-top: 8px;
+      flex: 0 0 auto;
+      align-content: start;
     }
     .system-upgrade-log-status {
       font-weight: 600;
@@ -848,6 +977,7 @@
       h2 { font-size: 18px; }
       h3 { font-size: 15px; }
       .section-tabs button { font-size: 13px; padding: 4px 8px; }
+      .system-upgrade-grid { grid-template-columns: 1fr; }
     }
     .topo-node.selected { border-color: #3b82f6; box-shadow: 0 0 0 3px rgba(59,130,246,0.4), 0 0 12px rgba(59,130,246,0.25); background:#eff6ff; }
     .topo-node.selected::before { content:'✓'; position:absolute; top:-10px; left:-10px; width:20px; height:20px; border-radius:50%; background:#3b82f6; color:#fff; font-size:11px; font-weight:700; display:flex; align-items:center; justify-content:center; z-index:5; }
@@ -1152,6 +1282,17 @@
     </div>
   </div>
 
+  <div id="cabinetLayoutTooltip" class="hidden"></div>
+  <div id="cabinetLayoutDetailModal" class="modal-overlay hidden">
+    <div class="modal-box" style="max-width:420px;">
+      <h3 id="cabinetLayoutDetailTitle" style="margin-top:0;">设备运行详情</h3>
+      <div id="cabinetLayoutDetailBody" style="font-size:13px;"></div>
+      <div class="btn-row" style="margin-top:12px;">
+        <button class="secondary" type="button" onclick="closeModal('cabinetLayoutDetailModal')">关闭</button>
+      </div>
+    </div>
+  </div>
+
   <div id="assetEditModal" class="modal-overlay hidden">
     <div class="modal-box" style="max-width:520px;">
       <h3 id="assetEditModalTitle">修改资产</h3>
@@ -1184,6 +1325,9 @@
         <label>状态<input id="edAssetStatus" placeholder="使用中/停用/维护中" /></label>
         <label>维保到期日<input id="edAssetMaintainExpiryDate" type="date" required /></label>
         <label class="full">安装位置<input id="edAssetInstallationLocation" placeholder="例：A区机房-03号机柜-2U" /></label>
+        <label>机柜名称<input id="edAssetCabinetName" placeholder="例：03号机柜" /></label>
+        <label>起始U位<input id="edAssetRackUnitStart" type="number" min="1" max="48" placeholder="1-48" /></label>
+        <label>占用U数<input id="edAssetRackUnitSize" type="number" min="1" max="48" placeholder="默认 1" /></label>
         <label class="full">备注<textarea id="edAssetNotes"></textarea></label>
         <label class="full" style="border-top:1px solid #e5e7eb;padding-top:12px;margin-top:4px;font-weight:600;color:#374151;font-size:13px;">设备监控设置</label>
         <label class="full" style="display:flex;align-items:center;gap:8px;">
@@ -1199,7 +1343,7 @@
         </label>
         <label>监控地址/IP<input id="edAssetMonitorHost" placeholder="例：192.168.1.1" /></label>
         <label id="edAssetMonitorPortLabel" style="display:none;">端口号<input id="edAssetMonitorPort" type="number" placeholder="例：80" /></label>
-        <label id="edAssetSnmpCommunityLabel" style="display:none;">SNMP 团体字<input id="edAssetSnmpCommunity" placeholder="默认: public" /></label>
+        <label id="edAssetSnmpCommunityLabel" style="display:none;">SNMP 团体字<input id="edAssetSnmpCommunity" placeholder="选填，留空保持原值" /></label>
         <label id="edAssetSnmpPortLabel" style="display:none;">SNMP 端口<input id="edAssetSnmpPort" type="number" placeholder="默认: 161" /></label>
       </div>
       <div id="assetEditMessage" style="margin:8px 0;font-size:13px;"></div>
@@ -2043,7 +2187,8 @@
         <div class="section-tabs" data-section="assets">
           <button class="active" data-subtab="form" type="button">新增资产</button>
           <button data-subtab="list" type="button">资产列表</button>
-          <button data-subtab="topology" type="button">资产拓扑</button>
+          <button data-subtab="topology" type="button">资产拓扑图</button>
+          <button data-subtab="cabinetLayout" type="button">资产布局图</button>
         </div>
         <div class="subtab-panel" data-section="assets" data-subtab="form">
           <div class="card">
@@ -2076,6 +2221,9 @@
               <label><span>版本</span><input name="version" /></label>
               <label><span>维保到期日 <em style="color:#dc2626;font-style:normal;">*</em></span><input name="maintainExpiryDate" type="date" required /></label>
                <label><span>安装位置</span><input name="installationLocation" placeholder="例：A区机房-03号机柜-2U" /></label>
+               <label><span>机柜名称</span><input name="cabinetName" placeholder="例：03号机柜" /></label>
+               <label><span>起始U位</span><input name="rackUnitStart" type="number" min="1" max="48" placeholder="1-48" /></label>
+               <label><span>占用U数</span><input name="rackUnitSize" type="number" min="1" max="48" placeholder="默认 1" /></label>
                <label><span>状态</span><input name="status" placeholder="使用中/停用/维护中" /></label>
                <label><span>责任人/部门</span><input name="owner" /></label>
                 <label class="full"><span>备注</span><textarea name="notes"></textarea></label>
@@ -2094,7 +2242,7 @@
                 </label>
                 <label><span>监控地址/IP</span><input name="monitorHost" placeholder="例：192.168.1.1" style="width:160px;" /></label>
                 <label id="assetMonitorPortLabel" style="display:none;"><span>端口号</span><input name="monitorPort" type="number" placeholder="例：80" style="width:80px;" /></label>
-                <label id="assetSnmpCommunityLabel" style="display:none;"><span>SNMP 团体字</span><input name="snmpCommunity" placeholder="默认: public" style="width:130px;" /></label>
+                 <label id="assetSnmpCommunityLabel" style="display:none;"><span>SNMP 团体字</span><input name="snmpCommunity" placeholder="选填，不默认填写" style="width:130px;" /></label>
                 <label id="assetSnmpPortLabel" style="display:none;"><span>SNMP 端口</span><input name="snmpPort" type="number" placeholder="161" style="width:80px;" /></label>
               </div>
 
@@ -2113,7 +2261,7 @@
             <h3 style="margin-top:0;">资产列表</h3>
             <div class="table-wrap">
               <table>
-                <thead><tr><th style="width:30px;"><input type="checkbox" id="assetSelectAll" title="全选" /></th><th>项目名称</th><th>资产类型</th><th>资产名称</th><th>品牌</th><th>规格型号</th><th>序列号</th><th>版本</th><th>维保到期日</th><th>安装位置</th><th>状态</th><th>责任人/部门</th><th style="max-width:100px;">备注</th><th>操作</th></tr></thead>
+                <thead><tr><th style="width:30px;"><input type="checkbox" id="assetSelectAll" title="全选" /></th><th>项目名称</th><th>资产类型</th><th>资产名称</th><th>品牌</th><th>规格型号</th><th>序列号</th><th>版本</th><th>维保到期日</th><th>安装位置</th><th>机柜/U位</th><th>状态</th><th>责任人/部门</th><th style="max-width:100px;">备注</th><th>操作</th></tr></thead>
                 <tbody id="assetTable"></tbody>
               </table>
               <div class="pagination-bar">
@@ -2161,6 +2309,24 @@
               <div class="topo-cmenu-item" data-action="edit" style="padding:8px 14px;cursor:pointer;font-size:13px;color:#1f2937;border-bottom:1px solid #f3f4f6;">编辑连接</div>
               <div class="topo-cmenu-item" data-action="delete" style="padding:8px 14px;cursor:pointer;font-size:13px;color:#dc2626;">删除连接</div>
             </div>
+          </div>
+        </div>
+        <div class="subtab-panel hidden" data-section="assets" data-subtab="cabinetLayout">
+          <div class="card">
+            <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:12px;">
+              <div>
+                <h3 style="margin:0;">资产布局图</h3>
+                <p style="margin:6px 0 0;font-size:12px;color:#6b7280;">按机柜查看设备槽位 · 悬停查看摘要 · 点击查看 SNMP 实时详情</p>
+              </div>
+              <div>
+                <button class="secondary" id="cabinetLayoutRefreshBtn" type="button" style="font-size:13px;padding:6px 12px;">刷新</button>
+                <span style="margin-left:8px;font-size:12px;color:#666;">
+                  <span style="color:#16a34a;">●</span> 在线 <span style="color:#dc2626;margin-left:6px;">●</span> 离线 <span style="color:#9ca3af;margin-left:6px;">●</span> 未监控
+                </span>
+              </div>
+            </div>
+            <div id="cabinetLayoutEmpty" class="hidden" style="padding:48px 16px;text-align:center;color:#9ca3af;">暂无资产</div>
+            <div id="cabinetLayoutBoard" class="cabinet-layout-board"></div>
           </div>
         </div>
       </section>
@@ -2784,33 +2950,42 @@
         </div>
         <div class="section-tabs" data-section="system">
           <button class="active" data-subtab="serviceStatus" type="button">系统及服务状态</button>
-          <button data-subtab="workReportReminder" type="button">工作汇报提醒阈值</button>
+          <button data-subtab="workReportReminder" type="button">系统设置</button>
           <button data-subtab="upgrade" type="button">系统升级与数据备份</button>
           <button data-subtab="databaseInit" type="button">初始化数据库</button>
           <button data-subtab="auditLog" type="button">操作日志</button>
         </div>
         <div class="subtab-panel hidden system-compact" data-section="system" data-subtab="upgrade">
           <div class="grid system-upgrade-grid">
-            <div class="card">
+            <div class="card system-upgrade-card">
               <h3 style="margin-top:0;">软件升级</h3>
               <div class="muted">当前版本：<span id="systemCurrentVersion">-</span></div>
               <p class="muted">上传升级包（.tar.gz）。开发环境校验 manifest 与 SHA256；生产环境还须使用与 UPGRADE_SIGNING_KEY 一致的 HMAC 签名包，系统将自动应用并重启。</p>
               <label style="margin-top:14px;">
                 <input id="systemUpgradeFile" type="file" accept=".tar.gz,.tgz,application/gzip,application/x-gzip" />
               </label>
+              <label style="margin-top:14px; max-width: 320px;">
+                <span>请输入管理员密码确认升级</span>
+                <input id="systemUpgradePassword" type="password" placeholder="请输入当前管理员密码" />
+              </label>
               <div class="system-actions">
                 <button class="primary" id="systemUpgradeBtn" type="button">上传升级包并升级</button>
               </div>
               <div id="systemUpgradeMessage"></div>
               <div class="muted" style="margin-top:14px;">升级日志</div>
-              <div id="systemUpgradeLogList" class="system-backup-list"></div>
+              <div id="systemUpgradeLogList" class="system-upgrade-log-list"></div>
             </div>
+            <div class="system-upgrade-side">
             <div class="card">
               <h3 style="margin-top:0;">数据导入</h3>
               <div class="muted">支持导入完整 JSON 数据文件，导入后立即生效。</div>
               <label style="margin-top:14px;">
                 <span>选择数据文件</span>
                 <input id="systemImportFile" type="file" accept="application/json,.json" />
+              </label>
+              <label style="margin-top:14px; max-width: 320px;">
+                <span>请输入管理员密码确认导入</span>
+                <input id="systemImportPassword" type="password" placeholder="请输入当前管理员密码" />
               </label>
               <div class="system-actions">
                 <button class="primary" id="systemImportBtn" type="button">导入数据</button>
@@ -2819,13 +2994,18 @@
             </div>
             <div class="card system-backup-card">
               <h3 style="margin-top:0;">数据备份、导出</h3>
-              <div class="muted">创建当前数据库快照，或直接导出完整数据文件。</div>
+              <div class="muted">创建当前数据库快照，或直接导出完整数据文件。从磁盘备份恢复需再次输入管理员密码。</div>
+              <label style="margin-top:14px; max-width: 320px;">
+                <span>恢复备份时的管理员密码</span>
+                <input id="systemRestorePassword" type="password" placeholder="请输入当前管理员密码" />
+              </label>
               <div class="system-actions">
                 <button class="primary" id="systemBackupBtn" type="button">创建备份</button>
                 <button class="secondary" id="systemExportBtn" type="button">导出数据</button>
               </div>
               <div id="systemBackupMessage"></div>
               <div id="systemBackupList" class="system-backup-list"></div>
+            </div>
             </div>
           </div>
 
@@ -2847,21 +3027,23 @@
         <div class="subtab-panel system-compact" data-section="system" data-subtab="serviceStatus">
           <div class="card">
             <div class="toolbar" style="justify-content: space-between; margin-bottom: 16px;">
-              <h3 style="margin:0;">平台服务</h3>
-              <div class="muted">每 5 秒自动刷新</div>
-            </div>
-            <div id="systemServiceMessage"></div>
-            <div class="table-wrap"><table class="system-service-table"><thead><tr><th>服务</th><th>状态</th><th>详情</th><th>检查时间</th></tr></thead><tbody id="systemServiceTable"></tbody></table></div>
-          </div>
-          <div class="card" style="margin-top: 16px;">
-            <div class="toolbar" style="justify-content: space-between; margin-bottom: 16px;">
               <h3 style="margin:0;">系统负载</h3>
               <div class="muted">每 5 秒自动刷新</div>
             </div>
             <div id="systemLoadMessage"></div>
             <div class="table-wrap"><table><thead><tr><th>资源</th><th>状态</th><th>详情</th><th>检查时间</th></tr></thead><tbody id="systemLoadTable"></tbody></table></div>
           </div>
-          <div class="grid cols-2" style="margin-top: 16px;">
+          <div class="card" style="margin-top: 16px;">
+            <div class="toolbar" style="justify-content: space-between; margin-bottom: 16px;">
+              <h3 style="margin:0;">平台服务</h3>
+              <div class="muted">每 5 秒自动刷新</div>
+            </div>
+            <div id="systemServiceMessage"></div>
+            <div class="table-wrap"><table class="system-service-table"><thead><tr><th>服务</th><th>状态</th><th>详情</th><th>检查时间</th></tr></thead><tbody id="systemServiceTable"></tbody></table></div>
+          </div>
+        </div>
+        <div class="subtab-panel hidden system-compact" data-section="system" data-subtab="workReportReminder">
+          <div class="grid cols-2">
             <div class="card">
               <h3 style="margin:0 0 16px;">控制台登录设置</h3>
               <div class="muted">设置 WebUI 在无操作时自动退出到登录页的时间。</div>
@@ -2952,7 +3134,7 @@
                   <div class="muted" style="margin-bottom:8px;">当前证书状态</div>
                   <div id="httpsCertificateStatus">未上传证书</div>
                 </div>
-                <div class="grid cols-2" style="gap:14px;">
+                <div class="grid" style="grid-template-columns:minmax(0,1fr) minmax(0,1fr) max-content; gap:14px; align-items:end;">
                   <label>
                     <span>证书文件（PEM/CRT）</span>
                     <input id="httpsCertFile" type="file" accept=".pem,.crt,.cer" />
@@ -2961,18 +3143,17 @@
                     <span>私钥文件（PEM/KEY）</span>
                     <input id="httpsKeyFile" type="file" accept=".pem,.key" />
                   </label>
+                  <button class="secondary" id="uploadHttpsCertBtn" type="button" style="width:auto; white-space:nowrap; justify-self:start;">上传证书</button>
                 </div>
               </div>
-              <div class="system-actions" style="margin-top: 16px; justify-content: flex-end;">
-                <button class="secondary" id="uploadHttpsCertBtn" type="button">上传证书</button>
+              <div class="system-actions" style="margin-top: 16px;">
+                <button class="primary" id="saveHttpsSettingsBtn" type="button">保存设置</button>
               </div>
               <div id="systemHttpsMessage"></div>
             </div>
           </div>
-        </div>
-        <div class="subtab-panel hidden system-compact" data-section="system" data-subtab="workReportReminder">
-          <div class="card">
-            <h3 style="margin:0 0 16px;">工作汇报提醒阈值</h3>
+          <div class="card" style="margin-top: 16px;">
+            <h3 style="margin:0 0 16px;">工作汇报提醒阈值设置</h3>
             <div class="muted">推荐默认值：日报提醒 12 点，周报提前 7 天，月报提前 15 天，低工时 1 小时，高工时 12 小时，连续无记录 3 天，项目无人填报 7 天。</div>
             <div class="grid cols-3" style="gap: 12px; margin-top: 8px; max-width: 720px;">
               <label>
@@ -3005,7 +3186,7 @@
               </label>
             </div>
             <div class="system-actions" style="margin-top: 16px;">
-              <button class="primary" id="saveWorkReportReminderBtn" type="button">保存提醒阈值</button>
+              <button class="primary" id="saveWorkReportReminderBtn" type="button">保存设置</button>
             </div>
             <div id="workReportReminderMessage"></div>
           </div>
@@ -5411,6 +5592,8 @@
       document.getElementById('aiInspectionTaskForm')?.closest('.card')?.classList.toggle('hidden', !canEditData());
       document.getElementById('documentForm')?.closest('.card')?.classList.toggle('hidden', !canEditData());
       document.querySelector('.section-tabs[data-section="documents"] button[data-subtab="form"]')?.classList.toggle('hidden', !canEditData());
+      document.querySelector('.section-tabs[data-section="assets"] button[data-subtab="form"]')?.classList.toggle('hidden', !canEditData());
+      document.getElementById('assetBatchDeleteBtn')?.classList.toggle('hidden', !canEditData());
       document.getElementById('configBackupPlanForm')?.closest('.card')?.classList.toggle('hidden', !canEditData());
       document.getElementById('topoSaveLayoutBtn')?.classList.toggle('hidden', !canEditData());
       document.getElementById('topoAddRelBtn')?.classList.toggle('hidden', !canEditData());
@@ -5433,7 +5616,7 @@
       users: ['list'],
       projects: ['list'],
       logs: ['list'],
-      assets: ['list', 'topology'],
+      assets: ['list', 'topology', 'cabinetLayout'],
       documents: ['form', 'list'],
       kb: ['list'],
       system: ['serviceStatus', 'workReportReminder', 'upgrade', 'databaseInit', 'auditLog'],
@@ -5473,6 +5656,9 @@
       });
       if (section === 'assets' && subtab === 'topology') {
         renderTopology();
+      }
+      if (section === 'assets' && subtab === 'cabinetLayout') {
+        loadCabinetLayout();
       }
     }
 
@@ -5674,6 +5860,180 @@
       }
     }
 
+    function formatLayoutMetric(value, kind) {
+      if (value === undefined || value === null || value === '') return '暂无数据';
+      const n = Number(value);
+      if (!Number.isFinite(n)) return '暂无数据';
+      if (kind === 'percent') return `${n.toFixed(1)}%`;
+      if (kind === 'traffic') {
+        if (n >= 1000000) return `${(n / 1000000).toFixed(2)} Mbps`;
+        if (n >= 1000) return `${(n / 1000).toFixed(1)} Kbps`;
+        return `${n.toFixed(0)} bps`;
+      }
+      if (kind === 'uptime') {
+        const sec = Math.max(0, Math.floor(n));
+        const days = Math.floor(sec / 86400);
+        const hours = Math.floor((sec % 86400) / 3600);
+        const mins = Math.floor((sec % 3600) / 60);
+        if (days > 0) return `${days}天 ${hours}小时`;
+        if (hours > 0) return `${hours}小时 ${mins}分`;
+        return `${mins}分`;
+      }
+      return String(value);
+    }
+
+    function layoutStatusText(status) {
+      if (status === 'online') return '在线';
+      if (status === 'offline') return '离线';
+      return '未监控';
+    }
+
+    function hideCabinetLayoutTooltip() {
+      const tip = document.getElementById('cabinetLayoutTooltip');
+      if (tip) {
+        tip.classList.add('hidden');
+        tip.innerHTML = '';
+      }
+    }
+
+    function showCabinetLayoutTooltip(device, event) {
+      const tip = document.getElementById('cabinetLayoutTooltip');
+      if (!tip) return;
+      tip.innerHTML = `<div style="font-weight:700;margin-bottom:4px;">${esc(device.name || '-')}</div>
+        <div>类型：${esc(device.type || '-')}</div>
+        <div>运行状态：${esc(layoutStatusText(device.monitorStatus))}</div>`;
+      tip.classList.remove('hidden');
+      const x = Math.min(event.clientX + 12, window.innerWidth - 280);
+      const y = Math.min(event.clientY + 12, window.innerHeight - 90);
+      tip.style.left = `${x}px`;
+      tip.style.top = `${y}px`;
+    }
+
+    function openCabinetLayoutDetail(device) {
+      hideCabinetLayoutTooltip();
+      const metrics = device.metrics || {};
+      document.getElementById('cabinetLayoutDetailTitle').textContent = device.name || '设备运行详情';
+      const rows = [
+        ['运行状态', layoutStatusText(device.monitorStatus)],
+        ['运行时长', formatLayoutMetric(metrics.uptimeSeconds, 'uptime')],
+        ['CPU 负载', formatLayoutMetric(metrics.cpuPercent, 'percent')],
+        ['内存负载', formatLayoutMetric(metrics.memoryPercent, 'percent')],
+        ['磁盘利用率', formatLayoutMetric(metrics.diskPercent, 'percent')],
+        ['网口流入', formatLayoutMetric(metrics.trafficInBps, 'traffic')],
+        ['网口流出', formatLayoutMetric(metrics.trafficOutBps, 'traffic')]
+      ];
+      document.getElementById('cabinetLayoutDetailBody').innerHTML = rows.map(([label, value]) =>
+        `<div style="display:flex;justify-content:space-between;gap:12px;padding:6px 0;border-bottom:1px solid #f3f4f6;">
+          <span style="color:#6b7280;">${esc(label)}</span><span style="color:#111827;font-weight:600;">${esc(value)}</span>
+        </div>`
+      ).join('');
+      openModal('cabinetLayoutDetailModal');
+    }
+
+    function bindCabinetDeviceEvents(el, device) {
+      let timer = null;
+      el.addEventListener('mouseenter', event => {
+        timer = setTimeout(() => showCabinetLayoutTooltip(device, event), 300);
+      });
+      el.addEventListener('mousemove', event => {
+        const tip = document.getElementById('cabinetLayoutTooltip');
+        if (tip && !tip.classList.contains('hidden')) showCabinetLayoutTooltip(device, event);
+      });
+      el.addEventListener('mouseleave', () => {
+        clearTimeout(timer);
+        hideCabinetLayoutTooltip();
+      });
+      el.addEventListener('click', () => openCabinetLayoutDetail(device));
+    }
+
+    function renderCabinetRack(cabinet) {
+      const unitH = 16;
+      const wrap = document.createElement('div');
+      wrap.className = 'cabinet-rack';
+      const title = document.createElement('div');
+      title.className = 'cabinet-rack-title';
+      title.textContent = cabinet.name;
+      const body = document.createElement('div');
+      body.className = 'cabinet-rack-body';
+      body.style.height = `${cabinet.unitCount * unitH}px`;
+      for (let u = cabinet.unitCount; u >= 1; u -= 1) {
+        const label = document.createElement('div');
+        label.className = 'cabinet-unit-label';
+        label.style.top = `${(cabinet.unitCount - u) * unitH}px`;
+        label.textContent = `U${u}`;
+        body.appendChild(label);
+      }
+      const occupancies = {};
+      (cabinet.devices || []).forEach(device => {
+        const start = Number(device.rackUnitStart) || 1;
+        const size = Number(device.rackUnitSize) || 1;
+        const topUnit = start + size - 1;
+        const el = document.createElement('div');
+        el.className = `cabinet-device${device.conflict ? ' conflict' : ''}`;
+        el.style.top = `${(cabinet.unitCount - topUnit) * unitH + 1}px`;
+        el.style.height = `${size * unitH - 2}px`;
+        const overlapKey = `${start}-${size}`;
+        occupancies[overlapKey] = (occupancies[overlapKey] || 0) + 1;
+        if (device.conflict) {
+          el.style.right = occupancies[overlapKey] > 1 ? '4px' : '52%';
+          el.style.left = occupancies[overlapKey] > 1 ? '52%' : '30px';
+        }
+        const led = document.createElement('span');
+        led.className = `cabinet-device-led ${device.monitorStatus || 'unknown'}`;
+        const name = document.createElement('span');
+        name.className = 'cabinet-device-name';
+        name.textContent = device.name || '-';
+        el.appendChild(led);
+        el.appendChild(name);
+        bindCabinetDeviceEvents(el, device);
+        body.appendChild(el);
+      });
+      wrap.appendChild(title);
+      wrap.appendChild(body);
+      return wrap;
+    }
+
+    function renderCabinetLayout(data) {
+      const board = document.getElementById('cabinetLayoutBoard');
+      const empty = document.getElementById('cabinetLayoutEmpty');
+      if (!board || !empty) return;
+      board.innerHTML = '';
+      const cabinets = data.cabinets || [];
+      const unassigned = data.unassigned || [];
+      if (!cabinets.length && !unassigned.length) {
+        empty.classList.remove('hidden');
+        board.classList.add('hidden');
+        return;
+      }
+      empty.classList.add('hidden');
+      board.classList.remove('hidden');
+      cabinets.forEach(cabinet => board.appendChild(renderCabinetRack(cabinet)));
+      if (unassigned.length) {
+        const col = document.createElement('div');
+        col.className = 'cabinet-unassigned';
+        col.innerHTML = `<div class="cabinet-rack-title" style="background:#e5e7eb;color:#374151;border-radius:8px 8px 0 0;">未分配机柜</div>`;
+        unassigned.forEach(device => {
+          const item = document.createElement('div');
+          item.className = 'cabinet-unassigned-item';
+          item.innerHTML = `<span class="cabinet-device-led ${device.monitorStatus || 'unknown'}"></span><div><div style="font-weight:600;">${esc(device.name || '-')}</div><div style="font-size:12px;color:#6b7280;">${esc(device.type || '-')}</div></div>`;
+          bindCabinetDeviceEvents(item, device);
+          col.appendChild(item);
+        });
+        board.appendChild(col);
+      }
+    }
+
+    async function loadCabinetLayout() {
+      const panel = document.querySelector('.subtab-panel[data-section="assets"][data-subtab="cabinetLayout"]');
+      if (!panel || panel.classList.contains('hidden')) return;
+      try {
+        const data = await api('/api/assets/cabinet-layout');
+        renderCabinetLayout(data);
+      } catch (error) {
+        showToast(error.message || '加载资产布局图失败', 'error');
+      }
+    }
+
     async function renderTopology() {
       const panel = document.querySelector('.subtab-panel[data-section="assets"][data-subtab="topology"]');
       if (!panel || panel.classList.contains('hidden')) return;
@@ -5848,6 +6208,7 @@
 
     let topoCmenuHideHandler = null;
     function showLineContextMenu(x, y, relId) {
+      if (!canEditData()) return;
       const menu = document.getElementById('topoLineContextMenu');
       state.topoContextRelId = relId;
       if (topoCmenuHideHandler) document.removeEventListener('click', topoCmenuHideHandler);
@@ -5873,6 +6234,7 @@
     }
 
     function onTopoLineClick(relId) {
+      if (!canEditData()) return;
       if (state.topoDeleteLineId === relId) {
         clearTopoDeleteTimer();
         deleteTopoRelation(relId);
@@ -6165,6 +6527,7 @@
     });
 
     document.getElementById('topoRefreshBtn').addEventListener('click', () => renderTopology());
+    document.getElementById('cabinetLayoutRefreshBtn').addEventListener('click', () => loadCabinetLayout());
     document.getElementById('topoAddRelBtn').addEventListener('click', async () => {
       state.topoEditRelId = null;
       document.querySelector('#assetRelationModal h3').textContent = '添加资产连接关系';
@@ -6302,6 +6665,14 @@
     }
 
     function renderAssets() {
+      function formatAssetRackLabel(item) {
+        const cabinet = String(item.cabinetName || '').trim();
+        const start = Number(item.rackUnitStart);
+        const size = Number(item.rackUnitSize) || 1;
+        if (!Number.isInteger(start) || start < 1) return cabinet || '-';
+        const u = size > 1 ? `${start}-${start + size - 1}U` : `${start}U`;
+        return cabinet ? `${cabinet} ${u}` : u;
+      }
       const pageSize = 10;
       const sourceAssets = filterByUserProject(state.assets).slice();
       if (state.assetProjectSort) {
@@ -6334,13 +6705,14 @@
           <td>${esc(item.version || '-')}</td>
           <td>${esc(item.maintainExpiryDate || '-')}</td>
           <td style="max-width:140px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;" title="${esc(item.installationLocation || '')}">${esc(item.installationLocation || '-')}</td>
+          <td style="max-width:140px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;" title="${esc(formatAssetRackLabel(item))}">${esc(formatAssetRackLabel(item))}</td>
           <td>${esc(item.status === '运行中' ? '使用中' : (item.status || '-'))}</td>
           <td>${esc(item.owner || '-')}</td>
           <td style="max-width:100px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;" title="${esc(item.notes || '')}">${esc(item.notes || '')}</td>
           <td><div class="toolbar" style="white-space:nowrap;">${canEditData() ? `<button class="secondary" data-action="edit-asset" data-id="${item.id}" type="button">修改</button><button class="secondary" data-action="detail-asset" data-id="${item.id}" type="button">详情</button><button class="secondary" data-action="delete-asset" data-id="${item.id}" type="button" style="background:#fee2e2;color:#dc2626;border-color:#fecaca;">删除</button>` : `<button class="secondary" data-action="detail-asset" data-id="${item.id}" type="button">详情</button>`}</div></td>
         </tr>
         `;
-      }).join('') || '<tr><td colspan="14">暂无数据</td></tr>';
+      }).join('') || '<tr><td colspan="15">暂无数据</td></tr>';
       document.getElementById('assetSelectAll').checked = pageItems.length > 0 && pageItems.every(item => (state.selectedAssetIds || []).includes(item.id));
       document.getElementById('assetPageInfo').textContent = `第 ${state.assetPage} / ${totalPages} 页`;
       document.getElementById('assetPrevBtn').disabled = state.assetPage <= 1;
@@ -6524,10 +6896,7 @@
         } else if (pendingDocumentAction === 'download') {
           const item = state.documents.find(d => d.id === id);
           if (item && item.attachmentName) {
-            const a = document.createElement('a');
-            a.href = `/api/documents/${id}/download?token=${encodeURIComponent(result.token)}`;
-            a.download = item.attachmentName;
-            a.click();
+            await downloadDocumentAttachment(id, result.token, item.attachmentName);
           }
         } else if (pendingDocumentAction === 'edit') {
           state.editDocumentAccessKey = password;
@@ -6584,9 +6953,33 @@
       tbody.appendChild(tr);
     }
 
+    async function downloadDocumentAttachment(id, token, filename) {
+      const response = await fetch(`/api/documents/${id}/download`, {
+        credentials: 'include',
+        headers: token ? { 'X-Document-Access-Token': token } : {}
+      });
+      if (!response.ok) {
+        let message = '下载失败';
+        try {
+          const data = await response.json();
+          message = data.message || message;
+        } catch (_) {}
+        throw new Error(message);
+      }
+      const blob = await response.blob();
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement('a');
+      a.href = url;
+      a.download = filename || 'download';
+      a.click();
+      URL.revokeObjectURL(url);
+    }
+
     async function showDocumentDetail(id, token, loginPassword) {
       try {
-        const detail = await api(`/api/documents/${id}?token=${encodeURIComponent(token || '')}`);
+        const detail = await api(`/api/documents/${id}`, {
+          headers: token ? { 'X-Document-Access-Token': token } : {}
+        });
         const rows = [];
         if (detail.brand) rows.push(['品牌', detail.brand]);
         if (detail.model) rows.push(['规格型号', detail.model]);
@@ -6665,7 +7058,9 @@
 
     async function editDocument(id, token, accessKey) {
       try {
-        const item = await api(`/api/documents/${id}?token=${encodeURIComponent(token || '')}`);
+        const item = await api(`/api/documents/${id}`, {
+          headers: token ? { 'X-Document-Access-Token': token } : {}
+        });
         if (accessKey) state.editDocumentAccessKey = accessKey;
         document.getElementById('edDocumentId').value = item.id;
         fillSelect('edDocumentProjectId', state.projects.map(p => ({ id: p.id, name: formatProjectDisplay(p) })));
@@ -7368,27 +7763,33 @@
     function detailAsset(id) {
       const asset = state.assets.find(item => item.id === id);
       if (!asset) return;
+      const isCustomer = state.user?.role === 'customer';
       const fields = [
         ['资产名称', asset.name],
         ['资产类型', asset.type],
         ['品牌', asset.brand],
         ['规格型号', asset.model],
-        ['序列号', asset.serialNumber],
+        ...(isCustomer ? [] : [['序列号', asset.serialNumber]]),
         ['版本', asset.version],
         ['责任人/部门', asset.owner],
         ['状态', asset.status],
         ['维保到期日', asset.maintainExpiryDate],
-        ['安装位置', asset.installationLocation],
-        ['备注', asset.notes],
+        ...(isCustomer ? [] : [['安装位置', asset.installationLocation]]),
+        ['机柜名称', asset.cabinetName],
+        ['起始U位', asset.rackUnitStart],
+        ['占用U数', asset.rackUnitSize],
+        ...(isCustomer ? [] : [['备注', asset.notes]]),
         ['关联项目', formatProjectDisplayById(asset.projectId)]
       ];
       const monFields = [
         ['启用监控', asset.monitorEnabled ? '是' : '否'],
-        ['监控方式', asset.monitorType || 'ping'],
-        ['监控地址/IP', asset.monitorHost],
-        ['端口号', asset.monitorPort],
-        ['SNMP 团体字', asset.hasSnmpCommunity ? '已配置' : '未配置'],
-        ['SNMP 端口', asset.snmpPort]
+        ...(isCustomer ? [] : [
+          ['监控方式', asset.monitorType || 'ping'],
+          ['监控地址/IP', asset.monitorHost],
+          ['端口号', asset.monitorPort],
+          ['SNMP 团体字', asset.hasSnmpCommunity ? '已配置' : '未配置'],
+          ['SNMP 端口', asset.snmpPort]
+        ])
       ];
       let html = '<div style="display:grid;grid-template-columns:100px 1fr;gap:6px 12px;font-size:13px;">';
       fields.forEach(([label, val]) => {
@@ -7417,6 +7818,9 @@
       document.getElementById('edAssetStatus').value = asset.status || '';
       document.getElementById('edAssetMaintainExpiryDate').value = asset.maintainExpiryDate || '';
       document.getElementById('edAssetInstallationLocation').value = asset.installationLocation || '';
+      document.getElementById('edAssetCabinetName').value = asset.cabinetName || '';
+      document.getElementById('edAssetRackUnitStart').value = asset.rackUnitStart || '';
+      document.getElementById('edAssetRackUnitSize').value = asset.rackUnitSize || '';
       document.getElementById('edAssetNotes').value = asset.notes || '';
       document.getElementById('edAssetMonitorEnabled').checked = asset.monitorEnabled === true;
       document.getElementById('edAssetMonitorType').value = asset.monitorType || 'ping';
@@ -7424,7 +7828,7 @@
       document.getElementById('edAssetMonitorPort').value = asset.monitorPort || '';
       const snmpInput = document.getElementById('edAssetSnmpCommunity');
       snmpInput.value = '';
-      snmpInput.placeholder = asset.hasSnmpCommunity ? '已配置，留空保持原值' : '默认: public';
+      snmpInput.placeholder = asset.hasSnmpCommunity ? '已配置，留空保持原值' : '选填';
       document.getElementById('edAssetSnmpPort').value = asset.snmpPort || '161';
       toggleEdMonitorPort();
       fillSelect('edAssetProjectId', state.projects);
@@ -7719,7 +8123,17 @@
     }
 
     async function approveUser(id) {
-      const result = await api(`/api/users/${id}/approve`, { method: 'PUT', body: JSON.stringify({ role: 'viewer' }) });
+      const pending = state.users.find(item => item.id === id);
+      let projectId = pending?.projectId || '';
+      if (!projectId) {
+        const options = state.projects.map(item => `${item.name} | ${item.id}`).join('\n');
+        projectId = String(prompt(`审批必须绑定项目。请输入项目 ID：\n${options}`) || '').trim();
+      }
+      if (!projectId) {
+        setMessages(['userMessage', 'userListMessage'], '审批通过前必须指定有效项目');
+        return;
+      }
+      const result = await api(`/api/users/${id}/approve`, { method: 'PUT', body: JSON.stringify({ role: 'viewer', projectId }) });
       setMessages(['userMessage', 'userListMessage'], result.message || '已审批通过，角色为只读，可通过编辑人员调整角色');
       await loadBaseData();
       renderUsers();
@@ -8105,7 +8519,7 @@
       if (!listEl || state.user.role !== 'admin') return;
       try {
         const result = await api('/api/system/upgrade/logs');
-        const rows = Array.isArray(result.data) ? result.data : [];
+        const rows = (Array.isArray(result.data) ? result.data : []).slice(0, 5);
         listEl.innerHTML = rows.map(item => `
           <div class="system-backup-item system-upgrade-log-item">
             <div>
@@ -9554,6 +9968,9 @@
         status: document.getElementById('edAssetStatus').value.trim(),
         maintainExpiryDate: document.getElementById('edAssetMaintainExpiryDate').value,
         installationLocation: document.getElementById('edAssetInstallationLocation').value.trim(),
+        cabinetName: document.getElementById('edAssetCabinetName').value.trim(),
+        rackUnitStart: document.getElementById('edAssetRackUnitStart').value.trim(),
+        rackUnitSize: document.getElementById('edAssetRackUnitSize').value.trim(),
         notes: document.getElementById('edAssetNotes').value.trim(),
         monitorEnabled: document.getElementById('edAssetMonitorEnabled').checked,
         monitorType: document.getElementById('edAssetMonitorType').value,
@@ -9562,6 +9979,8 @@
         snmpCommunity: document.getElementById('edAssetSnmpCommunity').value.trim(),
         snmpPort: document.getElementById('edAssetSnmpPort').value.trim()
       };
+      if (!data.name) { document.getElementById('assetEditMessage').textContent = '资产名称不能为空'; document.getElementById('assetEditMessage').className = 'message error'; return; }
+      if (data.monitorEnabled && !data.monitorHost) { document.getElementById('assetEditMessage').textContent = '启用监控时必须填写监控地址'; document.getElementById('assetEditMessage').className = 'message error'; return; }
       const msg = document.getElementById('assetEditMessage');
       if (!data.projectId) { msg.textContent = '请选择关联项目'; msg.className = 'message error'; return; }
       if (!data.name) { msg.textContent = '请输入资产名称'; msg.className = 'message error'; return; }
@@ -10395,8 +10814,16 @@
       button.disabled = true;
       button.textContent = '升级中...';
       try {
+        const passwordInput = document.getElementById('systemUpgradePassword');
+        const password = passwordInput ? passwordInput.value : '';
+        if (!password) {
+          setMessage('systemUpgradeMessage', '请输入管理员密码', 'error');
+          passwordInput?.focus();
+          return;
+        }
         const formData = new FormData();
         formData.append('package', file);
+        formData.append('password', password);
         let previousVersion = '';
         try {
           const before = await api('/api/system/upgrade/status');
@@ -10405,6 +10832,7 @@
         const data = await api('/api/system/upgrade', { method: 'POST', body: formData });
         setMessage('systemUpgradeMessage', data.message + '，页面即将自动刷新...', 'success');
         fileInput.value = '';
+        if (passwordInput) passwordInput.value = '';
         button.disabled = true;
         button.textContent = '系统重启中...';
         const pollUpgrade = async () => {
@@ -10440,13 +10868,22 @@
         setMessage('systemImportMessage', '请先选择 JSON 数据文件', 'error');
         return;
       }
+      const passwordInput = document.getElementById('systemImportPassword');
+      const password = passwordInput ? passwordInput.value : '';
+      if (!password) {
+        setMessage('systemImportMessage', '请输入管理员密码', 'error');
+        passwordInput?.focus();
+        return;
+      }
       if (!await showDangerConfirm('高风险操作：导入会覆盖当前业务数据。系统会先自动创建导入前备份，并保留当前管理员登录状态，请输入"确认操作"以继续。')) {
         return;
       }
       try {
         const content = await file.text();
         const payload = JSON.parse(content);
+        payload.password = password;
         const result = await api('/api/system/import', { method: 'POST', body: JSON.stringify(payload) });
+        if (passwordInput) passwordInput.value = '';
         setMessage('systemImportMessage', `${result.message}，导入前备份：${result.backupFilename}`);
         await loadBaseData();
         openTabWithSubtab('system', 'upgrade');
@@ -10476,9 +10913,17 @@
       if (!restoreBtn) return;
       const filename = restoreBtn.dataset.filename;
       if (!filename) return;
+      const passwordInput = document.getElementById('systemRestorePassword');
+      const password = passwordInput ? passwordInput.value : '';
+      if (!password) {
+        setMessage('systemBackupMessage', '请输入管理员密码后再恢复备份', 'error');
+        passwordInput?.focus();
+        return;
+      }
       if (!await showConfirm(`确认从磁盘备份恢复 ${filename} 吗？当前数据会先自动备份。`)) return;
       try {
-        const result = await api(`/api/system/backups/${encodeURIComponent(filename)}/restore`, { method: 'POST', body: '{}' });
+        const result = await api(`/api/system/backups/${encodeURIComponent(filename)}/restore`, { method: 'POST', body: JSON.stringify({ password }) });
+        if (passwordInput) passwordInput.value = '';
         setMessage('systemBackupMessage', result.message || '磁盘备份恢复成功');
         await loadBaseData();
         await refreshSystemManagement();
@@ -10516,15 +10961,11 @@
     });
     document.getElementById('saveWebIdleLogoutBtn').addEventListener('click', async event => {
       const timeoutInput = document.getElementById('webIdleLogoutMinutes');
-      const httpsEnabledInput = document.getElementById('httpsLoginEnabled');
-      const httpsPortInput = document.getElementById('httpsPort');
       const allowRegistrationInput = document.getElementById('allowRegistration');
       const maxAttemptsInput = document.getElementById('loginRateLimitMaxAttempts');
       const rateWindowInput = document.getElementById('loginRateLimitWindowMinutes');
       const rateLockInput = document.getElementById('loginRateLimitLockMinutes');
-      const httpLoginDisabledInput = document.getElementById('httpLoginDisabled');
       const timeoutValue = Number(timeoutInput.value);
-      const httpsPortValue = Number(httpsPortInput.value);
       const maxAttemptsValue = Number(maxAttemptsInput.value);
       const rateWindowValue = Number(rateWindowInput.value);
       const rateLockValue = Number(rateLockInput.value);
@@ -10533,11 +10974,6 @@
       if (!Number.isFinite(timeoutValue) || timeoutValue < 1 || timeoutValue > 1440) {
         setMessage('systemSettingsMessage', '请输入 1 到 1440 之间的分钟数', 'error');
         timeoutInput.focus();
-        return;
-      }
-      if (!Number.isFinite(httpsPortValue) || httpsPortValue < 1 || httpsPortValue > 65535) {
-        setMessage('systemSettingsMessage', '请输入 1 到 65535 之间的 HTTPS 端口', 'error');
-        httpsPortInput.focus();
         return;
       }
       if (!Number.isFinite(maxAttemptsValue) || maxAttemptsValue < 1 || maxAttemptsValue > 100) {
@@ -10564,9 +11000,6 @@
           method: 'POST',
           body: JSON.stringify({
             webIdleLogoutMinutes: timeoutValue,
-            httpsLoginEnabled: httpsEnabledInput.value === 'true',
-            httpLoginDisabled: httpLoginDisabledInput ? httpLoginDisabledInput.value === 'true' : false,
-            httpsPort: httpsPortValue,
             allowRegistration: allowRegistrationInput.value === 'true',
             loginRateLimitMaxAttempts: maxAttemptsValue,
             loginRateLimitWindowMinutes: rateWindowValue,
@@ -10581,6 +11014,40 @@
         await refreshSystemManagement();
       } catch (error) {
         setMessage('systemSettingsMessage', error.message, 'error');
+      } finally {
+        button.disabled = false;
+        button.textContent = originalText;
+      }
+    });
+    document.getElementById('saveHttpsSettingsBtn').addEventListener('click', async event => {
+      const httpsEnabledInput = document.getElementById('httpsLoginEnabled');
+      const httpsPortInput = document.getElementById('httpsPort');
+      const httpLoginDisabledInput = document.getElementById('httpLoginDisabled');
+      const httpsPortValue = Number(httpsPortInput.value);
+      if (!Number.isFinite(httpsPortValue) || httpsPortValue < 1 || httpsPortValue > 65535) {
+        setMessage('systemHttpsMessage', '请输入 1 到 65535 之间的 HTTPS 端口', 'error');
+        httpsPortInput.focus();
+        return;
+      }
+      const button = event.currentTarget;
+      const originalText = button.textContent;
+      button.disabled = true;
+      button.textContent = '保存中...';
+      try {
+        const result = await api('/api/system/settings', {
+          method: 'POST',
+          body: JSON.stringify({
+            httpsLoginEnabled: httpsEnabledInput.value === 'true',
+            httpLoginDisabled: httpLoginDisabledInput ? httpLoginDisabledInput.value === 'true' : false,
+            httpsPort: httpsPortValue
+          })
+        });
+        state.systemConfig = result.systemConfig || state.systemConfig;
+        renderSystemSettings();
+        setMessage('systemHttpsMessage', result.message);
+        await refreshSystemManagement();
+      } catch (error) {
+        setMessage('systemHttpsMessage', error.message, 'error');
       } finally {
         button.disabled = false;
         button.textContent = originalText;
@@ -10875,8 +11342,12 @@
       data.monitorType = document.getElementById('assetMonitorType').value;
       data.monitorHost = (document.querySelector('[name="monitorHost"]') || {}).value || '';
       data.monitorPort = (document.querySelector('[name="monitorPort"]') || {}).value || '';
-      data.snmpCommunity = (document.querySelector('[name="snmpCommunity"]') || {}).value || 'public';
+      data.snmpCommunity = (document.querySelector('[name="snmpCommunity"]') || {}).value || '';
       data.snmpPort = (document.querySelector('[name="snmpPort"]') || {}).value || '161';
+      if (data.monitorEnabled && !String(data.monitorHost || '').trim()) {
+        setMessage('assetMessage', '启用监控时必须填写监控地址', 'error');
+        return;
+      }
       const method = data.id ? 'PUT' : 'POST';
       const path = data.id ? `/api/assets/${data.id}` : '/api/assets';
       try {
@@ -10925,20 +11396,23 @@
         '版本': 'V200R021C00',
         '维保到期日': '2027-12-31',
         '安装位置': 'A区机房-03号机柜-4U',
+        '机柜名称': '03号机柜',
+        '起始U': '4',
+        '占用U': '2',
         '状态': '使用中',
         '责任人/部门': '网络部',
         '备注': '备注信息',
         '监控方式': '（选填）ping / tcp / snmp',
         '监控地址/IP': '（选填）192.168.1.1',
         '端口号': '（选填）选tcp时填写，如80',
-        'SNMP团体字': '（选填）选snmp时填写，默认public',
+        'SNMP团体字': '（选填）选snmp时填写',
         'SNMP端口': '（选填）选snmp时填写，默认161'
       }];
       const ws = XLSX.utils.json_to_sheet(rows);
       ws['!cols'] = [
         { wch: 30 }, { wch: 10 }, { wch: 22 }, { wch: 14 }, { wch: 22 },
-        { wch: 20 }, { wch: 14 }, { wch: 14 }, { wch: 26 }, { wch: 14 },
-        { wch: 14 }, { wch: 20 },
+        { wch: 20 }, { wch: 14 }, { wch: 14 }, { wch: 26 }, { wch: 12 },
+        { wch: 10 }, { wch: 10 }, { wch: 14 }, { wch: 14 }, { wch: 20 },
         { wch: 18 }, { wch: 18 }, { wch: 14 }, { wch: 18 }, { wch: 14 }
       ];
       const wb = XLSX.utils.book_new();
@@ -10960,15 +11434,26 @@
         '版本': item.version || '',
         '维保到期日': item.maintainExpiryDate || '',
         '安装位置': item.installationLocation || '',
+        '机柜名称': item.cabinetName || '',
+        '起始U': item.rackUnitStart || '',
+        '占用U': item.rackUnitSize || '',
         '状态': item.status || '',
         '责任人/部门': item.owner || '',
-        '备注': item.notes || ''
+        '备注': item.notes || '',
+        ...(canEditData() ? {
+          '启用监控': item.monitorEnabled ? '是' : '否',
+          '监控方式': item.monitorType || '',
+          '监控地址/IP': item.monitorHost || '',
+          '端口号': item.monitorPort || '',
+          'SNMP团体字': item.hasSnmpCommunity ? '已配置' : '',
+          'SNMP端口': item.snmpPort || ''
+        } : {})
       }));
       const ws = XLSX.utils.json_to_sheet(rows);
       ws['!cols'] = [
         { wch: 18 }, { wch: 10 }, { wch: 20 }, { wch: 14 }, { wch: 20 },
-        { wch: 20 }, { wch: 10 }, { wch: 14 }, { wch: 26 }, { wch: 14 },
-        { wch: 14 }, { wch: 20 }
+        { wch: 20 }, { wch: 10 }, { wch: 14 }, { wch: 26 }, { wch: 12 },
+        { wch: 10 }, { wch: 10 }, { wch: 14 }, { wch: 14 }, { wch: 20 }
       ];
       const wb = XLSX.utils.book_new();
       XLSX.utils.book_append_sheet(wb, ws, '资产列表');

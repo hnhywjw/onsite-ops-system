@@ -105,16 +105,35 @@ docker compose --env-file .env.production -f docker-compose.prod.yml up -d --bui
 
 ## 版本
 
-当前版本：`1.0.12`
+当前版本：`1.0.13`
 
 ### 软件包下载
 
-最新版本：**[v1.0.12](https://github.com/hnhywjw/onsite-ops-system/releases/tag/v1.0.12)**
+最新版本：**[v1.0.13](https://github.com/hnhywjw/onsite-ops-system/releases/tag/v1.0.13)**
 
-- 完整安装包 `onsite-ops-system-v1.0.12-production.tar.gz`
-- 离线升级包 `onsite-ops-upgrade-v1.0.12.tar.gz`
+- 完整安装包 `onsite-ops-system-v1.0.13-production.tar.gz`
+- 离线升级包 `onsite-ops-upgrade-v1.0.13.tar.gz`
 - SHA256 校验文件
 - 部署说明见仓库 `PRODUCTION_DEPLOY.md`
+
+### v1.0.13 更新说明
+
+资产管理：
+- 新增资产布局图，按机柜和 U 位展示设备，悬停摘要、点击查看 SNMP 详情
+- 「资产拓扑」更名为「资产拓扑图」
+- 资产导入写入监控与机柜字段，非法 U 位整行跳过
+- 删除资产时级联清理拓扑关系和布局坐标
+- 资产列表增加机柜/U位列
+
+安全加固：
+- 创建资产必须填写名称；启用监控必须填写合法监控地址
+- SNMP 团体字不再默认 public
+- 存活探测只使用监控地址
+- 资产导入单次最多 500 条；拓扑布局坐标做范围限制
+- 客户隐藏新增资产、批量删除和拓扑编辑，详情不再展示监控地址等敏感字段
+
+系统治理：
+- 软件升级日志在系统治理页面展示
 
 ### v1.0.12 更新说明
 

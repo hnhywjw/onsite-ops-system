@@ -206,11 +206,11 @@ async function exportSystemSnapshot(cookie) {
   return exported.data;
 }
 
-async function importSystemSnapshot(cookie, snapshot) {
+async function importSystemSnapshot(cookie, snapshot, password = 'Admin123!') {
   return request('/api/system/import', {
     method: 'POST',
     headers: { cookie, 'Content-Type': 'application/json' },
-    body: JSON.stringify(snapshot)
+    body: JSON.stringify({ ...snapshot, password })
   });
 }
 
@@ -457,7 +457,13 @@ async function main() {
     { name: 'public/version.txt', data: 'upgrade-content' }
   ]);
   invalidUpgradeForm.append('package', new Blob([invalidArchive], { type: 'application/gzip' }), 'invalid-upgrade.tar.gz');
-  const invalidUpgrade = await fetch(base + '/api/system/upgrade', { method: 'POST', headers: withCsrf({ cookie }, 'POST'), body: invalidUpgradeForm });
+  const missingUpgradePassword = await fetch(base + '/api/system/upgrade', { method: 'POST', headers: withCsrf({ cookie }, 'POST'), body: invalidUpgradeForm });
+  const missingUpgradePasswordData = await missingUpgradePassword.json();
+  assert(missingUpgradePassword.status === 401 && /管理员密码/.test(String(missingUpgradePasswordData.message || '')), '升级缺少管理员密码时应拒绝');
+  const signedInvalidUpgradeForm = new FormData();
+  signedInvalidUpgradeForm.append('package', new Blob([invalidArchive], { type: 'application/gzip' }), 'invalid-upgrade.tar.gz');
+  signedInvalidUpgradeForm.append('password', 'Admin123!');
+  const invalidUpgrade = await fetch(base + '/api/system/upgrade', { method: 'POST', headers: withCsrf({ cookie }, 'POST'), body: signedInvalidUpgradeForm });
   const invalidUpgradeData = await invalidUpgrade.json();
   assert(invalidUpgrade.status === 400 && /签名|SHA256/.test(String(invalidUpgradeData.message || '')), `升级包完整性校验未生效: ${invalidUpgrade.status} ${String(invalidUpgradeData.message || '')}`);
   const upgradeLogsAfterInvalid = await request('/api/system/upgrade/logs', { headers: { cookie } });
@@ -470,10 +476,16 @@ async function main() {
   const customerId = users.data.data.find(item => item.role === 'customer' && item.projectId === projectId)?.id || '';
   assert(engineerAccount?.username, '未找到可用的工程师测试账号');
 
-  const importResult = await request('/api/system/import', {
+  const importDenied = await request('/api/system/import', {
     method: 'POST',
     headers: { cookie, 'Content-Type': 'application/json' },
     body: JSON.stringify(buildImportSnapshot(snapshot))
+  });
+  assert(importDenied.status === 401, '导入缺少管理员密码时应拒绝');
+  const importResult = await request('/api/system/import', {
+    method: 'POST',
+    headers: { cookie, 'Content-Type': 'application/json' },
+    body: JSON.stringify({ ...buildImportSnapshot(snapshot), password: 'Admin123!' })
   });
   assert(importResult.status === 200, `导入接口失败: ${importResult.status} ${JSON.stringify(importResult.data)}`);
   assert(String(importResult.data.message || '').includes('当前登录状态已保留'), '导入成功消息未包含会话保留提示');
@@ -1024,6 +1036,44 @@ async function main() {
   assert(engineerOverviewDenied.status === 403, '工程师不应访问管理汇总看板');
   const customerLogsDenied = await request('/api/logs?all=1', { headers: { cookie: wrCustomerCookie } });
   assert(customerLogsDenied.status === 200 && (customerLogsDenied.data.data || []).length === 0, '客户不应读取运维日志');
+  const customerKb = await request('/api/kb?all=1', { headers: { cookie: wrCustomerCookie } });
+  assert(customerKb.status === 200, '客户读取知识库失败');
+  assert((customerKb.data.data || []).every(item => item.problem === undefined && item.solution === undefined && item.content === undefined), '客户知识库不应返回正文');
+  const kbOracleKeyword = `kboracle_${Date.now()}`;
+  const kbOracle = await request('/api/kb', {
+    method: 'POST',
+    headers: { cookie, 'Content-Type': 'application/json' },
+    body: JSON.stringify({
+      projectId,
+      title: `客户可见知识标题_${Date.now()}`,
+      keywords: 'visible-tag',
+      problem: kbOracleKeyword,
+      solution: '内部处理步骤'
+    })
+  });
+  assert(kbOracle.status === 201, '创建知识库侧信道测试条目失败');
+  const customerKbOracle = await request(`/api/kb?keyword=${encodeURIComponent(kbOracleKeyword)}`, { headers: { cookie: wrCustomerCookie } });
+  assert(customerKbOracle.status === 200, '客户知识库关键字搜索失败');
+  assert(!(customerKbOracle.data.data || []).some(item => item.id === kbOracle.data.id), '客户不应通过正文关键字命中知识库');
+  const customerKbTitle = await request(`/api/kb?keyword=${encodeURIComponent(kbOracle.data.title)}`, { headers: { cookie: wrCustomerCookie } });
+  assert((customerKbTitle.data.data || []).some(item => item.id === kbOracle.data.id), '客户应能按标题搜索知识库');
+  const customerChanges = await request('/api/change-records?all=1', { headers: { cookie: wrCustomerCookie } });
+  assert(customerChanges.status === 200, '客户读取变更记录失败');
+  assert((customerChanges.data.data || []).every(item => item.content === '' && item.title === '' && item.assetId === '' && item.rejectionReason === ''), '客户变更记录应隐藏标题、正文、资产和驳回原因');
+  const customerIncidents = await request('/api/incidents?all=1', { headers: { cookie: wrCustomerCookie } });
+  assert(customerIncidents.status === 200, '客户读取故障记录失败');
+  assert((customerIncidents.data.data || []).every(item => item.description === '' && item.resolution === ''), '客户故障记录应隐藏处理细节');
+  const customerBackupPlans = await request('/api/ai-inspection/config-backup/plans', { headers: { cookie: wrCustomerCookie } });
+  assert(customerBackupPlans.status === 200 && (customerBackupPlans.data.data || []).length === 0, '客户不应看到配置备份计划');
+  const customerBackupRecords = await request('/api/ai-inspection/config-backup/records', { headers: { cookie: wrCustomerCookie } });
+  assert(customerBackupRecords.status === 200 && (customerBackupRecords.data.data || []).length === 0, '客户不应看到配置备份记录');
+  const customerSpareParts = await request('/api/spare-parts?all=1', { headers: { cookie: wrCustomerCookie } });
+  assert(customerSpareParts.status === 200 && (customerSpareParts.data.data || []).length === 0, '客户不应看到备件库存');
+  const customerSpareMoves = await request('/api/spare-part-movements?all=1', { headers: { cookie: wrCustomerCookie } });
+  assert(customerSpareMoves.status === 200 && (customerSpareMoves.data.data || []).length === 0, '客户不应看到备件流水');
+  const customerOnline = await request('/api/sessions/online', { headers: { cookie: wrCustomerCookie } });
+  assert(customerOnline.status === 200, '客户读取在线会话失败');
+  assert((customerOnline.data.users || []).every(item => !item.username || item.id === wrCustomerLogin.data.user.id), '客户在线会话不应暴露他人账号');
   const customerSummaryBoundDenied = await request('/api/reports/summary?period=week', { headers: { cookie: wrCustomerCookie } });
   assert(customerSummaryBoundDenied.status === 403, '已绑定项目的客户不应查看日志汇总');
   const customerDrilldownDenied = await request('/api/reports/drilldown?period=month', { headers: { cookie: wrCustomerCookie } });
@@ -1058,10 +1108,16 @@ async function main() {
   assert(firstRegister.data.message === duplicateRegister.data.message, '重复注册文案应一致');
   const pendingUser = ((await request('/api/users?all=1', { headers: { cookie } })).data.data || []).find(item => item.username === pendingUsername);
   assert(pendingUser && pendingUser.status === 'pending', '自注册账号应进入待审批');
-  const approvePending = await request(`/api/users/${pendingUser.id}/approve`, {
+  const approvePendingDenied = await request(`/api/users/${pendingUser.id}/approve`, {
     method: 'PUT',
     headers: { cookie, 'Content-Type': 'application/json' },
     body: '{}'
+  });
+  assert(approvePendingDenied.status === 400, '审批未绑定项目时应拒绝');
+  const approvePending = await request(`/api/users/${pendingUser.id}/approve`, {
+    method: 'PUT',
+    headers: { cookie, 'Content-Type': 'application/json' },
+    body: JSON.stringify({ projectId })
   });
   assert(approvePending.status === 200 && approvePending.data.user?.role === 'viewer', '审批默认角色应为只读');
   const deletePending = await request(`/api/users/${pendingUser.id}`, { method: 'DELETE', headers: { cookie } });
@@ -1269,23 +1325,18 @@ async function main() {
   const execution = await request('/api/inspection-executions', {
     method: 'POST',
     headers: { cookie, 'Content-Type': 'application/json' },
-    body: JSON.stringify({ planId: plan.data.id, executedAt: '2026-06-19T13:00', executor: 'admin', result: '正常', checklist: '回归检查', nextDate: '2026-07-01' })
+    body: JSON.stringify({ planId: plan.data.id, executedAt: '2026-06-19T13:00', executor: 'admin', result: '正常', checklist: '回归检查', issue: '发现端口异常', suggestion: '更换交换机', nextDate: '2026-07-01' })
   });
   assert(execution.status === 201, '创建巡检执行记录失败');
-  const executionDelete = await request(`/api/inspection-executions/${execution.data.id}`, { method: 'DELETE', headers: { cookie } });
-  assert(executionDelete.status === 200, '删除巡检执行记录失败');
-  const planDelete = await request(`/api/inspection-plans/${plan.data.id}`, { method: 'DELETE', headers: { cookie } });
-  assert(planDelete.status === 200, '删除巡检计划失败');
 
+  let change = null;
   if (customerId) {
-    const change = await request('/api/change-records', {
+    change = await request('/api/change-records', {
       method: 'POST',
       headers: { cookie, 'Content-Type': 'application/json' },
       body: JSON.stringify({ projectId, assetId, approverId, customerId, title: '回归变更', content: '回归测试变更', riskLevel: '中' })
     });
     assert(change.status === 201, '创建变更记录失败');
-    const changeDelete = await request(`/api/change-records/${change.data.id}`, { method: 'DELETE', headers: { cookie } });
-    assert(changeDelete.status === 200, '删除变更记录失败');
   }
 
   const incident = await request('/api/incidents', {
@@ -1326,17 +1377,44 @@ async function main() {
   assert((customerTargets.data.data || []).every(item => item.address === undefined), '客户巡检对象不应返回设备地址');
   const customerAssets = await request('/api/assets?all=1', { headers: { cookie: aiCustomerLogin.cookie } });
   assert(customerAssets.status === 200 && (customerAssets.data.data || []).every(item => item.monitorHost === undefined && item.installationLocation === undefined), '客户资产列表不应返回监测地址');
+  const customerLayout = await request('/api/assets/cabinet-layout', { headers: { cookie: aiCustomerLogin.cookie } });
+  assert(customerLayout.status === 200, `客户查询布局图失败: ${customerLayout.status} ${JSON.stringify(customerLayout.data)}`);
+  const customerDump = JSON.stringify(customerLayout.data);
+  assert(!customerDump.includes('monitorHost') && !customerDump.includes('snmpCommunity'), '客户布局数据不应包含监测地址或 SNMP 团体字');
   const customerAiResults = await request('/api/ai-inspection/results?all=1', { headers: { cookie: aiCustomerLogin.cookie } });
   assert(customerAiResults.status === 200 && (customerAiResults.data.data || []).every(item => item.rawOutput === undefined && item.stdout === undefined && item.stderr === undefined && (item.probeError === undefined || item.probeError === true || item.probeError === false)), '客户巡检结果应脱敏探测细节');
   assert((customerAiResults.data.data || []).every(item => !String(item.suggestion || '').includes('10.0.0.10') && !String(item.summary || '').includes('10.0.0.10')), '客户巡检结果不应包含设备地址');
+  const customerAiSearch = await request('/api/ai-inspection/results?q=10.0.0.10', { headers: { cookie: aiCustomerLogin.cookie } });
+  assert(customerAiSearch.status === 200 && (customerAiSearch.data.data || []).length === 0, '客户不应通过设备地址搜索巡检结果');
   const firstCustomerResult = (customerAiResults.data.data || [])[0];
   if (firstCustomerResult) {
     const customerReport = await request(`/api/reports/ai-inspection/results/${firstCustomerResult.id}/html`, { method: 'POST', headers: { cookie: aiCustomerLogin.cookie } });
     assert(customerReport.status === 200, '客户下载巡检 HTML 报告失败');
     assert(!String(customerReport.data || '').includes('10.0.0.10'), '客户巡检 HTML 报告不应包含设备地址');
   }
+  const customerPlans = await request('/api/inspection-plans?all=1', { headers: { cookie: aiCustomerLogin.cookie } });
+  assert(customerPlans.status === 200, `客户读取巡检计划失败: ${customerPlans.status} ${JSON.stringify(customerPlans.data)}`);
+  assert((customerPlans.data.data || []).every(item => item.assetId === undefined && item.owner === undefined && item.description === undefined), '客户巡检计划不应返回资产或负责人细节');
+  const customerExecutions = await request('/api/inspection-executions?all=1', { headers: { cookie: aiCustomerLogin.cookie } });
+  assert(customerExecutions.status === 200, '客户读取巡检执行记录失败');
+  assert((customerExecutions.data.data || []).every(item => item.issue === undefined && item.suggestion === undefined && item.checklist === undefined && item.executor === undefined && item.assetId === undefined), '客户巡检执行记录不应返回处理细节');
+  const customerAiTasks = await request('/api/ai-inspection/tasks?all=1', { headers: { cookie: aiCustomerLogin.cookie } });
+  assert(customerAiTasks.status === 200 && (customerAiTasks.data.data || []).length === 0, '客户不应看到智能巡检任务');
+  if (change?.data?.id) {
+    const customerChangeDetail = await request('/api/change-records?all=1', { headers: { cookie: aiCustomerLogin.cookie } });
+    const customerChangeItem = (customerChangeDetail.data.data || []).find(item => item.id === change.data.id);
+    assert(customerChangeItem && customerChangeItem.title === '' && customerChangeItem.content === '' && customerChangeItem.assetId === '' && !customerChangeItem.rejectionReason, '客户变更记录应隐藏标题、正文、资产和驳回原因');
+  }
   const deleteAiCustomer = await request(`/api/users/${createAiCustomer.data.id}`, { method: 'DELETE', headers: { cookie } });
   assert(deleteAiCustomer.status === 200, '清理巡检测试客户失败');
+  const executionDelete = await request(`/api/inspection-executions/${execution.data.id}`, { method: 'DELETE', headers: { cookie } });
+  assert(executionDelete.status === 200, '删除巡检执行记录失败');
+  const planDelete = await request(`/api/inspection-plans/${plan.data.id}`, { method: 'DELETE', headers: { cookie } });
+  assert(planDelete.status === 200, '删除巡检计划失败');
+  if (change?.data?.id) {
+    const changeDelete = await request(`/api/change-records/${change.data.id}`, { method: 'DELETE', headers: { cookie } });
+    assert(changeDelete.status === 200, '删除变更记录失败');
+  }
   const aiTemplates = await request('/api/ai-inspection/templates', { headers: { cookie } });
   assert(aiTemplates.status === 200 && Array.isArray(aiTemplates.data.data) && aiTemplates.data.data.length >= 1, '查询 AI 巡检模板失败');
    const serverTemplate = aiTemplates.data.data.find(item => item.category === 'server');
@@ -1527,10 +1605,16 @@ async function main() {
   assert(auditAfterReset.status === 200, '初始化后查询操作日志失败');
   assert(hasAuditLog(auditAfterReset.data.data, 'reset', '初始化数据库'), '初始化数据库未写入操作日志');
 
-  const restore = await request(`/api/system/backups/${encodeURIComponent(backupResult.data.filename)}/restore`, {
+  const restoreDenied = await request(`/api/system/backups/${encodeURIComponent(backupResult.data.filename)}/restore`, {
     method: 'POST',
     headers: { cookie, 'Content-Type': 'application/json' },
     body: '{}'
+  });
+  assert(restoreDenied.status === 401, '恢复缺少管理员密码时应拒绝');
+  const restore = await request(`/api/system/backups/${encodeURIComponent(backupResult.data.filename)}/restore`, {
+    method: 'POST',
+    headers: { cookie, 'Content-Type': 'application/json' },
+    body: JSON.stringify({ password: 'Admin123!' })
   });
   assert(restore.status === 200, '恢复原始数据失败');
   const sessionAfterRestore = await request('/api/session', { headers: { cookie } });
@@ -1640,10 +1724,44 @@ async function main() {
   const docDetailWithoutToken = await request(`/api/documents/${docId1}`, { headers: { cookie } });
   assert(docDetailWithoutToken.status === 403, '未验证 token 不应读取资料详情');
 
-  const docDetail = await request(`/api/documents/${docId1}?token=${encodeURIComponent(correctPwd.data.token)}`, { headers: { cookie } });
+  const docDetailQueryDenied = await request(`/api/documents/${docId1}?token=${encodeURIComponent(correctPwd.data.token)}`, { headers: { cookie } });
+  assert(docDetailQueryDenied.status === 403, 'query token 不应读取资料详情');
+  const docDetail = await request(`/api/documents/${docId1}`, { headers: { cookie, 'X-Document-Access-Token': correctPwd.data.token } });
   assert(docDetail.status === 200, '查询资料详情失败');
   assert(!docDetail.data.accessPasswordHash && !docDetail.data.loginPasswordHash, '资料详情暴露了密码哈希');
   assert(docDetail.data.serialNumber === 'REG-DEV-001' && docDetail.data.managementIp === '192.168.1.100', '验密后资料详情应返回管理字段');
+  const docCustomerPayload = {
+    name: '资料只读客户',
+    username: `doc_customer_${Date.now()}`,
+    password: 'Testpass1!',
+    role: 'customer',
+    phone: '',
+    wechat: '',
+    email: '',
+    idCard: '',
+    projectId,
+    startDate: '',
+    endDate: ''
+  };
+  const createDocCustomer = await request('/api/users', {
+    method: 'POST',
+    headers: { cookie, 'Content-Type': 'application/json' },
+    body: JSON.stringify(docCustomerPayload)
+  });
+  assert(createDocCustomer.status === 201, '创建资料测试客户失败');
+  const docCustomerLogin = await login(docCustomerPayload.username, docCustomerPayload.password);
+  assert(docCustomerLogin.status === 200, '资料测试客户登录失败');
+  const customerDocVerify = await request(`/api/documents/${docId1}/verify-password`, {
+    method: 'POST', headers: { cookie: docCustomerLogin.cookie, 'Content-Type': 'application/json' },
+    body: JSON.stringify({ password: 'DocPass123' })
+  });
+  assert(customerDocVerify.status === 200 && customerDocVerify.data.token, '客户验证资料密码失败');
+  assert(!customerDocVerify.data.loginPassword, '客户验密后不应返回设备登录密码');
+  const customerDocDetail = await request(`/api/documents/${docId1}`, { headers: { cookie: docCustomerLogin.cookie, 'X-Document-Access-Token': customerDocVerify.data.token } });
+  assert(customerDocDetail.status === 200, '客户读取资料详情失败');
+  assert(customerDocDetail.data.serialNumber === undefined && customerDocDetail.data.managementIp === undefined && customerDocDetail.data.loginAccount === undefined, '客户资料详情不应返回管理字段');
+  const deleteDocCustomer = await request(`/api/users/${createDocCustomer.data.id}`, { method: 'DELETE', headers: { cookie } });
+  assert(deleteDocCustomer.status === 200, '清理资料测试客户失败');
 
   const downloadResp = await request(`/api/documents/${docId2}/download`, { headers: { cookie } });
   assert(downloadResp.status === 403, '错误 token 应拒绝下载');
@@ -1653,7 +1771,9 @@ async function main() {
     body: JSON.stringify({ password: 'DocPass456' })
   });
   assert(verifyPwd2.status === 200 && verifyPwd2.data.token, '合同密码验证失败');
-  const downloadOk = await fetch(base + `/api/documents/${docId2}/download?token=${encodeURIComponent(verifyPwd2.data.token)}`, { headers: { cookie } });
+  const downloadQueryDenied = await fetch(base + `/api/documents/${docId2}/download?token=${encodeURIComponent(verifyPwd2.data.token)}`, { headers: { cookie } });
+  assert(downloadQueryDenied.status === 403, 'query token 应拒绝下载');
+  const downloadOk = await fetch(base + `/api/documents/${docId2}/download`, { headers: { cookie, 'X-Document-Access-Token': verifyPwd2.data.token } });
   assert(downloadOk.status === 200, '正确 token 下载失败');
 
   const docUpdateForm = new FormData();
@@ -1715,6 +1835,168 @@ async function main() {
   assert(foundA && foundB, '创建的资产在后续查询中缺失（写锁异常）');
   await request(`/api/assets/${assetA.data.id}`, { method: 'DELETE', headers: { cookie } });
   await request(`/api/assets/${assetB.data.id}`, { method: 'DELETE', headers: { cookie } });
+
+  const unauthLayout = await request('/api/assets/cabinet-layout');
+  assert(unauthLayout.status === 401, '布局图未登录应返回 401');
+  const invalidRack = await request('/api/assets', {
+    method: 'POST', headers: { cookie, 'Content-Type': 'application/json' },
+    body: JSON.stringify({
+      name: `布局非法U-${Date.now()}`, brand: '测', model: '测', type: '服务器', serialNumber: `SN-BAD-${Date.now()}`,
+      status: '使用中', projectId, maintainExpiryDate: '2027-12-31', cabinetName: '测试机柜', rackUnitStart: 99, rackUnitSize: 1
+    })
+  });
+  assert(invalidRack.status === 400, '起始U超出范围应返回 400');
+  const layoutPingName = `布局Ping-${Date.now()}`;
+  const layoutSnmpName = `布局SNMP-${Date.now()}`;
+  const layoutOtherName = `布局他项-${Date.now()}`;
+  const layoutConflictA = `布局冲突A-${Date.now()}`;
+  const layoutConflictB = `布局冲突B-${Date.now()}`;
+  const pingAsset = await request('/api/assets', {
+    method: 'POST', headers: { cookie, 'Content-Type': 'application/json' },
+    body: JSON.stringify({
+      name: layoutPingName, brand: '测', model: '测', type: '服务器', serialNumber: `SN-PING-${Date.now()}`,
+      status: '使用中', projectId, maintainExpiryDate: '2027-12-31',
+      cabinetName: '回归01号机柜', rackUnitStart: 10, rackUnitSize: 2,
+      monitorEnabled: true, monitorType: 'ping', monitorHost: '127.0.0.1'
+    })
+  });
+  assert(pingAsset.status === 201, `创建布局 Ping 资产失败: ${JSON.stringify(pingAsset.data)}`);
+  const snmpAsset = await request('/api/assets', {
+    method: 'POST', headers: { cookie, 'Content-Type': 'application/json' },
+    body: JSON.stringify({
+      name: layoutSnmpName, brand: '测', model: '测', type: '网络设备', serialNumber: `SN-SNMP-${Date.now()}`,
+      status: '使用中', projectId, maintainExpiryDate: '2027-12-31',
+      installationLocation: 'A区机房-回归02号机柜-8U',
+      monitorEnabled: true, monitorType: 'snmp', monitorHost: '10.255.255.254', snmpCommunity: 'layout-secret'
+    })
+  });
+  assert(snmpAsset.status === 201, `创建布局 SNMP 资产失败: ${JSON.stringify(snmpAsset.data)}`);
+  const conflictA = await request('/api/assets', {
+    method: 'POST', headers: { cookie, 'Content-Type': 'application/json' },
+    body: JSON.stringify({
+      name: layoutConflictA, brand: '测', model: '测', type: '服务器', serialNumber: `SN-CA-${Date.now()}`,
+      status: '使用中', projectId, maintainExpiryDate: '2027-12-31',
+      cabinetName: '回归冲突柜', rackUnitStart: 5, rackUnitSize: 2
+    })
+  });
+  const conflictB = await request('/api/assets', {
+    method: 'POST', headers: { cookie, 'Content-Type': 'application/json' },
+    body: JSON.stringify({
+      name: layoutConflictB, brand: '测', model: '测', type: '服务器', serialNumber: `SN-CB-${Date.now()}`,
+      status: '使用中', projectId, maintainExpiryDate: '2027-12-31',
+      cabinetName: '回归冲突柜', rackUnitStart: 6, rackUnitSize: 2
+    })
+  });
+  assert(conflictA.status === 201 && conflictB.status === 201, '创建冲突槽位资产失败');
+  const otherProject = await request('/api/projects', {
+    method: 'POST', headers: { cookie, 'Content-Type': 'application/json' },
+    body: JSON.stringify({ name: `布局隔离项目-${Date.now()}`, customerName: '布局客户' })
+  });
+  assert(otherProject.status === 201, '创建布局隔离项目失败');
+  const otherAsset = await request('/api/assets', {
+    method: 'POST', headers: { cookie, 'Content-Type': 'application/json' },
+    body: JSON.stringify({
+      name: layoutOtherName, brand: '测', model: '测', type: '服务器', serialNumber: `SN-OT-${Date.now()}`,
+      status: '使用中', projectId: otherProject.data.id, maintainExpiryDate: '2027-12-31',
+      cabinetName: '他项机柜', rackUnitStart: 1, rackUnitSize: 1
+    })
+  });
+  assert(otherAsset.status === 201, '创建他项目资产失败');
+  const adminLayout = await request('/api/assets/cabinet-layout', { headers: { cookie } });
+  assert(adminLayout.status === 200, '管理员查询布局图失败');
+  const adminDump = JSON.stringify(adminLayout.data);
+  assert(!adminDump.includes('layout-secret') && !adminDump.includes('snmpCommunity') && !adminDump.includes('monitorHost'), '布局接口不应返回监测地址或 SNMP 团体字');
+  const adminCabinets = adminLayout.data.cabinets || [];
+  const pingCabinet = adminCabinets.find(item => item.name === '回归01号机柜');
+  assert(pingCabinet && pingCabinet.devices.some(item => item.assetId === pingAsset.data.id), '带机柜字段的资产应出现在对应机柜');
+  const locCabinet = adminCabinets.find(item => item.name === '回归02号机柜');
+  assert(locCabinet && locCabinet.devices.some(item => item.assetId === snmpAsset.data.id), '安装位置中的机柜片段应作为机柜名称');
+  const pingDevice = pingCabinet.devices.find(item => item.assetId === pingAsset.data.id);
+  assert(pingDevice.metrics.cpuPercent === null && pingDevice.metrics.memoryPercent === null && pingDevice.metrics.diskPercent === null && pingDevice.metrics.trafficInBps === null, 'Ping 监测资产的 SNMP 指标应为 null');
+  const conflictCabinet = adminCabinets.find(item => item.name === '回归冲突柜');
+  assert(conflictCabinet && conflictCabinet.devices.filter(item => item.conflict).length >= 2, '重叠 U 位应标记槽位冲突');
+  const engineerRelogin = await login(engineerAccount.username, 'Engineer123!');
+  assert(engineerRelogin.status === 200, `工程师重新登录失败: ${engineerRelogin.status}`);
+  const engineerLayout = await request('/api/assets/cabinet-layout', { headers: { cookie: engineerRelogin.cookie } });
+  assert(engineerLayout.status === 200, `工程师查询布局图失败: ${engineerLayout.status} ${JSON.stringify(engineerLayout.data)}`);
+  const engineerNames = (engineerLayout.data.cabinets || []).map(item => item.name);
+  assert(!engineerNames.includes('他项机柜'), '工程师不应看到其他项目机柜');
+  assert(engineerNames.includes('回归01号机柜'), '工程师应看到本项目机柜');
+  await request(`/api/assets/${pingAsset.data.id}`, { method: 'DELETE', headers: { cookie } });
+  await request(`/api/assets/${snmpAsset.data.id}`, { method: 'DELETE', headers: { cookie } });
+  await request(`/api/assets/${conflictA.data.id}`, { method: 'DELETE', headers: { cookie } });
+  await request(`/api/assets/${conflictB.data.id}`, { method: 'DELETE', headers: { cookie } });
+  await request(`/api/assets/${otherAsset.data.id}`, { method: 'DELETE', headers: { cookie } });
+
+  const unnamedAsset = await request('/api/assets', {
+    method: 'POST', headers: { cookie, 'Content-Type': 'application/json' },
+    body: JSON.stringify({ name: '   ', type: '服务器', projectId, brand: '测', model: '测', serialNumber: `SN-EMPTY-${Date.now()}`, status: '使用中', maintainExpiryDate: '2027-12-31' })
+  });
+  assert(unnamedAsset.status === 400, '空资产名称应返回 400');
+  const badMonitorHost = await request('/api/assets', {
+    method: 'POST', headers: { cookie, 'Content-Type': 'application/json' },
+    body: JSON.stringify({
+      name: `非法监控地址-${Date.now()}`, type: '服务器', projectId, brand: '测', model: '测', serialNumber: `SN-HOST-${Date.now()}`,
+      status: '使用中', maintainExpiryDate: '2027-12-31', monitorEnabled: true, monitorType: 'ping', monitorHost: 'A区机房-01号机柜'
+    })
+  });
+  assert(badMonitorHost.status === 400, '非法监控地址应返回 400');
+  const reservedPut = await request('/api/assets/cabinet-layout', {
+    method: 'PUT', headers: { cookie, 'Content-Type': 'application/json' },
+    body: JSON.stringify({ name: '不应更新' })
+  });
+  assert(reservedPut.status === 404, 'PUT 保留路径应返回 404');
+  const noSnmpName = `无团体字-${Date.now()}`;
+  const noSnmpAsset = await request('/api/assets', {
+    method: 'POST', headers: { cookie, 'Content-Type': 'application/json' },
+    body: JSON.stringify({
+      name: noSnmpName, type: '网络设备', projectId, brand: '测', model: '测', serialNumber: `SN-NOSNMP-${Date.now()}`,
+      status: '使用中', maintainExpiryDate: '2027-12-31', monitorEnabled: true, monitorType: 'snmp', monitorHost: '10.255.255.253'
+    })
+  });
+  assert(noSnmpAsset.status === 201 && noSnmpAsset.data.hasSnmpCommunity === false, '未填写 SNMP 团体字时不应默认 public');
+  const noSnmpPut = await request(`/api/assets/${noSnmpAsset.data.id}`, {
+    method: 'PUT', headers: { cookie, 'Content-Type': 'application/json' },
+    body: JSON.stringify({ name: noSnmpName, type: '网络设备', projectId, monitorEnabled: true, monitorType: 'snmp', monitorHost: '10.255.255.253', snmpCommunity: '' })
+  });
+  assert(noSnmpPut.status === 200 && noSnmpPut.data.hasSnmpCommunity === false, 'PUT 空团体字不应回写成 public');
+  const relSrc = await request('/api/assets', {
+    method: 'POST', headers: { cookie, 'Content-Type': 'application/json' },
+    body: JSON.stringify({ name: `关系源-${Date.now()}`, type: '服务器', projectId, brand: '测', model: '测', serialNumber: `SN-RS-${Date.now()}`, status: '使用中', maintainExpiryDate: '2027-12-31' })
+  });
+  const relTgt = await request('/api/assets', {
+    method: 'POST', headers: { cookie, 'Content-Type': 'application/json' },
+    body: JSON.stringify({ name: `关系目标-${Date.now()}`, type: '服务器', projectId, brand: '测', model: '测', serialNumber: `SN-RT-${Date.now()}`, status: '使用中', maintainExpiryDate: '2027-12-31' })
+  });
+  assert(relSrc.status === 201 && relTgt.status === 201, '创建关系测试资产失败');
+  const rel = await request('/api/asset-relations', {
+    method: 'POST', headers: { cookie, 'Content-Type': 'application/json' },
+    body: JSON.stringify({ sourceAssetId: relSrc.data.id, targetAssetId: relTgt.data.id })
+  });
+  assert(rel.status === 201, `创建资产关系失败: ${JSON.stringify(rel.data)}`);
+  const delRelSrc = await request(`/api/assets/${relSrc.data.id}`, { method: 'DELETE', headers: { cookie } });
+  assert(delRelSrc.status === 200, '删除带拓扑关系的资产应成功');
+  const relsAfter = await request('/api/asset-relations', { headers: { cookie } });
+  assert(!(relsAfter.data || []).some(item => item.id === rel.data.id), '删除资产后应级联清理拓扑关系');
+  await request(`/api/assets/${relTgt.data.id}`, { method: 'DELETE', headers: { cookie } });
+  await request(`/api/assets/${noSnmpAsset.data.id}`, { method: 'DELETE', headers: { cookie } });
+  const importProjectName = (projects.data.data || []).find(item => item.id === projectId)?.name || '';
+  const importOkName = `导入监测-${Date.now()}`;
+  const assetImportResult = await request('/api/assets/import', {
+    method: 'POST', headers: { cookie, 'Content-Type': 'application/json' },
+    body: JSON.stringify({
+      assets: [
+        { '关联项目': importProjectName, '资产名称': importOkName, '资产类型': '服务器', '监控方式': 'ping', '监控地址/IP': '10.255.255.252', '机柜名称': '导入01号机柜', '起始U': 3, '占用U': 1 },
+        { '关联项目': importProjectName, '资产名称': `导入非法U-${Date.now()}`, '资产类型': '服务器', '机柜名称': '导入坏柜', '起始U': 99, '占用U': 1 }
+      ]
+    })
+  });
+  assert(assetImportResult.status === 200, `资产导入失败: ${JSON.stringify(assetImportResult.data)}`);
+  assert(assetImportResult.data.created === 1 && assetImportResult.data.skipped >= 1, '导入应写入监测字段并跳过非法 U 位');
+  const importedList = await request('/api/assets?all=1', { headers: { cookie } });
+  const imported = (importedList.data.data || []).find(item => item.name === importOkName);
+  assert(imported && imported.monitorEnabled && imported.monitorHost === '10.255.255.252' && imported.cabinetName === '导入01号机柜', '导入监测与机柜字段未落地');
+  if (imported) await request(`/api/assets/${imported.id}`, { method: 'DELETE', headers: { cookie } });
 
   process.stdout.write('Regression passed\n');
 }
