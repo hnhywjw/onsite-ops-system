@@ -1403,7 +1403,11 @@ function readCabinetFields(body = {}) {
   const size = parseOptionalRackUnit(body.rackUnitSize, '占用U数');
   if (size.error) return size;
   const rackUnitStart = start.value;
-  const rackUnitSize = size.value === null ? 1 : size.value;
+  let rackUnitSize = size.value === null ? 1 : size.value;
+  if (rackUnitStart === null && rackUnitSize > 1) {
+    return { error: '填写占用U数时必须填写起始U位' };
+  }
+  if (rackUnitStart === null) rackUnitSize = 1;
   if (rackUnitStart !== null && rackUnitStart + rackUnitSize - 1 > RACK_UNIT_MAX) {
     return { error: '起始U位与占用U数合计不能超过48' };
   }
@@ -1541,59 +1545,111 @@ function publicSnmpMetrics(asset) {
   };
 }
 
-function layoutDeviceFromAsset(asset) {
-  const start = Number.isInteger(asset.rackUnitStart) ? asset.rackUnitStart : 1;
+function layoutDeviceFromAsset(asset, cabinetName = '') {
+  const hasRackSlot = Number.isInteger(asset.rackUnitStart);
+  const start = hasRackSlot ? asset.rackUnitStart : 1;
   const size = Number.isInteger(asset.rackUnitSize) && asset.rackUnitSize > 0 ? asset.rackUnitSize : 1;
   const monitor = getMonitorStatus(asset.id);
   return {
     assetId: asset.id,
     name: asset.name || '',
     type: asset.type || '',
+    brand: asset.brand || '',
+    model: asset.model || '',
+    owner: asset.owner || '',
+    serialNumber: asset.serialNumber || '',
+    maintainExpiryDate: asset.maintainExpiryDate || '',
+    installationLocation: asset.installationLocation || '',
+    cabinetName,
+    hasRackSlot,
     rackUnitStart: start,
     rackUnitSize: size,
     conflict: false,
+    conflictColumn: 0,
+    conflictCount: 1,
     monitorStatus: asset.monitorEnabled ? ((monitor && monitor.status) || 'unknown') : 'unknown',
     metrics: publicSnmpMetrics(asset)
   };
 }
 
 function markLayoutConflicts(devices) {
-  for (let i = 0; i < devices.length; i += 1) {
-    const a = devices[i];
-    const aEnd = a.rackUnitStart + a.rackUnitSize - 1;
-    for (let j = i + 1; j < devices.length; j += 1) {
-      const b = devices[j];
-      const bEnd = b.rackUnitStart + b.rackUnitSize - 1;
-      if (a.rackUnitStart <= bEnd && b.rackUnitStart <= aEnd) {
-        a.conflict = true;
-        b.conflict = true;
-      }
+  // 按起始 U 位扫描出互相重叠的设备簇，再对每个簇做区间分列，
+  // 让部分重叠和 3 台以上同区间重叠都能各自占一列。
+  const sorted = devices.slice().sort((a, b) => a.rackUnitStart - b.rackUnitStart || a.rackUnitSize - b.rackUnitSize);
+  const clusters = [];
+  let cluster = null;
+  let clusterEnd = -Infinity;
+  for (const device of sorted) {
+    const end = device.rackUnitStart + device.rackUnitSize - 1;
+    if (cluster && device.rackUnitStart <= clusterEnd) {
+      cluster.push(device);
+      clusterEnd = Math.max(clusterEnd, end);
+    } else {
+      cluster = [device];
+      clusters.push(cluster);
+      clusterEnd = end;
     }
+  }
+  for (const group of clusters) {
+    if (group.length < 2) continue;
+    const columnEnds = [];
+    for (const device of group) {
+      const end = device.rackUnitStart + device.rackUnitSize - 1;
+      let column = columnEnds.findIndex(columnEnd => columnEnd < device.rackUnitStart);
+      if (column === -1) {
+        column = columnEnds.length;
+        columnEnds.push(end);
+      } else {
+        columnEnds[column] = end;
+      }
+      device.conflict = true;
+      device.conflictColumn = column;
+    }
+    group.forEach(device => { device.conflictCount = columnEnds.length; });
   }
 }
 
-function buildCabinetLayoutPayload(assets) {
+function buildCabinetLayoutPayload(assets, projectNames = new Map()) {
   const groups = new Map();
   const unassigned = [];
   for (const asset of assets) {
-    const device = layoutDeviceFromAsset(asset);
     const cabinet = resolveCabinetName(asset);
+    const device = layoutDeviceFromAsset(asset, cabinet);
     if (!cabinet) {
       unassigned.push(device);
       continue;
     }
-    if (!groups.has(cabinet)) groups.set(cabinet, []);
-    groups.get(cabinet).push(device);
+    // 不同项目可能存在同名机柜，按项目 + 机柜名分组，避免管理员视角被合并。
+    const key = `${asset.projectId || ''}\u0000${cabinet}`;
+    if (!groups.has(key)) groups.set(key, { name: cabinet, projectId: asset.projectId || '', devices: [] });
+    groups.get(key).devices.push(device);
   }
-  const cabinets = [...groups.entries()]
-    .sort((a, b) => a[0].localeCompare(b[0], 'zh'))
-    .map(([name, devices]) => {
+  const entries = [...groups.values()].sort((a, b) =>
+    a.name.localeCompare(b.name, 'zh', { numeric: true }) || String(a.projectId).localeCompare(String(b.projectId)));
+  const multiProject = new Set(entries.map(entry => entry.projectId)).size > 1;
+  const cabinets = entries
+    .map(entry => {
+      const { devices } = entry;
       markLayoutConflicts(devices);
       const maxUnit = devices.reduce((max, item) => Math.max(max, item.rackUnitStart + item.rackUnitSize - 1), 0);
-      devices.sort((a, b) => b.rackUnitStart - a.rackUnitStart || a.name.localeCompare(b.name, 'zh'));
-      return { name, unitCount: Math.max(DEFAULT_CABINET_UNITS, maxUnit), devices };
+      devices.sort((a, b) => b.rackUnitStart - a.rackUnitStart || a.name.localeCompare(b.name, 'zh', { numeric: true }));
+      const projectName = projectNames.get(entry.projectId) || '';
+      const label = multiProject && projectName ? `${entry.name} · ${projectName}` : entry.name;
+      return {
+        name: entry.name,
+        label,
+        projectId: entry.projectId,
+        projectName,
+        unitCount: Math.max(DEFAULT_CABINET_UNITS, maxUnit),
+        devices
+      };
     });
-  return { cabinets, unassigned };
+  unassigned.sort((a, b) => a.name.localeCompare(b.name, 'zh', { numeric: true }));
+  return {
+    cabinets,
+    unassigned,
+    monitoring: { lastRunAt: monitorRuntimeState.lastRunAt || null }
+  };
 }
 
 function sanitizeInspectionPlanForViewer(plan, viewer) {
@@ -7410,6 +7466,59 @@ const requestHandler = async (req, res) => {
       return json(res, 200, paginateResult(sorted.map(item => sanitizeAssetForApi(item, user)), query));
     }
 
+    if (req.method === 'POST' && pathname === '/api/assets/cabinet-layout/relocate') {
+      const user = requireEditor(req, res, db);
+      if (!user) return;
+      const body = await readBody(req);
+      const updates = Array.isArray(body.updates) ? body.updates : [];
+      if (!updates.length) return json(res, 400, { message: '请至少选择一台设备' });
+      if (updates.length > ASSET_IMPORT_MAX_ROWS) return json(res, 400, { message: `单次最多调整 ${ASSET_IMPORT_MAX_ROWS} 台设备` });
+      const seenAssetIds = new Set();
+      const targetIds = [];
+      for (const update of updates) {
+        const assetId = String(update && update.assetId || '');
+        if (!assetId || seenAssetIds.has(assetId)) continue;
+        seenAssetIds.add(assetId);
+        targetIds.push(assetId);
+      }
+      if (!targetIds.length) return json(res, 400, { message: '请至少选择一台设备' });
+      const cabinetName = String(body.cabinetName || '').trim();
+      if (!cabinetName) return json(res, 400, { message: '机柜名称不能为空' });
+      const startRaw = body.rackUnitStart;
+      const hasStart = startRaw !== undefined && startRaw !== null && String(startRaw).trim() !== '';
+      let nextStart = hasStart ? parseOptionalRackUnit(startRaw, '起始U位') : null;
+      if (nextStart && nextStart.error) return json(res, 400, { message: nextStart.error });
+      nextStart = nextStart ? nextStart.value : null;
+      // 先做完整校验再写入，避免部分设备已改、部分失败。
+      const planned = [];
+      for (const assetId of targetIds) {
+        const asset = (db.assets || []).find(item => item.id === assetId);
+        if (!asset) return json(res, 400, { message: '存在无效的资产，请刷新后重试' });
+        if (user.role !== 'admin' && asset.projectId !== user.projectId) return json(res, 403, { message: '无权调整该资产' });
+        const entry = { asset };
+        if (nextStart !== null) {
+          const size = Number.isInteger(asset.rackUnitSize) && asset.rackUnitSize > 0 ? asset.rackUnitSize : 1;
+          if (nextStart + size - 1 > RACK_UNIT_MAX) {
+            return json(res, 400, { message: `剩余槽位不足：${asset.name || '设备'} 需要 ${size}U，无法排到 ${RACK_UNIT_MAX}U 以内` });
+          }
+          entry.rackUnitStart = nextStart;
+          entry.rackUnitSize = size;
+          nextStart += size;
+        }
+        planned.push(entry);
+      }
+      for (const entry of planned) {
+        entry.asset.cabinetName = cabinetName;
+        if (entry.rackUnitStart !== undefined) {
+          entry.asset.rackUnitStart = entry.rackUnitStart;
+          entry.asset.rackUnitSize = entry.rackUnitSize;
+        }
+      }
+      appendAuditLog(db, user, 'update', 'asset', '', `批量归位 ${planned.length} 台设备到 ${cabinetName}`, user.projectId);
+      await writeDb(db);
+      return json(res, 200, { ok: true, updated: planned.length });
+    }
+
     if (req.method === 'POST' && pathname === '/api/assets') {
       const user = requireEditor(req, res, db);
       if (!user) return;
@@ -7732,13 +7841,22 @@ const requestHandler = async (req, res) => {
     if (req.method === 'GET' && pathname === '/api/assets/cabinet-layout') {
       const user = requireAuth(req, res, db);
       if (!user) return;
-      const list = filterByProjectScope(db.assets || [], user, item => item.projectId);
-      const payload = buildCabinetLayoutPayload(list);
+      let list = db.assets || [];
+      if (user.role === 'admin') {
+        const filterProjectId = reqUrl.searchParams.get('projectId');
+        if (filterProjectId) list = list.filter(item => item.projectId === filterProjectId);
+      } else {
+        list = filterByProjectScope(list, user, item => item.projectId);
+      }
+      const projectNames = new Map((db.projects || []).map(item => [item.id, item.name]));
+      const payload = buildCabinetLayoutPayload(list, projectNames);
       if (user.role === 'customer') {
         const stripSecrets = device => {
           if (!device) return device;
-          delete device.monitorHost;
-          delete device.snmpCommunity;
+          delete device.installationLocation;
+          delete device.serialNumber;
+          // 客户只看槽位与在线状态，SNMP 性能指标（CPU/内存/磁盘/流量）不下发。
+          delete device.metrics;
           return device;
         };
         payload.cabinets.forEach(cabinet => (cabinet.devices || []).forEach(stripSecrets));
@@ -10684,7 +10802,7 @@ initializeRuntimeServices().catch(error => {
 runAiInspectionScheduler();
 const schedulerIntervalId = setInterval(runAiInspectionScheduler, maintenanceIntervalMs);
 
-const monitorRuntimeState = { statuses: {} };
+const monitorRuntimeState = { statuses: {}, lastRunAt: null };
 
 function getMonitorStatus(assetId) {
   return monitorRuntimeState.statuses[assetId] || null;
@@ -10928,6 +11046,7 @@ async function runAssetMonitorScheduler() {
         try { await collectAssetSnmpMetrics(asset); } catch (_) {}
       }
     }
+    monitorRuntimeState.lastRunAt = now();
   } catch (error) {
     console.warn('Asset monitor scheduler error:', error.message);
   }

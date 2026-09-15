@@ -770,6 +770,10 @@
       background: linear-gradient(180deg, #fecaca, #fca5a5);
       border-color: #ef4444;
     }
+    .cabinet-device.cabinet-dim,
+    .cabinet-unassigned-item.cabinet-dim { opacity: .28; }
+    .cabinet-device.cabinet-hit { outline: 2px solid #2563eb; outline-offset: 1px; }
+    .cabinet-unassigned-item.cabinet-hit { border-color: #2563eb; box-shadow: 0 0 0 1px #2563eb inset; }
     .cabinet-device-led {
       width: 7px;
       height: 7px;
@@ -1288,7 +1292,29 @@
       <h3 id="cabinetLayoutDetailTitle" style="margin-top:0;">设备运行详情</h3>
       <div id="cabinetLayoutDetailBody" style="font-size:13px;"></div>
       <div class="btn-row" style="margin-top:12px;">
+        <button class="primary hidden" id="cabinetLayoutEditBtn" type="button">编辑资产</button>
         <button class="secondary" type="button" onclick="closeModal('cabinetLayoutDetailModal')">关闭</button>
+      </div>
+    </div>
+  </div>
+
+  <div id="cabinetLayoutBatchModal" class="modal-overlay hidden">
+    <div class="modal-box" style="max-width:560px;">
+      <h3 style="margin-top:0;">批量归位</h3>
+      <p style="margin:0 0 10px;font-size:12px;color:#6b7280;">勾选设备后统一设置机柜；填写起始U位时按设备占用U数依次排布。</p>
+      <label style="display:block;margin-bottom:8px;">机柜名称
+        <input id="cabinetLayoutBatchCabinet" placeholder="例：03号机柜" />
+      </label>
+      <label style="display:block;margin-bottom:8px;">起始U位（留空则只改机柜，保持原U位）
+        <input id="cabinetLayoutBatchStart" type="number" min="1" max="48" placeholder="1-48" />
+      </label>
+      <div style="max-height:220px;overflow-y:auto;border:1px solid var(--line);border-radius:8px;padding:8px;">
+        <div id="cabinetLayoutBatchList"></div>
+      </div>
+      <div id="cabinetLayoutBatchMessage" class="message" style="margin-top:8px;"></div>
+      <div class="btn-row" style="margin-top:12px;">
+        <button class="secondary" type="button" onclick="closeModal('cabinetLayoutBatchModal')">取消</button>
+        <button class="primary" id="cabinetLayoutBatchSaveBtn" type="button">确认归位</button>
       </div>
     </div>
   </div>
@@ -2319,12 +2345,16 @@
                 <p style="margin:6px 0 0;font-size:12px;color:#6b7280;">按机柜查看设备槽位 · 悬停查看摘要 · 点击查看 SNMP 实时详情</p>
               </div>
               <div>
+                <input id="cabinetLayoutSearchInput" type="search" placeholder="搜索设备名定位" class="hidden" style="font-size:13px;padding:6px 8px;margin-right:8px;border:1px solid var(--line);border-radius:8px;width:160px;" />
+                <select id="cabinetLayoutProjectFilter" class="hidden" style="font-size:13px;padding:6px 8px;margin-right:8px;border:1px solid var(--line);border-radius:8px;"></select>
+                <button class="secondary hidden" id="cabinetLayoutBatchBtn" type="button" style="font-size:13px;padding:6px 12px;margin-right:8px;">批量归位</button>
                 <button class="secondary" id="cabinetLayoutRefreshBtn" type="button" style="font-size:13px;padding:6px 12px;">刷新</button>
                 <span style="margin-left:8px;font-size:12px;color:#666;">
                   <span style="color:#16a34a;">●</span> 在线 <span style="color:#dc2626;margin-left:6px;">●</span> 离线 <span style="color:#9ca3af;margin-left:6px;">●</span> 未监控
                 </span>
               </div>
             </div>
+            <div id="cabinetLayoutMonitorHint" class="hidden" style="margin-bottom:10px;padding:8px 10px;border-radius:8px;background:#f1f5f9;color:#475569;font-size:12px;">监控数据采集中，页面会自动刷新</div>
             <div id="cabinetLayoutEmpty" class="hidden" style="padding:48px 16px;text-align:center;color:#9ca3af;">暂无资产</div>
             <div id="cabinetLayoutBoard" class="cabinet-layout-board"></div>
           </div>
@@ -3309,6 +3339,7 @@
       kbFilterUserId: '',
       assetPage: 1,
       selectedAssetIds: [],
+      cabinetLayoutDevice: null,
       projectPage: 1,
       userPage: 1,
       userProjectFilter: '',
@@ -3692,6 +3723,7 @@
                 state.topoMonitorStatus[msg.assetId] = { status: msg.monitorStatus, lastCheck: Date.now() };
                 updateTopoStatusDots();
               }
+              scheduleCabinetLayoutRefresh();
             } else if (msg.type === 'traffic_update') {
               if (msg.rates) {
                 state.topoTrafficRates = msg.rates;
@@ -5658,6 +5690,7 @@
         renderTopology();
       }
       if (section === 'assets' && subtab === 'cabinetLayout') {
+        startCabinetMonitorPoll();
         loadCabinetLayout();
       }
     }
@@ -5912,8 +5945,23 @@
     function openCabinetLayoutDetail(device) {
       hideCabinetLayoutTooltip();
       const metrics = device.metrics || {};
+      const start = Number(device.rackUnitStart) || 1;
+      const size = Number(device.rackUnitSize) || 1;
+      let unitText = '未设置';
+      if (device.hasRackSlot) unitText = size > 1 ? `${start}-${start + size - 1}U` : `${start}U`;
+      const modelText = [device.brand, device.model].filter(Boolean).join(' ');
+      state.cabinetLayoutDevice = device;
+      const editBtn = document.getElementById('cabinetLayoutEditBtn');
+      if (editBtn) editBtn.classList.toggle('hidden', !canEditData());
       document.getElementById('cabinetLayoutDetailTitle').textContent = device.name || '设备运行详情';
       const rows = [
+        ['机柜', device.cabinetName || '未分配机柜'],
+        ['U位', unitText],
+        ['类型', device.type || '-'],
+        ['品牌型号', modelText || '-'],
+        ['责任人', device.owner || '-'],
+        ['维保到期日', device.maintainExpiryDate || '-'],
+        ['序列号', device.serialNumber || '-'],
         ['运行状态', layoutStatusText(device.monitorStatus)],
         ['运行时长', formatLayoutMetric(metrics.uptimeSeconds, 'uptime')],
         ['CPU 负载', formatLayoutMetric(metrics.cpuPercent, 'percent')],
@@ -5931,6 +5979,7 @@
     }
 
     function bindCabinetDeviceEvents(el, device) {
+      el.dataset.deviceName = device.name || '';
       let timer = null;
       el.addEventListener('mouseenter', event => {
         timer = setTimeout(() => showCabinetLayoutTooltip(device, event), 300);
@@ -5952,7 +6001,7 @@
       wrap.className = 'cabinet-rack';
       const title = document.createElement('div');
       title.className = 'cabinet-rack-title';
-      title.textContent = cabinet.name;
+      title.textContent = cabinet.label || cabinet.name;
       const body = document.createElement('div');
       body.className = 'cabinet-rack-body';
       body.style.height = `${cabinet.unitCount * unitH}px`;
@@ -5963,7 +6012,6 @@
         label.textContent = `U${u}`;
         body.appendChild(label);
       }
-      const occupancies = {};
       (cabinet.devices || []).forEach(device => {
         const start = Number(device.rackUnitStart) || 1;
         const size = Number(device.rackUnitSize) || 1;
@@ -5972,11 +6020,13 @@
         el.className = `cabinet-device${device.conflict ? ' conflict' : ''}`;
         el.style.top = `${(cabinet.unitCount - topUnit) * unitH + 1}px`;
         el.style.height = `${size * unitH - 2}px`;
-        const overlapKey = `${start}-${size}`;
-        occupancies[overlapKey] = (occupancies[overlapKey] || 0) + 1;
-        if (device.conflict) {
-          el.style.right = occupancies[overlapKey] > 1 ? '4px' : '52%';
-          el.style.left = occupancies[overlapKey] > 1 ? '52%' : '30px';
+        const columnCount = Number(device.conflictCount) > 1 ? Number(device.conflictCount) : 1;
+        if (columnCount > 1) {
+          // 设备轨道左右各内缩，分列后按列索引等分剩余宽度，并在列间留 2px 间隙。
+          const column = Math.min(Math.max(Number(device.conflictColumn) || 0, 0), columnCount - 1);
+          const track = '(100% - 34px)';
+          el.style.left = `calc(31px + ${track} * ${column / columnCount})`;
+          el.style.right = `calc(5px + ${track} * ${(columnCount - 1 - column) / columnCount})`;
         }
         const led = document.createElement('span');
         led.className = `cabinet-device-led ${device.monitorStatus || 'unknown'}`;
@@ -6011,26 +6061,156 @@
       if (unassigned.length) {
         const col = document.createElement('div');
         col.className = 'cabinet-unassigned';
-        col.innerHTML = `<div class="cabinet-rack-title" style="background:#e5e7eb;color:#374151;border-radius:8px 8px 0 0;">未分配机柜</div>`;
+        col.innerHTML = `<div class="cabinet-rack-title" style="background:#e5e7eb;color:#374151;border-radius:8px 8px 0 0;">未分配机柜 (${unassigned.length})</div>`;
         unassigned.forEach(device => {
           const item = document.createElement('div');
           item.className = 'cabinet-unassigned-item';
-          item.innerHTML = `<span class="cabinet-device-led ${device.monitorStatus || 'unknown'}"></span><div><div style="font-weight:600;">${esc(device.name || '-')}</div><div style="font-size:12px;color:#6b7280;">${esc(device.type || '-')}</div></div>`;
+          const unitText = device.hasRackSlot
+            ? ` · U${device.rackUnitStart}${Number(device.rackUnitSize) > 1 ? `-${device.rackUnitStart + Number(device.rackUnitSize) - 1}` : ''}`
+            : '';
+          item.innerHTML = `<span class="cabinet-device-led ${device.monitorStatus || 'unknown'}"></span><div><div style="font-weight:600;">${esc(device.name || '-')}</div><div style="font-size:12px;color:#6b7280;">${esc(device.type || '-')}${esc(unitText)}</div></div>`;
           bindCabinetDeviceEvents(item, device);
           col.appendChild(item);
         });
         board.appendChild(col);
       }
+      applyCabinetLayoutSearch();
     }
 
     async function loadCabinetLayout() {
       const panel = document.querySelector('.subtab-panel[data-section="assets"][data-subtab="cabinetLayout"]');
       if (!panel || panel.classList.contains('hidden')) return;
       try {
-        const data = await api('/api/assets/cabinet-layout');
+        renderCabinetLayoutProjectFilter();
+        const projectFilter = document.getElementById('cabinetLayoutProjectFilter');
+        const projectId = projectFilter && !projectFilter.classList.contains('hidden') ? projectFilter.value : '';
+        const data = await api(`/api/assets/cabinet-layout${projectId ? `?projectId=${encodeURIComponent(projectId)}` : ''}`);
         renderCabinetLayout(data);
+        updateCabinetLayoutMonitorHint(data.monitoring || {});
       } catch (error) {
         showToast(error.message || '加载资产布局图失败', 'error');
+      }
+    }
+
+    function updateCabinetLayoutMonitorHint(monitoring) {
+      const hint = document.getElementById('cabinetLayoutMonitorHint');
+      if (!hint) return;
+      hint.classList.toggle('hidden', Boolean(monitoring.lastRunAt));
+    }
+
+    let cabinetLayoutFilterSignature = '';
+    function renderCabinetLayoutProjectFilter() {
+      const filter = document.getElementById('cabinetLayoutProjectFilter');
+      if (!filter) return;
+      const searchInput = document.getElementById('cabinetLayoutSearchInput');
+      const batchBtn = document.getElementById('cabinetLayoutBatchBtn');
+      const isAdmin = Boolean(state.user && state.user.role === 'admin');
+      if (searchInput) searchInput.classList.toggle('hidden', !state.user);
+      if (batchBtn) batchBtn.classList.toggle('hidden', !canEditData());
+      if (!isAdmin) {
+        filter.classList.add('hidden');
+        if (filter.innerHTML) filter.innerHTML = '';
+        cabinetLayoutFilterSignature = '';
+        return;
+      }
+      // 轮询会反复调用本函数，项目列表未变化时不重建下拉，避免打断管理员选择。
+      const signature = state.projects.map(p => `${p.id}:${formatProjectDisplay(p)}`).join('|');
+      if (signature === cabinetLayoutFilterSignature) return;
+      cabinetLayoutFilterSignature = signature;
+      const current = filter.value;
+      filter.classList.remove('hidden');
+      filter.innerHTML = '<option value="">全部项目</option>' + state.projects.map(p => `<option value="${p.id}">${esc(formatProjectDisplay(p))}</option>`).join('');
+      if (current) filter.value = current;
+    }
+
+    function refreshCabinetLayoutIfActive() {
+      const panel = document.querySelector('.subtab-panel[data-section="assets"][data-subtab="cabinetLayout"]');
+      if (panel && !panel.classList.contains('hidden') && state.user) loadCabinetLayout();
+    }
+
+    let cabinetLayoutRefreshTimer = null;
+    function scheduleCabinetLayoutRefresh() {
+      if (cabinetLayoutRefreshTimer) return;
+      // 批量设备同时离线时会连发多条告警，去抖后再拉取一次布局。
+      cabinetLayoutRefreshTimer = setTimeout(() => {
+        cabinetLayoutRefreshTimer = null;
+        refreshCabinetLayoutIfActive();
+      }, 500);
+    }
+
+    function applyCabinetLayoutSearch() {
+      const input = document.getElementById('cabinetLayoutSearchInput');
+      const board = document.getElementById('cabinetLayoutBoard');
+      if (!board) return;
+      const query = String(input && input.value || '').trim().toLowerCase();
+      const nodes = board.querySelectorAll('.cabinet-device, .cabinet-unassigned-item');
+      let firstHit = null;
+      nodes.forEach(node => {
+        const name = String(node.dataset.deviceName || '').toLowerCase();
+        const hit = !query || name.includes(query);
+        node.classList.toggle('cabinet-dim', Boolean(query) && !hit);
+        node.classList.toggle('cabinet-hit', Boolean(query) && hit);
+        if (query && hit && !firstHit) firstHit = node;
+      });
+      if (firstHit && typeof firstHit.scrollIntoView === 'function') {
+        firstHit.scrollIntoView({ block: 'center', inline: 'center', behavior: 'smooth' });
+      }
+    }
+
+    let cabinetMonitorTimer = null;
+    function startCabinetMonitorPoll() {
+      if (cabinetMonitorTimer) return;
+      cabinetMonitorTimer = setInterval(() => {
+        const panel = document.querySelector('.subtab-panel[data-section="assets"][data-subtab="cabinetLayout"]');
+        if (panel && !panel.classList.contains('hidden') && state.user) loadCabinetLayout();
+      }, 30000);
+    }
+
+    function openCabinetLayoutBatchModal() {
+      const list = document.getElementById('cabinetLayoutBatchList');
+      const msg = document.getElementById('cabinetLayoutBatchMessage');
+      const projectFilter = document.getElementById('cabinetLayoutProjectFilter');
+      const projectId = projectFilter && !projectFilter.classList.contains('hidden') ? projectFilter.value : '';
+      let assets = filterByUserProject(state.assets).slice();
+      if (projectId) assets = assets.filter(item => item.projectId === projectId);
+      assets.sort((a, b) => String(a.name || '').localeCompare(String(b.name || ''), 'zh', { numeric: true }));
+      if (!assets.length) { showToast('没有可归位的资产'); return; }
+      list.innerHTML = assets.map(item => {
+        const current = item.cabinetName ? `${item.cabinetName}${item.rackUnitStart ? ` U${item.rackUnitStart}` : ''}` : '未分配';
+        return `<label style="display:flex;align-items:center;gap:8px;padding:4px 0;font-size:13px;">
+          <input type="checkbox" class="cabinet-batch-item" value="${attrEsc(item.id)}" />
+          <span style="flex:1;">${esc(item.name || '-')}</span>
+          <span style="color:#6b7280;font-size:12px;">${esc(current)}</span>
+        </label>`;
+      }).join('');
+      document.getElementById('cabinetLayoutBatchCabinet').value = '';
+      document.getElementById('cabinetLayoutBatchStart').value = '';
+      msg.textContent = '';
+      msg.className = 'message';
+      openModal('cabinetLayoutBatchModal');
+    }
+
+    async function saveCabinetLayoutBatch() {
+      const msg = document.getElementById('cabinetLayoutBatchMessage');
+      const fail = text => { msg.textContent = text; msg.className = 'message error'; };
+      const cabinetName = document.getElementById('cabinetLayoutBatchCabinet').value.trim();
+      const startRaw = document.getElementById('cabinetLayoutBatchStart').value.trim();
+      const ids = Array.from(document.querySelectorAll('.cabinet-batch-item:checked')).map(item => item.value);
+      if (!cabinetName) return fail('请输入机柜名称');
+      if (!ids.length) return fail('请至少勾选一台设备');
+      if (startRaw && !/^\d+$/.test(startRaw)) return fail('起始U位须为 1-48 的整数');
+      const payload = { cabinetName, updates: ids.map(id => ({ assetId: id })) };
+      if (startRaw) payload.rackUnitStart = Number(startRaw);
+      msg.textContent = '提交中…';
+      msg.className = 'message';
+      try {
+        const result = await api('/api/assets/cabinet-layout/relocate', { method: 'POST', body: JSON.stringify(payload) });
+        closeModal('cabinetLayoutBatchModal');
+        await loadBaseData();
+        showToast(`已归位 ${result.updated || ids.length} 台设备`);
+        await loadCabinetLayout();
+      } catch (error) {
+        fail(error.message || '批量归位失败');
       }
     }
 
@@ -6528,6 +6708,16 @@
 
     document.getElementById('topoRefreshBtn').addEventListener('click', () => renderTopology());
     document.getElementById('cabinetLayoutRefreshBtn').addEventListener('click', () => loadCabinetLayout());
+    document.getElementById('cabinetLayoutProjectFilter').addEventListener('change', () => loadCabinetLayout());
+    document.getElementById('cabinetLayoutSearchInput').addEventListener('input', () => applyCabinetLayoutSearch());
+    document.getElementById('cabinetLayoutEditBtn').addEventListener('click', () => {
+      const device = state.cabinetLayoutDevice;
+      if (!device) return;
+      closeModal('cabinetLayoutDetailModal');
+      editAsset(device.assetId);
+    });
+    document.getElementById('cabinetLayoutBatchBtn').addEventListener('click', () => openCabinetLayoutBatchModal());
+    document.getElementById('cabinetLayoutBatchSaveBtn').addEventListener('click', () => saveCabinetLayoutBatch());
     document.getElementById('topoAddRelBtn').addEventListener('click', async () => {
       state.topoEditRelId = null;
       document.querySelector('#assetRelationModal h3').textContent = '添加资产连接关系';
@@ -9994,6 +10184,7 @@
         closeModal('assetEditModal');
         await loadBaseData();
         showToast('资产修改成功');
+        refreshCabinetLayoutIfActive();
       } catch (error) {
         msg.textContent = error.message;
         msg.className = 'message error';

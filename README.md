@@ -105,16 +105,29 @@ docker compose --env-file .env.production -f docker-compose.prod.yml up -d --bui
 
 ## 版本
 
-当前版本：`1.0.13`
+当前版本：`1.0.14`
 
 ### 软件包下载
 
-最新版本：**[v1.0.13](https://github.com/hnhywjw/onsite-ops-system/releases/tag/v1.0.13)**
+最新版本：**[v1.0.14](https://github.com/hnhywjw/onsite-ops-system/releases/tag/v1.0.14)**
 
-- 完整安装包 `onsite-ops-system-v1.0.13-production.tar.gz`
-- 离线升级包 `onsite-ops-upgrade-v1.0.13.tar.gz`
+- 完整安装包 `onsite-ops-system-v1.0.14-production.tar.gz`
+- 离线升级包 `onsite-ops-upgrade-v1.0.14.tar.gz`
 - SHA256 校验文件
 - 部署说明见仓库 `PRODUCTION_DEPLOY.md`
+
+### v1.0.14 更新说明
+
+资产布局图：
+- 槽位冲突改为按区间分列展示，支持部分重叠与 3 台以上同区间设备各自占列
+- 批量归位：勾选设备后统一设置机柜与起始 U 位，按占用 U 数依次排布
+- 机柜名与设备名按数字大小排序，未分配机柜显示数量与占用 U 位
+- 监控告警实时刷新布局，轮询刷新增加去抖，避免批量离线时重复拉取
+- 多项目环境机柜标题带项目名，管理员可按项目过滤；项目下拉加签名缓存
+- 布局图支持按设备名搜索定位，命中设备高亮并滚动到可视区域
+- 设备详情补充机柜/U 位/品牌型号/责任人/维保到期日/序列号，并可跳转编辑
+- 只填写占用 U 数、未填起始 U 位时返回 400，不再静默落到 U1
+- 客户布局不再下发 SNMP 性能指标，安装位置与序列号继续脱敏
 
 ### v1.0.13 更新说明
 

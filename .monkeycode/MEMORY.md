@@ -99,3 +99,13 @@ Agent 在任务执行过程中发现的条目应遵循以下格式：
 - Category: 工作流协作
 - Instructions:
   - 所有 git push 操作必须推送到 `main` 分支，不要使用 `master`。
+
+[回归测试的环境状态治理]
+- Date: 2026-09-15
+- Context: Agent 修复资产布局图问题后连续运行回归与 e2e 时发现
+- Category: 排错调试
+- Instructions:
+  - `npm run regression` 中途失败会残留测试用户/项目/资产，多次中断会污染库并让后续断言连锁失败；此时可登录后调用 `POST /api/system/backups/{filename}/restore`，恢复到 `data/backups` 下本轮最早的 `backup-*.json` 快照（回归脚本在用例前会创建一次 `backup-*.json`，即本轮最干净的基线）。
+  - 恢复接口需要管理员二次验证与 CSRF：请求体传 `{"password":"Admin123!"}`，请求头带登录响应返回的 `csrfToken`（`X-CSRF-Token`），文件名需 `encodeURIComponent`（含 `+` 时尤其重要）。
+  - 忘记密码限流（`FP_MAX_ATTEMPTS=5`，锁 30 分钟）是内存态，短时间连续多次运行回归会触发 429 假失败；重启 `npm start` 服务即可清零。
+  - `npm run e2e` 的自动登出提示断言存在竞态，偶发失败时重跑一次即可确认。

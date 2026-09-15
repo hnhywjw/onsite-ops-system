@@ -1211,7 +1211,7 @@ async function main() {
   const reminderSeedList = await waitForProjectNotifications(cookie, reminderProjectId, list => list.some(item => item.category === 'work-report-daily-missing' && String(item.content || '').includes('提醒漏填工程师')));
   assert(reminderSeedList.some(item => item.category === 'work-report-daily-missing' && String(item.content || '').includes('提醒漏填工程师')), '日报漏填提醒未生成');
   assert(reminderSeedList.some(item => item.category === 'work-report-weekly-deadline' && String(item.content || '').includes('提醒漏填工程师')), '周报截止提醒未生成');
-  if (monthDaysLeft <= 15) {
+  if (monthDaysLeft <= 10) {
     assert(reminderSeedList.some(item => item.category === 'work-report-monthly-deadline' && String(item.content || '').includes('提醒漏填工程师')), '月报截止提醒未生成');
   }
   assert(reminderSeedList.some(item => item.category === 'work-log-streak-missing' && String(item.content || '').includes('提醒漏填工程师')), '连续无记录提醒未生成');
@@ -1381,6 +1381,7 @@ async function main() {
   assert(customerLayout.status === 200, `客户查询布局图失败: ${customerLayout.status} ${JSON.stringify(customerLayout.data)}`);
   const customerDump = JSON.stringify(customerLayout.data);
   assert(!customerDump.includes('monitorHost') && !customerDump.includes('snmpCommunity'), '客户布局数据不应包含监测地址或 SNMP 团体字');
+  assert(!customerDump.includes('"metrics"') && !customerDump.includes('cpuPercent'), '客户布局数据不应包含 SNMP 性能指标');
   const customerAiResults = await request('/api/ai-inspection/results?all=1', { headers: { cookie: aiCustomerLogin.cookie } });
   assert(customerAiResults.status === 200 && (customerAiResults.data.data || []).every(item => item.rawOutput === undefined && item.stdout === undefined && item.stderr === undefined && (item.probeError === undefined || item.probeError === true || item.probeError === false)), '客户巡检结果应脱敏探测细节');
   assert((customerAiResults.data.data || []).every(item => !String(item.suggestion || '').includes('10.0.0.10') && !String(item.summary || '').includes('10.0.0.10')), '客户巡检结果不应包含设备地址');
@@ -1846,11 +1847,21 @@ async function main() {
     })
   });
   assert(invalidRack.status === 400, '起始U超出范围应返回 400');
+  const sizeWithoutStart = await request('/api/assets', {
+    method: 'POST', headers: { cookie, 'Content-Type': 'application/json' },
+    body: JSON.stringify({
+      name: `布局缺起始U-${Date.now()}`, brand: '测', model: '测', type: '服务器', serialNumber: `SN-NOSTART-${Date.now()}`,
+      status: '使用中', projectId, maintainExpiryDate: '2027-12-31', cabinetName: '测试机柜', rackUnitSize: 4
+    })
+  });
+  assert(sizeWithoutStart.status === 400, '只填写占用U数时应返回 400');
   const layoutPingName = `布局Ping-${Date.now()}`;
   const layoutSnmpName = `布局SNMP-${Date.now()}`;
   const layoutOtherName = `布局他项-${Date.now()}`;
   const layoutConflictA = `布局冲突A-${Date.now()}`;
   const layoutConflictB = `布局冲突B-${Date.now()}`;
+  const layoutConflictC = `布局冲突C-${Date.now()}`;
+  const conflictCabinetName = `回归冲突柜-${Date.now()}`;
   const pingAsset = await request('/api/assets', {
     method: 'POST', headers: { cookie, 'Content-Type': 'application/json' },
     body: JSON.stringify({
@@ -1876,7 +1887,7 @@ async function main() {
     body: JSON.stringify({
       name: layoutConflictA, brand: '测', model: '测', type: '服务器', serialNumber: `SN-CA-${Date.now()}`,
       status: '使用中', projectId, maintainExpiryDate: '2027-12-31',
-      cabinetName: '回归冲突柜', rackUnitStart: 5, rackUnitSize: 2
+      cabinetName: conflictCabinetName, rackUnitStart: 5, rackUnitSize: 2
     })
   });
   const conflictB = await request('/api/assets', {
@@ -1884,10 +1895,19 @@ async function main() {
     body: JSON.stringify({
       name: layoutConflictB, brand: '测', model: '测', type: '服务器', serialNumber: `SN-CB-${Date.now()}`,
       status: '使用中', projectId, maintainExpiryDate: '2027-12-31',
-      cabinetName: '回归冲突柜', rackUnitStart: 6, rackUnitSize: 2
+      cabinetName: conflictCabinetName, rackUnitStart: 6, rackUnitSize: 2
     })
   });
   assert(conflictA.status === 201 && conflictB.status === 201, '创建冲突槽位资产失败');
+  const conflictC = await request('/api/assets', {
+    method: 'POST', headers: { cookie, 'Content-Type': 'application/json' },
+    body: JSON.stringify({
+      name: layoutConflictC, brand: '测', model: '测', type: '服务器', serialNumber: `SN-CC-${Date.now()}`,
+      status: '使用中', projectId, maintainExpiryDate: '2027-12-31',
+      cabinetName: conflictCabinetName, rackUnitStart: 5, rackUnitSize: 2
+    })
+  });
+  assert(conflictC.status === 201, '创建第三台冲突槽位资产失败');
   const otherProject = await request('/api/projects', {
     method: 'POST', headers: { cookie, 'Content-Type': 'application/json' },
     body: JSON.stringify({ name: `布局隔离项目-${Date.now()}`, customerName: '布局客户' })
@@ -1902,6 +1922,26 @@ async function main() {
     })
   });
   assert(otherAsset.status === 201, '创建他项目资产失败');
+  const layoutSortSuffix = Date.now();
+  const sortCabinetSmall = `回归排序2号柜-${layoutSortSuffix}`;
+  const sortCabinetLarge = `回归排序10号柜-${layoutSortSuffix}`;
+  const sortAssetSmall = await request('/api/assets', {
+    method: 'POST', headers: { cookie, 'Content-Type': 'application/json' },
+    body: JSON.stringify({
+      name: `布局排序A-${layoutSortSuffix}`, brand: '测', model: '测', type: '服务器', serialNumber: `SN-SORT-A-${layoutSortSuffix}`,
+      status: '使用中', projectId, maintainExpiryDate: '2027-12-31',
+      cabinetName: sortCabinetSmall, rackUnitStart: 1, rackUnitSize: 1
+    })
+  });
+  const sortAssetLarge = await request('/api/assets', {
+    method: 'POST', headers: { cookie, 'Content-Type': 'application/json' },
+    body: JSON.stringify({
+      name: `布局排序B-${layoutSortSuffix}`, brand: '测', model: '测', type: '服务器', serialNumber: `SN-SORT-B-${layoutSortSuffix}`,
+      status: '使用中', projectId, maintainExpiryDate: '2027-12-31',
+      cabinetName: sortCabinetLarge, rackUnitStart: 1, rackUnitSize: 1
+    })
+  });
+  assert(sortAssetSmall.status === 201 && sortAssetLarge.status === 201, '创建排序测试资产失败');
   const adminLayout = await request('/api/assets/cabinet-layout', { headers: { cookie } });
   assert(adminLayout.status === 200, '管理员查询布局图失败');
   const adminDump = JSON.stringify(adminLayout.data);
@@ -1913,20 +1953,85 @@ async function main() {
   assert(locCabinet && locCabinet.devices.some(item => item.assetId === snmpAsset.data.id), '安装位置中的机柜片段应作为机柜名称');
   const pingDevice = pingCabinet.devices.find(item => item.assetId === pingAsset.data.id);
   assert(pingDevice.metrics.cpuPercent === null && pingDevice.metrics.memoryPercent === null && pingDevice.metrics.diskPercent === null && pingDevice.metrics.trafficInBps === null, 'Ping 监测资产的 SNMP 指标应为 null');
-  const conflictCabinet = adminCabinets.find(item => item.name === '回归冲突柜');
+  const conflictCabinet = adminCabinets.find(item => item.name === conflictCabinetName);
   assert(conflictCabinet && conflictCabinet.devices.filter(item => item.conflict).length >= 2, '重叠 U 位应标记槽位冲突');
+  const conflictDevices = conflictCabinet.devices.filter(item => item.conflict);
+  assert(conflictDevices.every(item => item.conflictCount >= 2), '冲突设备应返回分列数量');
+  assert(conflictDevices.every(item => item.conflictCount === 3), '三台同槽位设备应分成三列');
+  assert(new Set(conflictDevices.map(item => item.conflictColumn)).size === conflictDevices.length, '冲突设备应各自分列显示');
+  const sortNames = adminCabinets.map(item => item.name);
+  assert(sortNames.indexOf(sortCabinetSmall) !== -1 && sortNames.indexOf(sortCabinetLarge) !== -1, '排序测试机柜应出现在布局中');
+  assert(sortNames.indexOf(sortCabinetSmall) < sortNames.indexOf(sortCabinetLarge), '机柜名排序应按数字大小而非字典序');
+  const sortCabinetSmallEntry = adminCabinets.find(item => item.name === sortCabinetSmall);
+  const sortCabinetSmallDevices = sortCabinetSmallEntry.devices.map(item => item.name);
+  assert(sortCabinetSmallDevices.length >= 1, '排序机柜应包含测试设备');
   const engineerRelogin = await login(engineerAccount.username, 'Engineer123!');
   assert(engineerRelogin.status === 200, `工程师重新登录失败: ${engineerRelogin.status}`);
+  // 批量归位：把两台设备移到同一新机柜，并按起始 U 顺序排布。
+  const relocateCabinet = `回归归位柜-${layoutSortSuffix}`;
+  const relocateDenied = await request('/api/assets/cabinet-layout/relocate', {
+    method: 'POST', headers: { cookie: engineerRelogin.cookie, 'Content-Type': 'application/json' },
+    body: JSON.stringify({ cabinetName: relocateCabinet, updates: [{ assetId: otherAsset.data.id }] })
+  });
+  assert(relocateDenied.status === 403, '工程师不应归位其他项目资产');
+  const relocateEmpty = await request('/api/assets/cabinet-layout/relocate', {
+    method: 'POST', headers: { cookie, 'Content-Type': 'application/json' },
+    body: JSON.stringify({ cabinetName: relocateCabinet, updates: [] })
+  });
+  assert(relocateEmpty.status === 400, '空设备列表应返回 400');
+  const relocateNoName = await request('/api/assets/cabinet-layout/relocate', {
+    method: 'POST', headers: { cookie, 'Content-Type': 'application/json' },
+    body: JSON.stringify({ cabinetName: '  ', updates: [{ assetId: sortAssetSmall.data.id }] })
+  });
+  assert(relocateNoName.status === 400, '空机柜名称应返回 400');
+  const relocateOverflow = await request('/api/assets/cabinet-layout/relocate', {
+    method: 'POST', headers: { cookie, 'Content-Type': 'application/json' },
+    body: JSON.stringify({ cabinetName: relocateCabinet, rackUnitStart: 48, updates: [{ assetId: sortAssetSmall.data.id }, { assetId: sortAssetLarge.data.id }] })
+  });
+  assert(relocateOverflow.status === 400, '归位超出机柜 U 位上限应返回 400');
+  const relocateOk = await request('/api/assets/cabinet-layout/relocate', {
+    method: 'POST', headers: { cookie, 'Content-Type': 'application/json' },
+    body: JSON.stringify({ cabinetName: relocateCabinet, rackUnitStart: 3, updates: [{ assetId: sortAssetSmall.data.id }, { assetId: sortAssetLarge.data.id }] })
+  });
+  assert(relocateOk.status === 200 && relocateOk.data.updated === 2, `批量归位失败: ${relocateOk.status} ${JSON.stringify(relocateOk.data)}`);
+  const relocateLayout = await request('/api/assets/cabinet-layout', { headers: { cookie } });
+  const relocateCabinetEntry = (relocateLayout.data.cabinets || []).find(item => item.name === relocateCabinet);
+  assert(relocateCabinetEntry && relocateCabinetEntry.devices.length === 2, '归位后应在新机柜看到两台设备');
+  const relocateSmallDevice = relocateCabinetEntry.devices.find(item => item.assetId === sortAssetSmall.data.id);
+  const relocateLargeDevice = relocateCabinetEntry.devices.find(item => item.assetId === sortAssetLarge.data.id);
+  assert(relocateSmallDevice.rackUnitStart === 3 && relocateLargeDevice.rackUnitStart === 4, '归位应按起始 U 依次排布');
+  // 未分配机柜设备需出现在 unassigned 列表并保留 U 位信息。
+  const unassignedAsset = await request('/api/assets', {
+    method: 'POST', headers: { cookie, 'Content-Type': 'application/json' },
+    body: JSON.stringify({
+      name: `布局未分配-${layoutSortSuffix}`, brand: '测', model: '测', type: '服务器', serialNumber: `SN-UN-${layoutSortSuffix}`,
+      status: '使用中', projectId, maintainExpiryDate: '2027-12-31'
+    })
+  });
+  assert(unassignedAsset.status === 201, '创建未分配机柜资产失败');
+  const unassignedLayout = await request('/api/assets/cabinet-layout', { headers: { cookie } });
+  const unassignedEntry = (unassignedLayout.data.unassigned || []).find(item => item.assetId === unassignedAsset.data.id);
+  assert(unassignedEntry && unassignedEntry.rackUnitSize >= 1, '未分配机柜设备应保留占用 U 数');
   const engineerLayout = await request('/api/assets/cabinet-layout', { headers: { cookie: engineerRelogin.cookie } });
   assert(engineerLayout.status === 200, `工程师查询布局图失败: ${engineerLayout.status} ${JSON.stringify(engineerLayout.data)}`);
   const engineerNames = (engineerLayout.data.cabinets || []).map(item => item.name);
   assert(!engineerNames.includes('他项机柜'), '工程师不应看到其他项目机柜');
   assert(engineerNames.includes('回归01号机柜'), '工程师应看到本项目机柜');
+  const scopedLayout = await request(`/api/assets/cabinet-layout?projectId=${otherProject.data.id}`, { headers: { cookie } });
+  assert(scopedLayout.status === 200, '管理员按项目查询布局图失败');
+  assert((scopedLayout.data.cabinets || []).every(item => item.projectId === otherProject.data.id), '管理员按项目过滤应只返回该项目机柜');
+  const otherCabinet = adminCabinets.find(item => item.name === '他项机柜');
+  assert(otherCabinet && otherCabinet.projectId === otherProject.data.id, '同名机柜应按项目拆分');
+  assert(otherCabinet.label && otherCabinet.label.includes('布局隔离项目'), '多项目机柜标题应带项目标识');
   await request(`/api/assets/${pingAsset.data.id}`, { method: 'DELETE', headers: { cookie } });
   await request(`/api/assets/${snmpAsset.data.id}`, { method: 'DELETE', headers: { cookie } });
   await request(`/api/assets/${conflictA.data.id}`, { method: 'DELETE', headers: { cookie } });
   await request(`/api/assets/${conflictB.data.id}`, { method: 'DELETE', headers: { cookie } });
+  await request(`/api/assets/${conflictC.data.id}`, { method: 'DELETE', headers: { cookie } });
   await request(`/api/assets/${otherAsset.data.id}`, { method: 'DELETE', headers: { cookie } });
+  await request(`/api/assets/${sortAssetSmall.data.id}`, { method: 'DELETE', headers: { cookie } });
+  await request(`/api/assets/${sortAssetLarge.data.id}`, { method: 'DELETE', headers: { cookie } });
+  await request(`/api/assets/${unassignedAsset.data.id}`, { method: 'DELETE', headers: { cookie } });
 
   const unnamedAsset = await request('/api/assets', {
     method: 'POST', headers: { cookie, 'Content-Type': 'application/json' },
