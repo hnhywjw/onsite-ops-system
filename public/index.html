@@ -220,6 +220,29 @@
     .pagination-bar { display: flex; justify-content: flex-end; align-items: center; gap: 8px; margin-top: 10px; font-size: 12px; }
     .pagination-bar span { font-size: 12px; }
     .pagination-bar button { font-size: 12px; padding: 6px 12px; }
+    /* 资产列表列宽固定，保证类型/名称/型号/维保到期日不会被挤到换行。 */
+    .asset-table {
+      table-layout: fixed;
+      min-width: 1370px;
+    }
+    .asset-table th,
+    .asset-table td {
+      overflow: hidden;
+      text-overflow: ellipsis;
+      white-space: nowrap;
+    }
+    .asset-table td .toolbar {
+      gap: 6px;
+      flex-wrap: nowrap;
+    }
+    /* 列多时表格横向滚动，固定操作列避免按钮被滚出视野。 */
+    .asset-table th:last-child,
+    .asset-table td:last-child {
+      position: sticky;
+      right: 0;
+      background: #fff;
+      box-shadow: -8px 0 10px -8px rgba(15,23,42,.3);
+    }
     td .toolbar button { font-size: 13px; padding: 5px 10px; white-space: nowrap; }
     td .toolbar { font-size: 13px; white-space: nowrap; }
     .workbench-item:hover { box-shadow: 0 2px 8px rgba(0,0,0,0.1); }
@@ -2355,8 +2378,25 @@
           <div class="card">
             <h3 style="margin-top:0;">资产列表</h3>
             <div class="table-wrap">
-              <table>
-                <thead><tr><th style="width:30px;"><input type="checkbox" id="assetSelectAll" title="全选" /></th><th>项目名称</th><th>资产类型</th><th>资产名称</th><th>品牌</th><th>规格型号</th><th>序列号</th><th>版本</th><th>维保到期日</th><th>安装位置</th><th>机柜/U位</th><th>状态</th><th>责任人/部门</th><th style="max-width:100px;">备注</th><th>操作</th></tr></thead>
+              <table class="asset-table">
+                <colgroup>
+                  <col style="width:36px;" />
+                  <col style="width:110px;" />
+                  <col style="width:76px;" />
+                  <col style="width:90px;" />
+                  <col style="width:60px;" />
+                  <col style="width:90px;" />
+                  <col style="width:96px;" />
+                  <col style="width:68px;" />
+                  <col style="width:104px;" />
+                  <col style="width:112px;" />
+                  <col style="width:108px;" />
+                  <col style="width:64px;" />
+                  <col style="width:96px;" />
+                  <col style="width:84px;" />
+                  <col style="width:176px;" />
+                </colgroup>
+                <thead><tr><th><input type="checkbox" id="assetSelectAll" title="全选" /></th><th>项目名称</th><th>资产类型</th><th>资产名称</th><th>品牌</th><th>规格型号</th><th>序列号</th><th>版本</th><th>维保到期日</th><th>安装位置</th><th>机柜/U位</th><th>状态</th><th>责任人/部门</th><th>备注</th><th>操作</th></tr></thead>
                 <tbody id="assetTable"></tbody>
               </table>
               <div class="pagination-bar">
@@ -6957,19 +6997,19 @@
         return `
         <tr>
           <td style="text-align:center;"><input type="checkbox" class="asset-checkbox" data-id="${item.id}"${checked} /></td>
-          <td>${esc(formatProjectDisplayById(item.projectId))}</td>
-          <td>${esc(item.type)}</td>
-          <td>${esc(item.name)}</td>
+          <td title="${esc(formatProjectDisplayById(item.projectId))}">${esc(formatProjectDisplayById(item.projectId))}</td>
+          <td title="${esc(item.type || '')}">${esc(item.type)}</td>
+          <td title="${esc(item.name || '')}">${esc(item.name)}</td>
           <td>${esc(item.brand || '-')}</td>
-          <td>${esc(item.model || '-')}</td>
-          <td>${esc(item.serialNumber || '-')}</td>
+          <td title="${esc(item.model || '-')}">${esc(item.model || '-')}</td>
+          <td title="${esc(item.serialNumber || '-')}">${esc(item.serialNumber || '-')}</td>
           <td>${esc(item.version || '-')}</td>
-          <td>${esc(item.maintainExpiryDate || '-')}</td>
-          <td style="max-width:140px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;" title="${esc(item.installationLocation || '')}">${esc(item.installationLocation || '-')}</td>
-          <td style="max-width:140px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;" title="${esc(formatAssetRackLabel(item))}">${esc(formatAssetRackLabel(item))}</td>
+          <td title="${esc(item.maintainExpiryDate || '-')}">${esc(item.maintainExpiryDate || '-')}</td>
+          <td title="${esc(item.installationLocation || '')}">${esc(item.installationLocation || '-')}</td>
+          <td title="${esc(formatAssetRackLabel(item))}">${esc(formatAssetRackLabel(item))}</td>
           <td>${esc(item.status === '运行中' ? '使用中' : (item.status || '-'))}</td>
           <td>${esc(item.owner || '-')}</td>
-          <td style="max-width:100px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;" title="${esc(item.notes || '')}">${esc(item.notes || '')}</td>
+          <td title="${esc(item.notes || '')}">${esc(item.notes || '')}</td>
           <td><div class="toolbar" style="white-space:nowrap;">${canEditData() ? `<button class="secondary" data-action="edit-asset" data-id="${item.id}" type="button">修改</button><button class="secondary" data-action="detail-asset" data-id="${item.id}" type="button">详情</button><button class="secondary" data-action="delete-asset" data-id="${item.id}" type="button" style="background:#fee2e2;color:#dc2626;border-color:#fecaca;">删除</button>` : `<button class="secondary" data-action="detail-asset" data-id="${item.id}" type="button">详情</button>`}</div></td>
         </tr>
         `;
