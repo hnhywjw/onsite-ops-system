@@ -2466,6 +2466,11 @@
             <div id="cabinetLayoutMonitorHint" class="hidden" style="margin-bottom:10px;padding:8px 10px;border-radius:8px;background:#f1f5f9;color:#475569;font-size:12px;">监控数据采集中，页面会自动刷新</div>
             <div id="cabinetLayoutEmpty" class="hidden" style="padding:48px 16px;text-align:center;color:#9ca3af;">暂无资产</div>
             <div id="cabinetLayoutBoard" class="cabinet-layout-board"></div>
+            <div id="cabinetLayoutPager" class="pagination-bar hidden">
+              <button class="secondary" id="cabinetLayoutPrevBtn" type="button">上一页</button>
+              <span id="cabinetLayoutPageInfo">第 1 / 1 页</span>
+              <button class="secondary" id="cabinetLayoutNextBtn" type="button">下一页</button>
+            </div>
           </div>
         </div>
       </section>
@@ -6154,21 +6159,58 @@
       return wrap;
     }
 
+    let cabinetLayoutData = { cabinets: [], unassigned: [] };
+    let cabinetLayoutPage = 1;
+    let cabinetLayoutDataSignature = '';
+
     function renderCabinetLayout(data) {
       const board = document.getElementById('cabinetLayoutBoard');
       const empty = document.getElementById('cabinetLayoutEmpty');
       if (!board || !empty) return;
-      board.innerHTML = '';
-      const cabinets = data.cabinets || [];
-      const unassigned = data.unassigned || [];
+      cabinetLayoutData = { cabinets: data.cabinets || [], unassigned: data.unassigned || [] };
+      // 轮询刷新时数据通常不变，保留当前页，避免每 30 秒被拉回第 1 页。
+      const signature = cabinetLayoutData.cabinets.map(cabinet => `${cabinet.projectId}\u0000${cabinet.name}`).join('|');
+      if (signature !== cabinetLayoutDataSignature) {
+        cabinetLayoutDataSignature = signature;
+        cabinetLayoutPage = 1;
+      }
+      const { cabinets, unassigned } = cabinetLayoutData;
       if (!cabinets.length && !unassigned.length) {
-        empty.classList.remove('hidden');
+        board.innerHTML = '';
         board.classList.add('hidden');
+        empty.classList.remove('hidden');
+        document.getElementById('cabinetLayoutPager').classList.add('hidden');
         return;
       }
       empty.classList.add('hidden');
       board.classList.remove('hidden');
-      cabinets.forEach(cabinet => board.appendChild(renderCabinetRack(cabinet)));
+      renderCabinetLayoutPage();
+    }
+
+    // 每个机柜占固定宽度，按看板可用宽度计算单页能放几列，放不下就分页。
+    function cabinetLayoutPageSize() {
+      const board = document.getElementById('cabinetLayoutBoard');
+      const RACK_WIDTH = 200;
+      const UNASSIGNED_WIDTH = 220;
+      const GAP = 18;
+      const BOARD_PADDING = 8;
+      if (!board) return 1;
+      let usable = board.clientWidth - BOARD_PADDING;
+      if (cabinetLayoutData.unassigned.length) usable -= UNASSIGNED_WIDTH + GAP;
+      const slots = Math.floor((usable + GAP) / (RACK_WIDTH + GAP));
+      return Math.max(1, slots);
+    }
+
+    function renderCabinetLayoutPage() {
+      const board = document.getElementById('cabinetLayoutBoard');
+      if (!board) return;
+      const { cabinets, unassigned } = cabinetLayoutData;
+      const perPage = cabinetLayoutPageSize();
+      const totalPages = Math.max(1, Math.ceil(cabinets.length / perPage));
+      cabinetLayoutPage = Math.min(Math.max(1, cabinetLayoutPage), totalPages);
+      const start = (cabinetLayoutPage - 1) * perPage;
+      board.innerHTML = '';
+      cabinets.slice(start, start + perPage).forEach(cabinet => board.appendChild(renderCabinetRack(cabinet)));
       if (unassigned.length) {
         const col = document.createElement('div');
         col.className = 'cabinet-unassigned';
@@ -6185,7 +6227,17 @@
         });
         board.appendChild(col);
       }
+      const pager = document.getElementById('cabinetLayoutPager');
+      pager.classList.toggle('hidden', totalPages <= 1);
+      document.getElementById('cabinetLayoutPageInfo').textContent = `第 ${cabinetLayoutPage} / ${totalPages} 页`;
+      document.getElementById('cabinetLayoutPrevBtn').disabled = cabinetLayoutPage <= 1;
+      document.getElementById('cabinetLayoutNextBtn').disabled = cabinetLayoutPage >= totalPages;
       applyCabinetLayoutSearch();
+    }
+
+    function goCabinetLayoutPage(page) {
+      cabinetLayoutPage = page;
+      renderCabinetLayoutPage();
     }
 
     async function loadCabinetLayout() {
@@ -6254,6 +6306,18 @@
       const board = document.getElementById('cabinetLayoutBoard');
       if (!board) return;
       const query = String(input && input.value || '').trim().toLowerCase();
+      // 命中设备所在机柜可能不在当前页，先跳到该机柜所在页再高亮。
+      const perPage = cabinetLayoutPageSize();
+      const hitCabinetIndex = query
+        ? cabinetLayoutData.cabinets.findIndex(cabinet => (cabinet.devices || []).some(device => String(device.name || '').toLowerCase().includes(query)))
+        : -1;
+      if (hitCabinetIndex !== -1) {
+        const targetPage = Math.floor(hitCabinetIndex / perPage) + 1;
+        if (targetPage !== cabinetLayoutPage) {
+          goCabinetLayoutPage(targetPage);
+          return;
+        }
+      }
       const nodes = board.querySelectorAll('.cabinet-device, .cabinet-unassigned-item');
       let firstHit = null;
       nodes.forEach(node => {
@@ -6829,6 +6893,20 @@
     });
     document.getElementById('cabinetLayoutBatchBtn').addEventListener('click', () => openCabinetLayoutBatchModal());
     document.getElementById('cabinetLayoutBatchSaveBtn').addEventListener('click', () => saveCabinetLayoutBatch());
+    document.getElementById('cabinetLayoutPrevBtn').addEventListener('click', () => goCabinetLayoutPage(cabinetLayoutPage - 1));
+    document.getElementById('cabinetLayoutNextBtn').addEventListener('click', () => goCabinetLayoutPage(cabinetLayoutPage + 1));
+    // 窗口尺寸变化会改变单页可放机柜数量，重算并保持当前页在有效范围内。
+    let cabinetLayoutResizeTimer = null;
+    window.addEventListener('resize', () => {
+      if (cabinetLayoutResizeTimer) return;
+      cabinetLayoutResizeTimer = setTimeout(() => {
+        cabinetLayoutResizeTimer = null;
+        const panel = document.querySelector('.subtab-panel[data-section="assets"][data-subtab="cabinetLayout"]');
+        if (!panel || panel.classList.contains('hidden')) return;
+        if (!cabinetLayoutData.cabinets.length && !cabinetLayoutData.unassigned.length) return;
+        renderCabinetLayoutPage();
+      }, 250);
+    });
     document.getElementById('topoAddRelBtn').addEventListener('click', async () => {
       state.topoEditRelId = null;
       document.querySelector('#assetRelationModal h3').textContent = '添加资产连接关系';
