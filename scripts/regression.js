@@ -2166,6 +2166,28 @@ async function main() {
   const cleanupTemplate = await request(`/api/ai-inspection/templates/${xssTemplate.data.id}`, { method: 'DELETE', headers: { cookie } });
   assert(cleanupTemplate.status === 200, '创建者应能删除自己创建的巡检模板');
 
+  // 导入数据中的非法 ID 必须被拒绝，避免可注入 HTML 属性的 ID 进入前端渲染
+  const unsafeImport = await request('/api/system/import', {
+    method: 'POST',
+    headers: { cookie, 'Content-Type': 'application/json' },
+    body: JSON.stringify({ users: [{ id: 'x" onmouseover="alert(1)', username: 'x' }], password: 'Admin123!' })
+  });
+  assert(unsafeImport.status === 400, '导入包含非法 ID 的数据应返回 400');
+
+  // 巡检对象管理地址与端口需要在创建时就校验
+  const badAddressTarget = await request('/api/ai-inspection/targets', {
+    method: 'POST',
+    headers: { cookie, 'Content-Type': 'application/json' },
+    body: JSON.stringify({ projectId, name: `非法地址-${Date.now()}`, address: '10.0.0.1:x', protocol: 'winrm', port: 5985, authType: 'password', account: 'a', password: 'b' })
+  });
+  assert(badAddressTarget.status === 400, '非法巡检管理地址应返回 400');
+  const badPortTarget = await request('/api/ai-inspection/targets', {
+    method: 'POST',
+    headers: { cookie, 'Content-Type': 'application/json' },
+    body: JSON.stringify({ projectId, name: `非法端口-${Date.now()}`, address: '10.0.0.1', protocol: 'winrm', port: 99999, authType: 'password', account: 'a', password: 'b' })
+  });
+  assert(badPortTarget.status === 400, '非法巡检端口应返回 400');
+
   process.stdout.write('Regression passed\n');
 }
 

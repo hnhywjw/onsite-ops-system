@@ -3933,6 +3933,12 @@
       }
     }
 
+    function stopAllBackgroundPolling() {
+      if (cabinetMonitorTimer) { clearInterval(cabinetMonitorTimer); cabinetMonitorTimer = null; }
+      if (topoMonitorTimer) { clearInterval(topoMonitorTimer); topoMonitorTimer = null; }
+      if (state.systemTimeDisplayTimer) { clearInterval(state.systemTimeDisplayTimer); state.systemTimeDisplayTimer = null; }
+    }
+
     function showLoginView() {
       wsManualClose = true;
       if (wsConnection) { wsConnection.close(); wsConnection = null; }
@@ -3940,6 +3946,7 @@
       if (wsDeferredRefreshTimer) { clearTimeout(wsDeferredRefreshTimer); wsDeferredRefreshTimer = null; }
       stopSystemLoadAutoRefresh();
       stopIdleLogoutTracking();
+      stopAllBackgroundPolling();
       els.loginView.classList.remove('hidden');
       els.appView.classList.add('hidden');
       refreshCaptcha();
@@ -10170,23 +10177,21 @@
       state.workReportListPage = Math.min(totalPages, state.workReportListPage + 1);
       renderWorkReportList();
     });
-    document.getElementById('workReportFilterType').addEventListener('change', async () => {
-      await refreshWorkReportList();
-      if (state.user?.role === 'admin') await refreshWorkReportOverview();
-    });
-    document.getElementById('workReportFilterStatus').addEventListener('change', async () => {
-      await refreshWorkReportList();
-      if (state.user?.role === 'admin') await refreshWorkReportOverview();
-    });
+    async function handleWorkReportFilterChange() {
+      try {
+        await refreshWorkReportList();
+        if (state.user?.role === 'admin') await refreshWorkReportOverview();
+      } catch (error) {
+        showGlobalError(error.message || '加载工作汇报失败');
+      }
+    }
+    document.getElementById('workReportFilterType').addEventListener('change', handleWorkReportFilterChange);
+    document.getElementById('workReportFilterStatus').addEventListener('change', handleWorkReportFilterChange);
     document.getElementById('workReportFilterProject').addEventListener('change', async () => {
       fillWorkReportFilterUserSelect();
-      await refreshWorkReportList();
-      if (state.user?.role === 'admin') await refreshWorkReportOverview();
+      await handleWorkReportFilterChange();
     });
-    document.getElementById('workReportFilterUser').addEventListener('change', async () => {
-      await refreshWorkReportList();
-      if (state.user?.role === 'admin') await refreshWorkReportOverview();
-    });
+    document.getElementById('workReportFilterUser').addEventListener('change', handleWorkReportFilterChange);
     document.getElementById('saveWorkReportBtn').addEventListener('click', async () => {
       try {
         await saveWorkReport(false);
@@ -11045,7 +11050,7 @@
           openTabWithSubtab('aiInspection', 'reports');
         }
       } catch (error) {
-        setMessage('aiInspectionReportTable', error.message, 'error');
+        setMessage('aiInspectionResultMessage', error.message, 'error');
       }
     });
 
@@ -11188,6 +11193,8 @@
       button.textContent = '刷新中...';
       try {
         await loadBaseData();
+      } catch (error) {
+        showGlobalError(error.message || '刷新仪表板失败');
       } finally {
         button.disabled = false;
         button.textContent = originalText;

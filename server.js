@@ -286,6 +286,9 @@ function verifyPassword(password, storedHash) {
   return crypto.timingSafeEqual(Buffer.from(legacyHash), Buffer.from(storedHash));
 }
 
+// 用于账号不存在时执行等价的哈希校验，避免通过响应耗时枚举有效用户名。
+const LOGIN_DUMMY_PASSWORD_HASH = hash('monkeycode-login-timing-guard');
+
 function encryptLoginPassword(plaintext, accessPassword) {
   if (!plaintext || !accessPassword) return '';
   const salt = crypto.randomBytes(16);
@@ -3194,6 +3197,29 @@ async function writeDb(db, options = {}) {
   } finally {
     releaseLock();
   }
+}
+
+// 导入/恢复快照时校验集合内 ID 字符集，避免可注入 HTML 属性的 ID 进入前端渲染。
+const SAFE_RECORD_ID_PATTERN = /^[A-Za-z0-9][A-Za-z0-9_.:-]{0,63}$/;
+function findUnsafeSnapshotId(snapshot) {
+  if (!snapshot || typeof snapshot !== 'object') return '';
+  for (const key of dbCollectionKeys) {
+    const list = snapshot[key];
+    if (!Array.isArray(list)) continue;
+    for (const item of list) {
+      if (!item || typeof item !== 'object') continue;
+      if (item.id !== undefined && !SAFE_RECORD_ID_PATTERN.test(String(item.id))) {
+        return `集合 ${key} 中存在非法 ID`;
+      }
+    }
+  }
+  return '';
+}
+
+// 解析 multipart/form-data 的 boundary，兼容引号包裹与后续参数（如 charset）。
+function parseMultipartBoundary(contentType) {
+  const match = /boundary=(?:"([^"]+)"|([^;\s]+))/i.exec(String(contentType || ''));
+  return match ? (match[1] || match[2] || '') : '';
 }
 
 async function runAiInspectionScheduler() {
@@ -6803,7 +6829,8 @@ const requestHandler = async (req, res) => {
         return json(res, 401, { message: '验证码错误' });
       }
       const user = db.users.find(item => item.username === username);
-      if (!user || !verifyPassword(body.password, user.passwordHash)) {
+      const passwordMatches = verifyPassword(body.password, user ? user.passwordHash : LOGIN_DUMMY_PASSWORD_HASH);
+      if (!user || !passwordMatches) {
         const failedState = registerLoginFailure(db, req, username);
         await writeDb(db, { silent: true });
         if (failedState.lockedUntil > nowMs()) {
@@ -8167,7 +8194,7 @@ const requestHandler = async (req, res) => {
       if (!contentType.includes('multipart/form-data')) {
         return json(res, 400, { message: '请使用 multipart/form-data 提交资料' });
       }
-      const boundary = contentType.split('boundary=')[1];
+      const boundary = parseMultipartBoundary(contentType);
       if (!boundary) return json(res, 400, { message: '无效的上传格式' });
       const rawBody = await new Promise((resolve, reject) => {
         const chunks = [];
@@ -8241,7 +8268,7 @@ const requestHandler = async (req, res) => {
       if (!canDeleteOwnedRecord(user, target, target.createdBy || '')) return json(res, 403, { message: '仅支持修改自己创建的资料' });
       const contentType = req.headers['content-type'] || '';
       if (contentType.includes('multipart/form-data')) {
-        const boundary = contentType.split('boundary=')[1];
+        const boundary = parseMultipartBoundary(contentType);
         if (!boundary) return json(res, 400, { message: '无效的上传格式' });
         const rawBody = await new Promise((resolve, reject) => {
           const chunks = [];
@@ -9041,6 +9068,10 @@ const requestHandler = async (req, res) => {
       const asset = requireExistingAsset(body.assetId || '', db);
       if (body.assetId && (!asset || asset.projectId !== projectId)) return json(res, 400, { message: '关联资产不存在或归属不一致' });
       if (!String(body.name || '').trim() || !String(body.address || '').trim()) return json(res, 400, { message: '巡检对象名称和管理地址不能为空' });
+      if (!validateHost(String(body.address || '').trim())) return json(res, 400, { message: '管理地址格式无效，请填写 IP 或主机名' });
+      if (body.port !== undefined && body.port !== '' && body.port !== null && Number(body.port) !== 0 && !validatePort(body.port)) {
+        return json(res, 400, { message: '管理端口需为 1-65535 之间的整数' });
+      }
       const category = ['network', 'security'].includes(body.category) ? body.category : 'server';
       const protocol = normalizeAiInspectionProtocol(body.protocol, category);
       const authType = normalizeAiInspectionAuthType(body.authType, protocol);
@@ -9130,13 +9161,19 @@ const requestHandler = async (req, res) => {
       if (body.name !== undefined) target.name = String(body.name || '').trim();
       if (body.category !== undefined) target.category = ['network', 'security'].includes(body.category) ? body.category : 'server';
       if (body.address !== undefined || body.managementAddress !== undefined) {
-        target.address = String(body.address || body.managementAddress || '').trim();
+        const nextAddress = String(body.address || body.managementAddress || '').trim();
+        if (nextAddress && !validateHost(nextAddress)) return json(res, 400, { message: '管理地址格式无效，请填写 IP 或主机名' });
+        target.address = nextAddress;
       }
       if (body.protocol !== undefined) {
         target.protocol = normalizeAiInspectionProtocol(body.protocol, target.category);
       }
       if (body.port !== undefined || body.managementPort !== undefined) {
-        target.port = Number(body.port ?? body.managementPort ?? 0);
+        const nextPort = body.port ?? body.managementPort ?? 0;
+        if (nextPort !== '' && nextPort !== null && Number(nextPort) !== 0 && !validatePort(nextPort)) {
+          return json(res, 400, { message: '管理端口需为 1-65535 之间的整数' });
+        }
+        target.port = Number(nextPort || 0);
       }
       if (body.authType !== undefined) {
         target.authType = normalizeAiInspectionAuthType(body.authType, target.protocol);
@@ -10077,7 +10114,7 @@ const requestHandler = async (req, res) => {
       if (!contentType.includes('multipart/form-data')) {
         return json(res, 400, { message: '请上传证书和私钥文件' });
       }
-      const boundary = contentType.split('boundary=')[1];
+      const boundary = parseMultipartBoundary(contentType);
       if (!boundary) return json(res, 400, { message: '无效的上传格式' });
       const rawBody = await new Promise((resolve, reject) => {
         const chunks = [];
@@ -10147,6 +10184,10 @@ const requestHandler = async (req, res) => {
       }
       if (body.users.length > importUserLimit) {
         return json(res, 400, { message: `导入用户数量不能超过 ${importUserLimit}` });
+      }
+      const unsafeImportId = findUnsafeSnapshotId(body);
+      if (unsafeImportId) {
+        return json(res, 400, { message: `导入数据校验失败：${unsafeImportId}` });
       }
       for (const key of dbCollectionKeys) {
         if (Array.isArray(body[key]) && body[key].length > importCollectionLimit) {
@@ -10257,6 +10298,10 @@ const requestHandler = async (req, res) => {
         if (Array.isArray(snapshot[key]) && snapshot[key].length > importCollectionLimit) {
           return json(res, 400, { message: `导入的 ${key} 数据量超过上限 ${importCollectionLimit}` });
         }
+      }
+      const unsafeRestoreId = findUnsafeSnapshotId(snapshot);
+      if (unsafeRestoreId) {
+        return json(res, 400, { message: `备份数据校验失败：${unsafeRestoreId}` });
       }
       const sessionToken = getSessionToken(req);
       const currentSession = (db.sessions || []).find(item => item.token === sessionToken) || null;
@@ -10459,7 +10504,7 @@ const requestHandler = async (req, res) => {
       if (!contentType.includes('multipart/form-data')) {
         return rejectUpgradeUpload(res, db, user, '', '请上传升级包文件（tar.gz 格式）');
       }
-      const boundary = contentType.split('boundary=')[1];
+      const boundary = parseMultipartBoundary(contentType);
       if (!boundary) return rejectUpgradeUpload(res, db, user, '', '无效的上传格式');
       const rawBody = await new Promise((resolve, reject) => {
         const chunks = [];
