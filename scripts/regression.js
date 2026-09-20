@@ -1543,6 +1543,25 @@ async function main() {
   assert(backupPlanDelete.status === 200, '删除配置备份计划失败');
   const backupTargetDelete = await request(`/api/ai-inspection/targets/${backupTarget.data.id}`, { method: 'DELETE', headers: { cookie } });
   assert(backupTargetDelete.status === 200, '删除配置备份巡检对象失败');
+
+  // 出站 Web 备份必须拒绝与巡检对象地址不一致的绝对 URL，防止绕过目标校验访问其他主机
+  const ssrfTarget = await request('/api/ai-inspection/targets', {
+    method: 'POST',
+    headers: { cookie, 'Content-Type': 'application/json' },
+    body: JSON.stringify({ projectId, assetId, name: '回归出站校验对象', category: 'server', address: '127.0.0.1', protocol: 'http', port: 3000, authType: 'token', accessToken: 'ssrf-token', systemVersion: 'RegressionOS', location: '机房A', backupMode: 'web', webBackupPath: 'http://169.254.169.254/latest/meta-data/', webBackupMethod: 'GET' })
+  });
+  assert(ssrfTarget.status === 201, '创建出站校验巡检对象失败');
+  const ssrfPlan = await request('/api/ai-inspection/config-backup/plans', {
+    method: 'POST',
+    headers: { cookie, 'Content-Type': 'application/json' },
+    body: JSON.stringify({ targetId: ssrfTarget.data.id, name: '回归出站校验计划', cycle: 'daily', executedAt: '2099-06-19T14:00' })
+  });
+  assert(ssrfPlan.status === 201, '创建出站校验计划失败');
+  const ssrfExecute = await request(`/api/ai-inspection/config-backup/plans/${ssrfPlan.data.id}/execute`, { method: 'POST', headers: { cookie, 'Content-Type': 'application/json' }, body: '{}' });
+  assert(ssrfExecute.status === 200 && ssrfExecute.data.record?.status === '失败' && String(ssrfExecute.data.record?.message || '').includes('一致'), 'Web 备份应拒绝与巡检对象地址不一致的绝对 URL');
+  await request(`/api/ai-inspection/config-backup/plans/${ssrfPlan.data.id}`, { method: 'DELETE', headers: { cookie } });
+  await request(`/api/ai-inspection/targets/${ssrfTarget.data.id}`, { method: 'DELETE', headers: { cookie } });
+
   const aiReportHtmlGetDenied = await request(`/api/reports/ai-inspection/results/${encodeURIComponent(aiTask.data.result.id)}/html`, { headers: { cookie } });
   assert(aiReportHtmlGetDenied.status !== 200, 'AI 巡检 HTML 报告不应允许 GET');
   const aiReportHtml = await request(`/api/reports/ai-inspection/results/${encodeURIComponent(aiTask.data.result.id)}/html`, {

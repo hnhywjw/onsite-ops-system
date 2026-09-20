@@ -1972,6 +1972,8 @@ function isBlockedSsrfIp(ip) {
     const normalized = ip.toLowerCase();
     return normalized === '::1'
       || normalized === '::'
+      || normalized.startsWith('fc')
+      || normalized.startsWith('fd')
       || normalized.startsWith('fe80:')
       || normalized.startsWith('ff')
       || normalized.startsWith('2001:db8:')
@@ -1980,15 +1982,61 @@ function isBlockedSsrfIp(ip) {
   return true;
 }
 
-async function assertPublicHttpTarget(url, expectedHost) {
+// 出站请求前的目标校验：仅允许 HTTP/HTTPS、禁止内嵌凭据、要求地址与巡检对象一致，
+// 并封禁回环、链路本地/云元数据、组播、保留段与 IPv6 ULA 等特殊地址。
+// 返回已校验的 DNS 解析结果，供连接阶段固定使用，避免校验后再解析导致的 rebinding。
+async function resolveValidatedHttpTarget(url, expectedHost) {
   if (!['http:', 'https:'].includes(url.protocol)) throw new Error('仅允许 HTTP/HTTPS 地址');
   if (url.username || url.password) throw new Error('备份地址禁止包含用户名或密码');
   if (url.hostname !== expectedHost) throw new Error('Web 备份地址必须与巡检对象地址一致');
-  const records = net.isIP(url.hostname) ? [{ address: url.hostname }] : await dns.lookup(url.hostname, { all: true });
+  const literalFamily = net.isIP(url.hostname);
+  const records = literalFamily ? [{ address: url.hostname, family: literalFamily }] : await dns.lookup(url.hostname, { all: true });
   const allowLocalTestTarget = !isProduction && ['127.0.0.1', 'localhost'].includes(url.hostname);
   if (!allowLocalTestTarget && (!records.length || records.some(record => isBlockedSsrfIp(record.address)))) {
     throw new Error('Web 备份地址指向受限网络');
   }
+  return records[0];
+}
+
+function pinnedLookup(pinned) {
+  return (hostname, options, callback) => {
+    const done = typeof options === 'function' ? options : callback;
+    if (typeof done === 'function') done(null, pinned.address, pinned.family);
+  };
+}
+
+// 使用已固定的解析结果发起请求，不自动跟随重定向，并按上限截断响应体。
+function requestPinnedUrl(url, pinned, options = {}) {
+  return new Promise((resolve, reject) => {
+    const isHttps = url.protocol === 'https:';
+    const transport = isHttps ? https : http;
+    const maxBytes = options.maxBytes || 1024 * 1024;
+    const req = transport.request({
+      hostname: url.hostname,
+      port: url.port || (isHttps ? 443 : 80),
+      path: `${url.pathname}${url.search}`,
+      method: options.method || 'GET',
+      headers: options.headers || {},
+      lookup: pinnedLookup(pinned),
+      timeout: options.timeoutMs || 10000
+    }, res => {
+      const chunks = [];
+      let size = 0;
+      res.on('data', chunk => {
+        size += chunk.length;
+        if (size > maxBytes) {
+          req.destroy(new Error('response too large'));
+          return;
+        }
+        chunks.push(chunk);
+      });
+      res.on('end', () => resolve({ status: res.statusCode, headers: res.headers || {}, text: Buffer.concat(chunks).toString('utf8') }));
+      res.on('error', reject);
+    });
+    req.on('timeout', () => req.destroy(new Error('request timeout')));
+    req.on('error', reject);
+    req.end();
+  });
 }
 
 function probeHostReachable(host) {
@@ -4455,29 +4503,30 @@ async function fetchWebBackup(target, accessToken) {
   const pathPart = String(target.webBackupPath || '').trim();
   if (!pathPart) return { success: false, content: '', stderr: 'Web backup path is empty' };
   let url;
+  let pinned;
   try {
     url = /^https?:\/\//i.test(pathPart) ? new URL(pathPart) : new URL(`${scheme}://${target.address}${port}${pathPart.startsWith('/') ? pathPart : '/' + pathPart}`);
-    await assertPublicHttpTarget(url, target.address);
+    pinned = await resolveValidatedHttpTarget(url, target.address);
   } catch (error) {
     return { success: false, content: '', stderr: error.message };
   }
   const headers = accessToken ? { Authorization: `Bearer ${accessToken}` } : {};
-  const controller = new AbortController();
-  const timer = setTimeout(() => controller.abort(), 10000);
   try {
-    const response = await fetch(url, { method: target.webBackupMethod || 'GET', headers, redirect: 'manual', signal: controller.signal });
-    const length = Number(response.headers.get('content-length') || 0);
+    const response = await requestPinnedUrl(url, pinned, {
+      method: target.webBackupMethod || 'GET',
+      headers,
+      timeoutMs: 10000,
+      maxBytes: 1024 * 1024
+    });
+    const length = Number(response.headers['content-length'] || 0);
     if (length > 1024 * 1024) return { success: false, content: '', stderr: 'Web backup response is too large' };
-    const contentType = response.headers.get('content-type') || '';
+    const contentType = response.headers['content-type'] || '';
     if (contentType && !/text|json|xml|octet-stream/i.test(contentType)) return { success: false, content: '', stderr: 'Unsupported content type' };
-    const content = await response.text();
-    if (content.length > 1024 * 1024) return { success: false, content: '', stderr: 'Web backup response is too large' };
-    if (!response.ok) return { success: false, content: '', stderr: `HTTP ${response.status}` };
-    return { success: true, content, stderr: '' };
+    if (response.status < 200 || response.status >= 300) return { success: false, content: '', stderr: `HTTP ${response.status}` };
+    if (response.text.length > 1024 * 1024) return { success: false, content: '', stderr: 'Web backup response is too large' };
+    return { success: true, content: response.text, stderr: '' };
   } catch (error) {
     return { success: false, content: '', stderr: error.message };
-  } finally {
-    clearTimeout(timer);
   }
 }
 
