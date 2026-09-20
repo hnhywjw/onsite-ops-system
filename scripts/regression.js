@@ -1,3 +1,4 @@
+const http = require('http');
 const https = require('https');
 const crypto = require('crypto');
 const fs = require('fs');
@@ -189,10 +190,13 @@ async function login(username, password, options = {}) {
 }
 
 async function updateSystemSettings(cookie, payload) {
+  const sensitiveKeys = ['httpsLoginEnabled', 'httpLoginDisabled', 'allowRegistration', 'loginRateLimitMaxAttempts', 'loginRateLimitWindowMinutes', 'loginRateLimitLockMinutes'];
+  const needsStepUp = sensitiveKeys.some(key => payload[key] !== undefined);
+  const body = needsStepUp && payload.password === undefined ? { ...payload, password: 'Admin123!' } : payload;
   return request('/api/system/settings', {
     method: 'POST',
     headers: { cookie, 'Content-Type': 'application/json' },
-    body: JSON.stringify(payload)
+    body: JSON.stringify(body)
   });
 }
 
@@ -404,6 +408,7 @@ async function main() {
   const httpsUploadForm = new FormData();
   httpsUploadForm.append('cert', new Blob([httpsTestCert], { type: 'application/x-pem-file' }), 'https-test-cert.pem');
   httpsUploadForm.append('key', new Blob([httpsTestKey], { type: 'application/x-pem-file' }), 'https-test-key.pem');
+  httpsUploadForm.append('password', 'Admin123!');
   const httpsUpload = await fetch(base + '/api/system/https/certificate', { method: 'POST', headers: withCsrf({ cookie }, 'POST'), body: httpsUploadForm });
   const httpsUploadData = await httpsUpload.json();
   assert(httpsUpload.status === 200, '上传 HTTPS 证书失败');
@@ -2102,6 +2107,64 @@ async function main() {
   const imported = (importedList.data.data || []).find(item => item.name === importOkName);
   assert(imported && imported.monitorEnabled && imported.monitorHost === '10.255.255.252' && imported.cabinetName === '导入01号机柜', '导入监测与机柜字段未落地');
   if (imported) await request(`/api/assets/${imported.id}`, { method: 'DELETE', headers: { cookie } });
+
+  // 畸形 URL 编码不能再让请求挂死，应快速返回 400
+  const malformedTarget = new URL(base);
+  const malformedStatus = await new Promise((resolve, reject) => {
+    const req = http.request({ hostname: malformedTarget.hostname, port: malformedTarget.port || 80, path: '/%', method: 'GET' }, res => {
+      res.resume();
+      resolve(res.statusCode);
+    });
+    req.on('error', reject);
+    req.end();
+  });
+  assert(malformedStatus === 400, `畸形 URL 应返回 400，实际 ${malformedStatus}`);
+
+  // 登录安全设置与证书上传需要管理员二次验证
+  const settingsNoPassword = await request('/api/system/settings', {
+    method: 'POST',
+    headers: { cookie, 'Content-Type': 'application/json' },
+    body: JSON.stringify({ httpsLoginEnabled: false })
+  });
+  assert(settingsNoPassword.status === 401, '缺少管理员密码时修改登录安全设置应被拒绝');
+  const settingsWrongPassword = await request('/api/system/settings', {
+    method: 'POST',
+    headers: { cookie, 'Content-Type': 'application/json' },
+    body: JSON.stringify({ httpsLoginEnabled: false, password: 'wrong-password' })
+  });
+  assert(settingsWrongPassword.status === 401, '管理员密码错误时修改登录安全设置应被拒绝');
+  const certUploadNoPassword = new FormData();
+  certUploadNoPassword.append('cert', new Blob([httpsTestCert], { type: 'application/x-pem-file' }), 'https-nopass-cert.pem');
+  certUploadNoPassword.append('key', new Blob([httpsTestKey], { type: 'application/x-pem-file' }), 'https-nopass-key.pem');
+  const certUploadNoPasswordRes = await fetch(base + '/api/system/https/certificate', { method: 'POST', headers: withCsrf({ cookie }, 'POST'), body: certUploadNoPassword });
+  assert(certUploadNoPasswordRes.status === 401, '缺少管理员密码时上传 HTTPS 证书应被拒绝');
+
+  // 巡检模板指标必须净化尖括号，且非创建者不能修改/删除
+  const xssTemplateName = `XSS净化模板-${Date.now()}`;
+  const xssTemplate = await request('/api/ai-inspection/templates', {
+    method: 'POST',
+    headers: { cookie, 'Content-Type': 'application/json' },
+    body: JSON.stringify({
+      name: xssTemplateName,
+      category: 'server',
+      metrics: [{ key: 'cpuUsage', label: '<img src=x>', unit: '<img src=x onerror=alert(1)>', description: '<script>alert(1)</script>' }]
+    })
+  });
+  assert(xssTemplate.status === 201, `创建巡检模板失败: ${JSON.stringify(xssTemplate.data)}`);
+  assert(!/[<>]/.test(JSON.stringify(xssTemplate.data.metrics || [])), '巡检模板指标应净化尖括号字符');
+  const crossUserPut = await request(`/api/ai-inspection/templates/${xssTemplate.data.id}`, {
+    method: 'PUT',
+    headers: { cookie: engineerRelogin.cookie, 'Content-Type': 'application/json' },
+    body: JSON.stringify({ name: '越权改名' })
+  });
+  assert(crossUserPut.status === 403, '工程师不应能修改他人创建的巡检模板');
+  const crossUserDelete = await request(`/api/ai-inspection/templates/${xssTemplate.data.id}`, {
+    method: 'DELETE',
+    headers: { cookie: engineerRelogin.cookie }
+  });
+  assert(crossUserDelete.status === 403, '工程师不应能删除他人创建的巡检模板');
+  const cleanupTemplate = await request(`/api/ai-inspection/templates/${xssTemplate.data.id}`, { method: 'DELETE', headers: { cookie } });
+  assert(cleanupTemplate.status === 200, '创建者应能删除自己创建的巡检模板');
 
   process.stdout.write('Regression passed\n');
 }

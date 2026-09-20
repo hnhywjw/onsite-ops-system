@@ -1237,29 +1237,39 @@ function getDefaultAiInspectionTemplates() {
   ];
 }
 
+// 指标文本会进入 HTML 报表、PPTX(XML) 与 CSV，统一去除可破坏标记的字符并限制长度。
+function sanitizeMetricText(value, fallback, maxLength) {
+  const text = String(value ?? '')
+    .replace(/[\u0000-\u001f\u007f]/g, ' ')
+    .replace(/[<>]/g, '')
+    .trim();
+  if (!text) return fallback;
+  return text.slice(0, maxLength);
+}
+
 function normalizeAiInspectionMetrics(metrics, category = 'server') {
   const fallback = getAiMetricCatalog(category);
   const source = Array.isArray(metrics) && metrics.length ? metrics : fallback;
   return source.map((item, index) => ({
     key: item.key || `metric_${index + 1}`,
-    label: item.label || `指标${index + 1}`,
-    unit: item.unit || '',
+    label: sanitizeMetricText(item.label, `指标${index + 1}`, 60),
+    unit: sanitizeMetricText(item.unit, '', 24),
     warn: Number(item.warn || 0),
     critical: Number(item.critical || 0),
     direction: item.direction === 'low' ? 'low' : 'high',
-    description: item.description || ''
+    description: sanitizeMetricText(item.description, '', 200)
   }));
 }
 
 function normalizeAiInspectionValues(metrics) {
   return (Array.isArray(metrics) ? metrics : []).map((item, index) => ({
     key: item.key || `metric_${index + 1}`,
-    label: item.label || `指标${index + 1}`,
-    unit: item.unit || '',
+    label: sanitizeMetricText(item.label, `指标${index + 1}`, 60),
+    unit: sanitizeMetricText(item.unit, '', 24),
     warn: Number(item.warn || 0),
     critical: Number(item.critical || 0),
     direction: item.direction === 'low' ? 'low' : 'high',
-    description: item.description || '',
+    description: sanitizeMetricText(item.description, '', 200),
     value: item.value === '' || item.value === null || item.value === undefined ? '' : Number(item.value)
   }));
 }
@@ -5287,7 +5297,7 @@ function buildWorkloadCsv(rows) {
       item.documentCount || 0,
       item.dailySubmittedCount ?? 0,
       item.submittedWorkReportCount ?? 0
-    ].map(value => `"${String(value ?? '').replace(/"/g, '""')}"`).join(','));
+    ].map(quoteCsvValue).join(','));
   });
   return `\ufeff${lines.join('\n')}`;
 }
@@ -5326,7 +5336,10 @@ function buildWorkReportResponse(db, report) {
 }
 
 function quoteCsvValue(value) {
-  return `"${String(value ?? '').replace(/"/g, '""')}"`;
+  let text = String(value ?? '');
+  // 中和电子表格公式注入：以 = + - @ 或制表符/回车开头的值前置单引号
+  if (/^[=+\-@\t\r]/.test(text)) text = `'${text}`;
+  return `"${text.replace(/"/g, '""')}"`;
 }
 
 function listScopedWorkReports(db, user, filters = {}) {
@@ -6210,10 +6223,6 @@ function buildOperationalReportHtml(db, scope, targetId, period) {
 </html>`;
 }
 
-function toCsvCell(value) {
-  return `"${String(value ?? '').replace(/"/g, '""')}"`;
-}
-
 function buildInspectionExecutionCsv(db, projectId, period) {
   const project = db.projects.find(item => item.id === projectId);
   if (!project) return null;
@@ -6236,9 +6245,9 @@ function buildInspectionExecutionCsv(db, projectId, period) {
       item.issue || '',
       item.suggestion || '',
       attachmentName
-    ].map(toCsvCell).join(',');
+    ].map(quoteCsvValue).join(',');
   });
-  const header = ['执行时间', '计划名称', '关联资产', '执行人', '巡检结果', '下次巡检日', '异常说明', '整改建议', '附件名称'].map(toCsvCell).join(',');
+  const header = ['执行时间', '计划名称', '关联资产', '执行人', '巡检结果', '下次巡检日', '异常说明', '整改建议', '附件名称'].map(quoteCsvValue).join(',');
   return `\uFEFF${[header, ...rows].join('\n')}`;
 }
 
@@ -6395,7 +6404,7 @@ function buildAiInspectionResultHtml(db, resultId, viewer) {
     const status = item.status;
     const hasRealData = hasReal(item);
     const valueDisplay = hasRealData
-      ? `${Number(result.realData[item.label])}${item.unit || ''}（实测）`
+      ? `${Number(result.realData[item.label])}${escapeHtml(item.unit || '')}（实测）`
       : '-';
     const displayStatus = hasRealData ? status : '状态未知';
     const color = hasRealData ? statusColor(status) : '#94a3b8';
@@ -6404,7 +6413,7 @@ function buildAiInspectionResultHtml(db, resultId, viewer) {
   }).join('') || '<tr><td colspan="8">暂无指标</td></tr>';
   const abnormalRows = (result.abnormalItems || []).map(item => `<li>${escapeHtml(hideNetwork ? redactNetworkDetails(item) : item)}</li>`).join('') || '<li>本次巡检未发现异常项</li>';
   const templateMetricText = templateMetrics.length
-    ? templateMetrics.map(m => `${escapeHtml(m.label)}（阈值: ${m.warn ?? '-'}/${m.critical ?? '-'} ${m.unit || ''}，${m.direction === 'low' ? '越低越好' : m.direction === 'high' ? '越高越好' : '无方向'}）`).join('<br />')
+    ? templateMetrics.map(m => `${escapeHtml(m.label)}（阈值: ${m.warn ?? '-'}/${m.critical ?? '-'} ${escapeHtml(m.unit || '')}，${m.direction === 'low' ? '越低越好' : m.direction === 'high' ? '越高越好' : '无方向'}）`).join('<br />')
     : '无模板指标';
   const realDataCount = Object.keys(result.realData || {}).filter(k => result.realData[k] !== undefined).length;
   const realDataNote = realDataCount > 0
@@ -6731,8 +6740,14 @@ function serveStatic(req, res, pathname) {
 }
 
 const requestHandler = async (req, res) => {
-  const reqUrl = new URL(req.url, 'http://localhost');
-  const pathname = decodeURIComponent(reqUrl.pathname);
+  let pathname;
+  let reqUrl;
+  try {
+    reqUrl = new URL(req.url, 'http://localhost');
+    pathname = decodeURIComponent(reqUrl.pathname);
+  } catch (_) {
+    return text(res, 400, 'Bad Request');
+  }
   if (pathname === '/ws') return;
   try {
     if (req.method === 'GET' && pathname === '/api/health') {
@@ -9221,6 +9236,9 @@ const requestHandler = async (req, res) => {
       if (index === -1) return json(res, 404, { message: '巡检模板不存在' });
       const target = db.aiInspectionTemplates[index];
       if (target.createdBy === 'system') return json(res, 400, { message: '内置模板不支持删除' });
+      if (user.role !== 'admin' && target.createdBy !== user.id) {
+        return json(res, 403, { message: '仅支持删除自己创建的巡检模板' });
+      }
       const relatedTasks = (db.aiInspectionTasks || []).filter(item => item.templateId === templateId);
       if (relatedTasks.length) {
         return json(res, 400, { message: `该模板有 ${relatedTasks.length} 个关联任务，请先删除或迁移关联任务后再删除模板` });
@@ -9238,6 +9256,9 @@ const requestHandler = async (req, res) => {
       const index = (db.aiInspectionTemplates || []).findIndex(item => item.id === templateId);
       if (index === -1) return json(res, 404, { message: '巡检模板不存在' });
       const target = db.aiInspectionTemplates[index];
+      if (user.role !== 'admin' && target.createdBy !== user.id) {
+        return json(res, 403, { message: '仅支持修改自己创建的巡检模板' });
+      }
       const body = await readBody(req);
       if (body.name !== undefined) target.name = String(body.name || '').trim();
       if (body.category !== undefined) target.category = body.category;
@@ -10036,6 +10057,11 @@ const requestHandler = async (req, res) => {
       for (const key of allowedKeys) {
         if (body[key] !== undefined) safeBody[key] = body[key];
       }
+      // 涉及登录与账号锁定策略的敏感设置需要管理员二次验证，防止会话被盗后放宽防护。
+      const sensitiveKeys = ['httpsLoginEnabled', 'httpLoginDisabled', 'allowRegistration', 'loginRateLimitMaxAttempts', 'loginRateLimitWindowMinutes', 'loginRateLimitLockMinutes'];
+      if (sensitiveKeys.some(key => safeBody[key] !== undefined) && !verifyAdminStepUp(user, body.password)) {
+        return json(res, 401, { message: '修改登录安全设置需要管理员密码验证' });
+      }
       db.systemConfig = normalizeSystemConfig({ ...db.systemConfig, ...safeBody });
       systemTimezoneOffsetMinutes = db.systemConfig.timezoneOffset;
       await applyHttpsServerConfig(db.systemConfig);
@@ -10065,6 +10091,11 @@ const requestHandler = async (req, res) => {
         req.on('error', reject);
       });
       const parts = parseMultipart(rawBody, boundary);
+      const passwordPart = parts.find(part => part.name === 'password' && !part.filename);
+      const certPassword = passwordPart ? passwordPart.data.toString('utf8').trim() : '';
+      if (!verifyAdminStepUp(user, certPassword)) {
+        return json(res, 401, { message: '管理员密码错误' });
+      }
       const certPart = parts.find(part => part.name === 'cert' && part.filename);
       const keyPart = parts.find(part => part.name === 'key' && part.filename);
       if (!certPart || !keyPart) {

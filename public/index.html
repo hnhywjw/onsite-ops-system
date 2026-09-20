@@ -3245,6 +3245,10 @@
                   <option value="true">开启</option>
                 </select>
               </label>
+              <label style="margin-top:14px; max-width: 320px;">
+                <span>管理员密码（修改登录安全设置必填）</span>
+                <input id="systemSettingsPassword" type="password" placeholder="请输入当前管理员密码" autocomplete="current-password" />
+              </label>
               <div class="system-actions" style="margin-top: 16px;">
                 <button class="primary" id="saveWebIdleLogoutBtn" type="button">保存设置</button>
               </div>
@@ -3290,6 +3294,10 @@
                   <button class="secondary" id="uploadHttpsCertBtn" type="button" style="width:auto; white-space:nowrap; justify-self:start;">上传证书</button>
                 </div>
               </div>
+              <label style="margin-top:14px; max-width: 320px;">
+                <span>管理员密码（保存或上传证书必填）</span>
+                <input id="systemHttpsPassword" type="password" placeholder="请输入当前管理员密码" autocomplete="current-password" />
+              </label>
               <div class="system-actions" style="margin-top: 16px;">
                 <button class="primary" id="saveHttpsSettingsBtn" type="button">保存设置</button>
               </div>
@@ -3575,6 +3583,13 @@
         .replace(/'/g, '&#39;')
         .replace(/</g, '&lt;')
         .replace(/>/g, '&gt;');
+    }
+
+    // 生成 CSV 单元格：引号包裹并转义，同时中和以 = + - @ 或制表符/回车开头的公式注入。
+    function csvCell(value) {
+      let text = String(value ?? '');
+      if (/^[=+\-@\t\r]/.test(text)) text = `'${text}`;
+      return `"${text.replace(/"/g, '""')}"`;
     }
 
     function paintCaptcha(el, svg) {
@@ -5579,11 +5594,13 @@
 
     function formatInspectionAttachment(attachment) {
       if (!attachment) return '-';
-      if (typeof attachment === 'string') return attachment;
-      if (attachment.dataUrl && attachment.name) {
-        return `<a href="${attachment.dataUrl}" download="${attachment.name}">${attachment.name}</a>`;
-      }
-      return attachment.name || '-';
+      if (typeof attachment === 'string') return esc(attachment);
+      const name = esc(attachment.name || '-');
+      const href = String(attachment.dataUrl || '');
+      // 仅允许图片/文档 data URL 或站内相对地址，阻断 javascript: 等危险协议。
+      const safeHref = /^data:(image|application)\//i.test(href) || href.startsWith('/') ? attrEsc(href) : '';
+      if (!safeHref) return name;
+      return `<a href="${safeHref}" download="${attrEsc(attachment.name || '')}">${name}</a>`;
     }
 
     async function readInspectionAttachment(file) {
@@ -7542,7 +7559,7 @@
       state.inspectionExecutionPage = Math.min(Math.max(1, state.inspectionExecutionPage || 1), inspectionExecutionTotalPages);
       const inspectionExecutionStart = (state.inspectionExecutionPage - 1) * inspectionExecutionPageSize;
       const inspectionExecutionRows = sourceInspectionExecutions.slice().sort((a, b) => String(b.executedAt || b.createdAt || '').localeCompare(String(a.executedAt || a.createdAt || ''))).slice(inspectionExecutionStart, inspectionExecutionStart + inspectionExecutionPageSize);
-      document.getElementById('inspectionExecutionTable').innerHTML = inspectionExecutionRows.map(item => `<tr><td>${esc(state.inspectionPlans.find(plan => plan.id === item.planId)?.title || '-')}</td><td>${esc(item.executedAt || '-')}</td><td>${esc(item.executor || '-')}</td><td>${esc(item.checklist || '-')}</td><td>${esc(item.issue || '-')}</td><td>${esc(item.suggestion || '-')}</td><td>${esc(item.result || '-')}</td><td>${esc(formatInspectionAttachment(item.attachment))}</td><td>${esc(item.nextDate || '-')}</td><td><div class="toolbar">${canEditData() ? `<button class="secondary" data-action="edit-inspection-execution" data-id="${item.id}" type="button">修改</button><button class="secondary" data-action="delete-inspection-execution" data-id="${item.id}" type="button">删除</button>` : '-'}</div></td></tr>`).join('') || '<tr><td colspan="10">暂无记录</td></tr>';
+      document.getElementById('inspectionExecutionTable').innerHTML = inspectionExecutionRows.map(item => `<tr><td>${esc(state.inspectionPlans.find(plan => plan.id === item.planId)?.title || '-')}</td><td>${esc(item.executedAt || '-')}</td><td>${esc(item.executor || '-')}</td><td>${esc(item.checklist || '-')}</td><td>${esc(item.issue || '-')}</td><td>${esc(item.suggestion || '-')}</td><td>${esc(item.result || '-')}</td><td>${formatInspectionAttachment(item.attachment)}</td><td>${esc(item.nextDate || '-')}</td><td><div class="toolbar">${canEditData() ? `<button class="secondary" data-action="edit-inspection-execution" data-id="${item.id}" type="button">修改</button><button class="secondary" data-action="delete-inspection-execution" data-id="${item.id}" type="button">删除</button>` : '-'}</div></td></tr>`).join('') || '<tr><td colspan="10">暂无记录</td></tr>';
       document.getElementById('inspectionExecutionPageInfo').textContent = `第 ${state.inspectionExecutionPage} / ${inspectionExecutionTotalPages} 页`;
       document.getElementById('inspectionExecutionPrevBtn').disabled = state.inspectionExecutionPage <= 1;
       document.getElementById('inspectionExecutionNextBtn').disabled = state.inspectionExecutionPage >= inspectionExecutionTotalPages;
@@ -7991,8 +8008,7 @@
           let val = item[k] || '';
           if (k === 'projectId') val = formatProjectDisplayById(item.projectId);
           if (k === 'assetId') val = formatAssetName(item.assetId);
-          val = String(val).replace(/"/g, '""');
-          return `"${val}"`;
+          return csvCell(val);
         });
         csvRows.push(row.join(','));
       });
@@ -8019,8 +8035,7 @@
       selected.forEach(item => {
         const row = keys.map(k => {
           let val = item[k] || '';
-          val = String(val).replace(/"/g, '""');
-          return `"${val}"`;
+          return csvCell(val);
         });
         csvRows.push(row.join(','));
       });
@@ -11371,6 +11386,13 @@
         rateLockInput.focus();
         return;
       }
+      const settingsPasswordInput = document.getElementById('systemSettingsPassword');
+      const settingsPassword = settingsPasswordInput ? settingsPasswordInput.value : '';
+      if (!settingsPassword) {
+        setMessage('systemSettingsMessage', '请先输入当前管理员密码', 'error');
+        settingsPasswordInput?.focus();
+        return;
+      }
       const button = event.currentTarget;
       const originalText = button.textContent;
       button.disabled = true;
@@ -11384,10 +11406,12 @@
             loginRateLimitMaxAttempts: maxAttemptsValue,
             loginRateLimitWindowMinutes: rateWindowValue,
             loginRateLimitLockMinutes: rateLockValue,
-            timezoneOffset: tzValue
+            timezoneOffset: tzValue,
+            password: settingsPassword
           })
         });
         state.systemConfig = result.systemConfig || state.systemConfig;
+        if (settingsPasswordInput) settingsPasswordInput.value = '';
         renderSystemSettings();
         resetIdleLogoutTimer();
         setMessage('systemSettingsMessage', result.message);
@@ -11409,6 +11433,13 @@
         httpsPortInput.focus();
         return;
       }
+      const httpsPasswordInput = document.getElementById('systemHttpsPassword');
+      const httpsPassword = httpsPasswordInput ? httpsPasswordInput.value : '';
+      if (!httpsPassword) {
+        setMessage('systemHttpsMessage', '请先输入当前管理员密码', 'error');
+        httpsPasswordInput?.focus();
+        return;
+      }
       const button = event.currentTarget;
       const originalText = button.textContent;
       button.disabled = true;
@@ -11419,10 +11450,12 @@
           body: JSON.stringify({
             httpsLoginEnabled: httpsEnabledInput.value === 'true',
             httpLoginDisabled: httpLoginDisabledInput ? httpLoginDisabledInput.value === 'true' : false,
-            httpsPort: httpsPortValue
+            httpsPort: httpsPortValue,
+            password: httpsPassword
           })
         });
         state.systemConfig = result.systemConfig || state.systemConfig;
+        if (httpsPasswordInput) httpsPasswordInput.value = '';
         renderSystemSettings();
         setMessage('systemHttpsMessage', result.message);
         await refreshSystemManagement();
@@ -11525,6 +11558,13 @@
         setMessage('systemHttpsMessage', '请同时选择证书文件和私钥文件', 'error');
         return;
       }
+      const certPasswordInput = document.getElementById('systemHttpsPassword');
+      const certPassword = certPasswordInput ? certPasswordInput.value : '';
+      if (!certPassword) {
+        setMessage('systemHttpsMessage', '请先输入当前管理员密码', 'error');
+        certPasswordInput?.focus();
+        return;
+      }
       const button = event.currentTarget;
       const originalText = button.textContent;
       button.disabled = true;
@@ -11533,10 +11573,12 @@
         const formData = new FormData();
         formData.append('cert', certFile);
         formData.append('key', keyFile);
+        formData.append('password', certPassword);
         const data = await api('/api/system/https/certificate', { method: 'POST', body: formData });
         state.systemConfig = data.systemConfig || state.systemConfig;
         certInput.value = '';
         keyInput.value = '';
+        if (certPasswordInput) certPasswordInput.value = '';
         renderSystemSettings();
         setMessage('systemHttpsMessage', data.message);
         await refreshSystemManagement();
@@ -11562,7 +11604,7 @@
     document.getElementById('auditLogExportCsv').addEventListener('click', () => {
       const csvRows = [['时间','操作人','动作','对象','详情'].map(h => `"${h}"`).join(',')];
       getFilteredAuditLogs().forEach(item => {
-        csvRows.push([item.createdAt, item.operatorName || '', item.action, item.targetType, item.detail || ''].map(v => `"${String(v).replace(/"/g,'""')}"`).join(','));
+        csvRows.push([item.createdAt, item.operatorName || '', item.action, item.targetType, item.detail || ''].map(v => csvCell(v)).join(','));
       });
       const blob = new Blob(['\uFEFF' + csvRows.join('\n')], { type: 'text/csv;charset=utf-8' });
       const url = URL.createObjectURL(blob);
