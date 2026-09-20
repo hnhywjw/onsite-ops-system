@@ -3829,7 +3829,8 @@
     function connectWebSocket() {
       if (!state.user) return;
       wsManualClose = false;
-      if (wsConnection && wsConnection.readyState === WebSocket.OPEN) return;
+      // CONNECTING/OPEN 都视为已有连接，避免重复建立产生孤儿 socket。
+      if (wsConnection && wsConnection.readyState <= WebSocket.OPEN) return;
       const protocol = location.protocol === 'https:' ? 'wss:' : 'ws:';
       const wsUrl = `${protocol}//${location.host}/ws`;
       try {
@@ -11644,8 +11645,13 @@
     });
     document.getElementById('kbSearchBtn').addEventListener('click', async () => {
       const keyword = document.getElementById('kbKeyword').value.trim();
-      state.kb = (await api(`/api/kb?keyword=${encodeURIComponent(keyword)}`)).data;
-      renderKb();
+      try {
+        const response = await api(`/api/kb?keyword=${encodeURIComponent(keyword)}`);
+        state.kb = Array.isArray(response?.data) ? response.data : [];
+        renderKb();
+      } catch (error) {
+        showGlobalError(error.message || '搜索知识库失败');
+      }
     });
 
     document.getElementById('aiInspectionTargetForm').addEventListener('submit', async event => {

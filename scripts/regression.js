@@ -1617,6 +1617,45 @@ async function main() {
   });
   assert(inspectionCsv.status === 200, '巡检 CSV 报表失败');
 
+  // 报表导出必须对客户角色应用与列表接口一致的字段脱敏
+  const reportSecret = `机密内容-${Date.now()}`;
+  const reportKb = await request('/api/kb', {
+    method: 'POST',
+    headers: { cookie, 'Content-Type': 'application/json' },
+    body: JSON.stringify({ title: `报表脱敏-${Date.now()}`, keywords: 'report', problem: reportSecret, solution: reportSecret, projectId })
+  });
+  assert(reportKb.status === 201, '创建报表脱敏知识条目失败');
+  const adminReportHtml = await request(`/api/reports/project/${encodeURIComponent(projectId)}/html?period=year`, {
+    method: 'POST',
+    headers: { cookie, 'Content-Type': 'application/json' },
+    body: '{}'
+  });
+  assert(adminReportHtml.status === 200 && String(adminReportHtml.data || '').includes(reportSecret), '管理员项目报表应包含知识条目内容');
+  const reportCustomerPayload = { name: '报表脱敏客户', username: `report_customer_${Date.now()}`, password: 'Report1pass!', role: 'customer', projectId };
+  const createReportCustomer = await request('/api/users', {
+    method: 'POST',
+    headers: { cookie, 'Content-Type': 'application/json' },
+    body: JSON.stringify(reportCustomerPayload)
+  });
+  assert(createReportCustomer.status === 201, '创建报表脱敏客户失败');
+  const reportCustomerLogin = await login(reportCustomerPayload.username, reportCustomerPayload.password);
+  assert(reportCustomerLogin.status === 200, '报表脱敏客户登录失败');
+  const customerReportHtml = await request(`/api/reports/project/${encodeURIComponent(projectId)}/html?period=year`, {
+    method: 'POST',
+    headers: { cookie: reportCustomerLogin.cookie, 'Content-Type': 'application/json' },
+    body: '{}'
+  });
+  assert(customerReportHtml.status === 200, '客户项目报表生成失败');
+  assert(!String(customerReportHtml.data || '').includes(reportSecret), '客户项目报表不应泄露知识条目问题与解决方案');
+  const customerReportPptx = await request(`/api/reports/project/${encodeURIComponent(projectId)}/pptx?period=year`, {
+    method: 'POST',
+    headers: { cookie: reportCustomerLogin.cookie, 'Content-Type': 'application/json' },
+    body: '{}'
+  });
+  assert(customerReportPptx.status === 200, '客户项目 PPTX 报表生成失败');
+  await request(`/api/kb/${reportKb.data.id}`, { method: 'DELETE', headers: { cookie } });
+  await request(`/api/users/${createReportCustomer.data.id}`, { method: 'DELETE', headers: { cookie } });
+
   const reset = await request('/api/system/reset', {
     method: 'POST',
     headers: { cookie, 'Content-Type': 'application/json' },
@@ -2126,6 +2165,23 @@ async function main() {
   const imported = (importedList.data.data || []).find(item => item.name === importOkName);
   assert(imported && imported.monitorEnabled && imported.monitorHost === '10.255.255.252' && imported.cabinetName === '导入01号机柜', '导入监测与机柜字段未落地');
   if (imported) await request(`/api/assets/${imported.id}`, { method: 'DELETE', headers: { cookie } });
+
+  // Excel 数字单元格（资产名称为纯数字）不应导致整批导入 500
+  const numericNameImport = await request('/api/assets/import', {
+    method: 'POST', headers: { cookie, 'Content-Type': 'application/json' },
+    body: JSON.stringify({ assets: [{ '关联项目': importProjectName, '资产名称': 20260001, '资产类型': '服务器' }] })
+  });
+  assert(numericNameImport.status === 200 && numericNameImport.data.created === 1, `数字单元格资产名称导入失败: ${JSON.stringify(numericNameImport.data)}`);
+  const numericImportedList = await request('/api/assets?all=1', { headers: { cookie } });
+  const numericImported = (numericImportedList.data.data || []).find(item => item.name === '20260001');
+  assert(numericImported, '数字资产名称未按字符串落地');
+  if (numericImported) await request(`/api/assets/${numericImported.id}`, { method: 'DELETE', headers: { cookie } });
+
+  // 非法 JSON 请求体属于客户端错误，应返回 400 而不是 500
+  const invalidJson = await request('/api/assets/import', {
+    method: 'POST', headers: { cookie, 'Content-Type': 'application/json' }, body: '{"assets": ['
+  });
+  assert(invalidJson.status === 400, `非法 JSON 请求体应返回 400，实际 ${invalidJson.status}`);
 
   // 畸形 URL 编码不能再让请求挂死，应快速返回 400
   const malformedTarget = new URL(base);

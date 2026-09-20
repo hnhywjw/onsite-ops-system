@@ -651,6 +651,7 @@ const captchaDigits = '23456789';
 const captchaCharset = `${captchaLetters}${captchaDigits}`;
 const captchaSecret = crypto.randomBytes(32).toString('hex');
 const captchaChallenges = new Map();
+const CAPTCHA_CHALLENGE_LIMIT = 5000;
 
 function hashCaptchaAnswer(answer) {
   return crypto.createHmac('sha256', captchaSecret).update(String(answer || '').trim().toUpperCase()).digest('hex');
@@ -660,6 +661,12 @@ function pruneCaptchaChallenges() {
   const nowMs = Date.now();
   for (const [token, entry] of captchaChallenges) {
     if (!entry || entry.expiresAt <= nowMs) captchaChallenges.delete(token);
+  }
+  // 未过期的挑战在 TTL 窗口内也会累积，容量超限时按插入顺序淘汰最旧条目。
+  while (captchaChallenges.size > CAPTCHA_CHALLENGE_LIMIT) {
+    const oldest = captchaChallenges.keys().next();
+    if (oldest.done) break;
+    captchaChallenges.delete(oldest.value);
   }
 }
 
@@ -996,9 +1003,18 @@ function getLoginRateLimitStateStore(db) {
   return map;
 }
 
+const LOGIN_RATE_LIMIT_MAX_ENTRIES = 5000;
+
 function setLoginRateLimitStateStore(db, store) {
   const runtimeState = ensureRuntimeState(db);
-  runtimeState.loginRateLimits = Array.from(store.entries()).map(([key, value]) => ({
+  // 键包含客户端可控的 username，必须设容量上限并按最近活跃度保留，避免无界增长。
+  let entries = Array.from(store.entries());
+  if (entries.length > LOGIN_RATE_LIMIT_MAX_ENTRIES) {
+    entries = entries
+      .sort((a, b) => Number(b[1]?.lastAttemptAt || 0) - Number(a[1]?.lastAttemptAt || 0))
+      .slice(0, LOGIN_RATE_LIMIT_MAX_ENTRIES);
+  }
+  runtimeState.loginRateLimits = entries.map(([key, value]) => ({
     key,
     count: Math.max(0, Number(value?.count || 0)),
     firstAttemptAt: Math.max(0, Number(value?.firstAttemptAt || 0)),
@@ -1702,6 +1718,30 @@ function sanitizeChangeRecordForViewer(item, viewer) {
     content: '',
     assetId: '',
     rejectionReason: ''
+  };
+}
+
+// 报表导出复用各列表接口的客户脱敏规则，避免因绕过工具接口而泄露内部字段。
+function sanitizeOperationalReportForViewer(report, viewer) {
+  if (!report || !viewer || viewer.role !== 'customer') return report;
+  return {
+    ...report,
+    logs: [],
+    spareParts: [],
+    assets: (report.assets || []).map(item => sanitizeAssetForApi(item, viewer)),
+    plans: (report.plans || []).map(item => sanitizeInspectionPlanForViewer(item, viewer)),
+    executions: (report.executions || []).map(item => sanitizeInspectionExecutionForViewer(item, viewer)),
+    changes: (report.changes || []).map(item => sanitizeChangeRecordForViewer(item, viewer)),
+    incidents: (report.incidents || []).map(item => ({ ...item, description: '', resolution: '' })),
+    kb: (report.kb || []).map(item => ({
+      id: item.id,
+      title: item.title,
+      category: item.category || '',
+      tags: item.tags || '',
+      projectId: item.projectId,
+      createdAt: item.createdAt,
+      createdBy: item.createdBy
+    }))
   };
 }
 
@@ -3491,11 +3531,13 @@ function buildSecurityHeaders(extraHeaders = {}, nonce = '') {
 }
 
 function json(res, status, data, extraHeaders = {}) {
+  if (res.headersSent || res.writableEnded) return;
   res.writeHead(status, buildSecurityHeaders({ 'Content-Type': 'application/json; charset=utf-8', ...extraHeaders }));
   res.end(JSON.stringify(data));
 }
 
 function text(res, status, data, extraHeaders = {}) {
+  if (res.headersSent || res.writableEnded) return;
   res.writeHead(status, buildSecurityHeaders({ 'Content-Type': 'text/plain; charset=utf-8', ...extraHeaders }));
   res.end(data);
 }
@@ -3564,9 +3606,9 @@ function readBody(req, maxBytes = 10 * 1024 * 1024) {
     req.on('data', chunk => {
       if (settled) return;
       data += chunk;
-      if (data.length > maxBytes) {
+      if (Buffer.byteLength(data) > maxBytes) {
         settled = true;
-        reject(new Error('请求体过大'));
+        reject(Object.assign(new Error('请求体过大'), { status: 413 }));
         req.destroy();
       }
     });
@@ -3576,7 +3618,7 @@ function readBody(req, maxBytes = 10 * 1024 * 1024) {
       try {
         resolve(data ? JSON.parse(data) : {});
       } catch (error) {
-        reject(error);
+        reject(Object.assign(new Error('请求体格式无效'), { status: 400, cause: error }));
       }
     });
     req.on('error', (err) => {
@@ -3584,6 +3626,38 @@ function readBody(req, maxBytes = 10 * 1024 * 1024) {
       settled = true;
       reject(err);
     });
+  });
+}
+
+// 读取 multipart 请求体：按累计字节数限制大小，超限立即销毁连接，
+// 避免 Buffer.concat 反复全量拷贝造成 O(n^2) CPU 与内存膨胀。
+function readMultipartBody(req, maxBytes, sizeMessage) {
+  return new Promise((resolve, reject) => {
+    const chunks = [];
+    let totalLength = 0;
+    let settled = false;
+    const fail = error => {
+      if (settled) return;
+      settled = true;
+      reject(error);
+      req.destroy();
+    };
+    req.on('data', chunk => {
+      if (settled) return;
+      totalLength += chunk.length;
+      if (totalLength > maxBytes) {
+        fail({ status: 413, message: sizeMessage || '上传内容过大' });
+        return;
+      }
+      chunks.push(chunk);
+    });
+    req.on('end', () => {
+      if (settled) return;
+      settled = true;
+      resolve(Buffer.concat(chunks));
+    });
+    req.on('error', error => fail(error));
+    req.on('aborted', () => fail({ status: 400, message: '上传已中断' }));
   });
 }
 
@@ -4062,10 +4136,15 @@ function advanceAiTaskNextExecution(task, referenceMs = Date.now()) {
   return true;
 }
 
+// 仅当直连来源是本机反向代理时才信任转发头，避免客户端伪造 X-Forwarded-*。
+function isTrustedProxyRequest(req) {
+  const remoteAddress = req.socket?.remoteAddress || '';
+  return remoteAddress === '127.0.0.1' || remoteAddress === '::1' || remoteAddress === '::ffff:127.0.0.1';
+}
+
 function getRequestClientIp(req) {
   const remoteAddress = req.socket?.remoteAddress || '';
-  const isTrustedProxy = remoteAddress === '127.0.0.1' || remoteAddress === '::1' || remoteAddress === '::ffff:127.0.0.1';
-  if (isTrustedProxy) {
+  if (isTrustedProxyRequest(req)) {
     const forwarded = String(req.headers['x-forwarded-for'] || '').split(',')[0].trim();
     if (forwarded) return forwarded;
   }
@@ -4131,6 +4210,22 @@ const forgotPasswordRateLimitMap = new Map();
 const FP_MAX_ATTEMPTS = 5;
 const FP_WINDOW_MINUTES = 15;
 const FP_LOCK_MINUTES = 30;
+const FORGOT_PASSWORD_RATE_LIMIT_MAX_KEYS = 5000;
+
+function pruneForgotPasswordRateLimits() {
+  if (forgotPasswordRateLimitMap.size <= FORGOT_PASSWORD_RATE_LIMIT_MAX_KEYS) return;
+  const now = nowMs();
+  const windowMs = FP_WINDOW_MINUTES * 60 * 1000;
+  for (const [key, state] of forgotPasswordRateLimitMap) {
+    const expired = !state || (state.lockedUntil <= now && (!state.firstAttemptAt || now - state.firstAttemptAt > windowMs));
+    if (expired) forgotPasswordRateLimitMap.delete(key);
+  }
+  while (forgotPasswordRateLimitMap.size > FORGOT_PASSWORD_RATE_LIMIT_MAX_KEYS) {
+    const oldest = forgotPasswordRateLimitMap.keys().next();
+    if (oldest.done) break;
+    forgotPasswordRateLimitMap.delete(oldest.value);
+  }
+}
 
 function getForgotPasswordRateLimitState(db, rateKey) {
   const state = forgotPasswordRateLimitMap.get(rateKey) || { count: 0, firstAttemptAt: 0, lockedUntil: 0 };
@@ -4149,6 +4244,7 @@ function getForgotPasswordRateLimitState(db, rateKey) {
 }
 
 function recordForgotPasswordAttempt(db, rateKey) {
+  pruneForgotPasswordRateLimits();
   const state = forgotPasswordRateLimitMap.get(rateKey) || { count: 0, firstAttemptAt: 0, lockedUntil: 0 };
   const now = nowMs();
   const windowMs = FP_WINDOW_MINUTES * 60 * 1000;
@@ -4165,8 +4261,10 @@ function recordForgotPasswordAttempt(db, rateKey) {
 }
 
 function isEncryptedRequest(req) {
+  if (req.socket?.encrypted) return true;
+  if (!isTrustedProxyRequest(req)) return false;
   const forwardedProto = String(req.headers['x-forwarded-proto'] || '').split(',')[0].trim().toLowerCase();
-  return forwardedProto === 'https' || Boolean(req.socket?.encrypted);
+  return forwardedProto === 'https';
 }
 
 function shouldUseSecureCookies(req, systemConfig = {}) {
@@ -4568,22 +4666,27 @@ async function executeConfigBackupPlan(db, plan, options = {}) {
   const port = Number(target.port || defaultPortMap[target.protocol] || 22);
   const mode = ['cli', 'web'].includes(target.backupMode) ? target.backupMode : 'cli';
   let backupPayload = '';
-  if (mode === 'cli') {
-    if (target.protocol !== 'ssh') return fail('CLI 配置备份当前支持 SSH 协议');
-    const secret = target.authType === 'key'
-      ? decryptCredential(target.privateKey || '')
-      : decryptCredential(target.password || '');
-    const command = target.backupCommand || (target.category === 'server' ? 'cat /etc/os-release' : 'show running-config');
-    const commandResult = await executeSSHCommand(target.address, port, target.account, secret, command, { privateKey: target.authType === 'key' });
-    if (!commandResult.success) return fail(commandResult.stderr || 'CLI 命令执行失败');
-    backupPayload = normalizeBackupContent(commandResult.stdout, 'CLI 命令执行成功，未返回配置内容');
-  } else {
-    const portResult = await probePortOpen(target.address, port);
-    if (!portResult.open) return fail(`目标 ${target.address}:${port} 不可达`);
-    if (!target.webBackupPath) return fail('Web 备份下载地址未配置');
-    const webResult = await fetchWebBackup(target, decryptCredential(target.accessToken || ''));
-    if (!webResult.success) return fail(webResult.stderr || 'Web 配置下载失败');
-    backupPayload = normalizeBackupContent(webResult.content, 'Web 配置下载成功，未返回配置内容');
+  try {
+    if (mode === 'cli') {
+      if (target.protocol !== 'ssh') return fail('CLI 配置备份当前支持 SSH 协议');
+      const secret = target.authType === 'key'
+        ? decryptCredential(target.privateKey || '')
+        : decryptCredential(target.password || '');
+      const command = target.backupCommand || (target.category === 'server' ? 'cat /etc/os-release' : 'show running-config');
+      const commandResult = await executeSSHCommand(target.address, port, target.account, secret, command, { privateKey: target.authType === 'key' });
+      if (!commandResult.success) return fail(commandResult.stderr || 'CLI 命令执行失败');
+      backupPayload = normalizeBackupContent(commandResult.stdout, 'CLI 命令执行成功，未返回配置内容');
+    } else {
+      const portResult = await probePortOpen(target.address, port);
+      if (!portResult.open) return fail(`目标 ${target.address}:${port} 不可达`);
+      if (!target.webBackupPath) return fail('Web 备份下载地址未配置');
+      const webResult = await fetchWebBackup(target, decryptCredential(target.accessToken || ''));
+      if (!webResult.success) return fail(webResult.stderr || 'Web 配置下载失败');
+      backupPayload = normalizeBackupContent(webResult.content, 'Web 配置下载成功，未返回配置内容');
+    }
+  } catch (error) {
+    // 凭据解密失败、命令执行异常等都要记录为单次失败，不能中断整批备份计划。
+    return fail(error.message || '配置备份执行异常');
   }
   const filenameSafeName = String(target.name || asset.name || 'target').replace(/[^a-zA-Z0-9\u4e00-\u9fa5_.-]+/g, '-').slice(0, 80) || 'target';
   const filename = `${filenameSafeName}-${createdAt.replace(/[:\s]/g, '-').slice(0, 19)}.txt`;
@@ -4632,8 +4735,15 @@ async function processPendingConfigBackupPlans(db) {
     if (plan.status === '已停用' || plan.status === '执行中') continue;
     if (parseAiInspectionScheduleTime(plan.executedAt) > Date.now()) continue;
     plan.status = '执行中';
-    await executeConfigBackupPlan(db, plan);
-    plan.status = plan.cycle ? '待执行' : '已完成';
+    try {
+      await executeConfigBackupPlan(db, plan);
+    } catch (error) {
+      plan.lastStatus = '失败';
+      console.error('配置备份计划执行异常:', error.message);
+    } finally {
+      // 无论成功失败都要复位状态，避免单条计划卡在「执行中」并阻断后续计划。
+      plan.status = plan.cycle ? '待执行' : '已完成';
+    }
     changed = true;
   }
   return changed;
@@ -4644,8 +4754,12 @@ async function processPendingAiInspectionTasks(db) {
   for (const task of db.aiInspectionTasks || []) {
     if (task.status === '已完成' || task.status === '失败' || task.status === '执行中' || task.status === '已停用') continue;
     if (parseAiInspectionScheduleTime(task.executedAt) > Date.now()) continue;
-    const result = await executeAiInspectionTask(db, task, { persist: true });
-    if (result?.changed) changed = true;
+    try {
+      const result = await executeAiInspectionTask(db, task, { persist: true });
+      if (result?.changed) changed = true;
+    } catch (error) {
+      console.error('巡检任务执行异常:', error.message);
+    }
   }
   return changed;
 }
@@ -5965,7 +6079,7 @@ function truncateText(value, maxLength = 90) {
   return text.length > maxLength ? `${text.slice(0, maxLength)}...` : text || '-';
 }
 
-function buildOperationalReportData(db, scope, targetId, period) {
+function buildOperationalReportData(db, scope, targetId, period, viewer) {
   const currentPeriod = getPeriodKey(formatDateKey(new Date()), period);
   const periodLabel = ({ week: '每周', month: '每月', year: '每年' }[period] || period);
   const targetUser = scope === 'user' ? db.users.find(item => item.id === targetId) : null;
@@ -6000,7 +6114,7 @@ function buildOperationalReportData(db, scope, targetId, period) {
   const sparePartStock = spareParts.reduce((sum, item) => sum + Number(item.quantity ?? item.stock ?? 0), 0);
   const projectStateSummary = `资产 ${assets.length} 项，巡检计划 ${plans.length} 个，资料 ${documents.length} 份，备件 ${spareParts.length} 类 / 库存 ${sparePartStock} 件。`;
   const periodOutputSummary = `本周期产出日志 ${logs.length} 条、工时 ${totalHours} 小时、巡检 ${executions.length} 次、变更 ${changes.length} 条、故障 ${incidents.length} 条、知识 ${kb.length} 条。`;
-  return {
+  const report = sanitizeOperationalReportForViewer({
     scope,
     targetUser,
     project,
@@ -6027,7 +6141,13 @@ function buildOperationalReportData(db, scope, targetId, period) {
     openIncidentCount: incidents.filter(item => item.status !== '已关闭' && item.status !== '已解决').length,
     projectStateSummary,
     periodOutputSummary
-  };
+  }, viewer);
+  // 摘要按脱敏后的集合重新统计，避免通过数量泄露客户不可见的数据。
+  const visibleSparePartStock = (report.spareParts || []).reduce((sum, item) => sum + Number(item.quantity ?? item.stock ?? 0), 0);
+  report.totalHours = Number((report.logs || []).reduce((sum, item) => sum + Number(item.durationHours || 0), 0).toFixed(2));
+  report.projectStateSummary = `资产 ${report.assets.length} 项，巡检计划 ${report.plans.length} 个，资料 ${report.documents.length} 份，备件 ${report.spareParts.length} 类 / 库存 ${visibleSparePartStock} 件。`;
+  report.periodOutputSummary = `本周期产出日志 ${report.logs.length} 条、工时 ${report.totalHours} 小时、巡检 ${report.executions.length} 次、变更 ${report.changes.length} 条、故障 ${report.incidents.length} 条、知识 ${report.kb.length} 条。`;
+  return report;
 }
 
 function createReportHeaderShapes(title, subtitle) {
@@ -6214,18 +6334,18 @@ function buildPptxBufferFromStats({ reportTitle, projectName, periodLabel, owner
   });
 }
 
-function buildPptxBuffer(db, targetUserId, period) {
-  const report = buildOperationalReportData(db, 'user', targetUserId, period);
+function buildPptxBuffer(db, targetUserId, period, viewer) {
+  const report = buildOperationalReportData(db, 'user', targetUserId, period, viewer);
   return report ? buildDetailedPptxBufferFromReport(report) : null;
 }
 
-function buildProjectPptxBuffer(db, projectId, period) {
-  const report = buildOperationalReportData(db, 'project', projectId, period);
+function buildProjectPptxBuffer(db, projectId, period, viewer) {
+  const report = buildOperationalReportData(db, 'project', projectId, period, viewer);
   return report ? buildDetailedPptxBufferFromReport(report) : null;
 }
 
-function buildOperationalReportHtml(db, scope, targetId, period) {
-  const report = buildOperationalReportData(db, scope, targetId, period);
+function buildOperationalReportHtml(db, scope, targetId, period, viewer) {
+  const report = buildOperationalReportData(db, scope, targetId, period, viewer);
   if (!report) return null;
   const tableRows = (items, emptyColspan, mapper) => items.map(mapper).join('') || `<tr><td colspan="${emptyColspan}">暂无数据</td></tr>`;
   const reportTitle = report.title;
@@ -6298,14 +6418,15 @@ function buildOperationalReportHtml(db, scope, targetId, period) {
 </html>`;
 }
 
-function buildInspectionExecutionCsv(db, projectId, period) {
+function buildInspectionExecutionCsv(db, projectId, period, viewer) {
   const project = db.projects.find(item => item.id === projectId);
   if (!project) return null;
   const currentPeriod = getPeriodKey(formatDateKey(new Date()), period);
   const executions = (db.inspectionExecutions || [])
     .filter(item => item.projectId === projectId)
     .filter(item => getPeriodKey(item.executedAt, period) === currentPeriod)
-    .sort((a, b) => b.executedAt.localeCompare(a.executedAt));
+    .sort((a, b) => b.executedAt.localeCompare(a.executedAt))
+    .map(item => sanitizeInspectionExecutionForViewer(item, viewer));
   const rows = executions.map(item => {
     const plan = (db.inspectionPlans || []).find(entry => entry.id === item.planId);
     const asset = (db.assets || []).find(entry => entry.id === item.assetId);
@@ -6326,17 +6447,18 @@ function buildInspectionExecutionCsv(db, projectId, period) {
   return `\uFEFF${[header, ...rows].join('\n')}`;
 }
 
-function buildInspectionExecutionHtml(db, projectId, period) {
+function buildInspectionExecutionHtml(db, projectId, period, viewer) {
   const project = db.projects.find(item => item.id === projectId);
   if (!project) return null;
   const currentPeriod = getPeriodKey(formatDateKey(new Date()), period);
   const periodLabel = ({ week: '每周', month: '每月', year: '每年' }[period] || period);
-  const plans = (db.inspectionPlans || []).filter(item => item.projectId === projectId);
-  const assets = (db.assets || []).filter(item => item.projectId === projectId);
+  const plans = (db.inspectionPlans || []).filter(item => item.projectId === projectId).map(item => sanitizeInspectionPlanForViewer(item, viewer));
+  const assets = (db.assets || []).filter(item => item.projectId === projectId).map(item => sanitizeAssetForApi(item, viewer));
   const executions = (db.inspectionExecutions || [])
     .filter(item => item.projectId === projectId)
     .filter(item => getPeriodKey(item.executedAt, period) === currentPeriod)
-    .sort((a, b) => String(b.executedAt || '').localeCompare(String(a.executedAt || '')));
+    .sort((a, b) => String(b.executedAt || '').localeCompare(String(a.executedAt || '')))
+    .map(item => sanitizeInspectionExecutionForViewer(item, viewer));
   const abnormalExecutions = executions.filter(item => item.result === '异常');
   const normalCount = executions.filter(item => item.result === '正常').length;
   const planCount = new Set(executions.map(item => item.planId).filter(Boolean)).size;
@@ -6561,10 +6683,11 @@ function buildAiInspectionResultHtml(db, resultId, viewer) {
 </html>`;
 }
 
-function buildAiInspectionResultPptxBuffer(db, resultId) {
+function buildAiInspectionResultPptxBuffer(db, resultId, viewer) {
   const payload = getAiInspectionReportPayload(db, resultId);
   if (!payload) return null;
-  const { result, task, target, project, metrics } = payload;
+  const { result: rawResult, task, target, project, metrics } = payload;
+  const result = sanitizeAiInspectionResultForViewer(rawResult, viewer);
   const abnormalCount = metrics.filter(item => item.status === '异常' || item.status === '严重').length;
   const severeCount = metrics.filter(item => item.status === '严重').length;
   const logs = metrics.slice(0, 4).map(item => ({
@@ -6810,8 +6933,17 @@ function serveStatic(req, res, pathname) {
     extraHeaders.Pragma = 'no-cache';
     extraHeaders.Expires = '0';
   }
-  res.writeHead(200, buildSecurityHeaders(extraHeaders));
-  fs.createReadStream(normalized).pipe(res);
+  // 读流失败（权限/升级替换窗口/fd 耗尽）必须就地收尾，否则未监听的 'error'
+  // 会冒泡到 uncaughtException 并终止整个进程。打开成功后再写响应头。
+  const stream = fs.createReadStream(normalized);
+  stream.once('error', () => {
+    if (!res.headersSent) text(res, 404, 'Not Found');
+    else if (!res.writableEnded) res.end();
+  });
+  stream.once('open', () => {
+    res.writeHead(200, buildSecurityHeaders(extraHeaders));
+    stream.pipe(res);
+  });
 }
 
 const requestHandler = async (req, res) => {
@@ -7036,6 +7168,13 @@ const requestHandler = async (req, res) => {
         return json(res, 502, { message: '无法获取 OIDC 配置' });
       }
       db.runtimeState.oidcState = db.runtimeState.oidcState || {};
+      // 清理超时未回调的 state，避免 /api/auth/oidc/login 被反复调用导致持久化数据膨胀。
+      const oidcStateTtlMs = 10 * 60 * 1000;
+      for (const [key, entry] of Object.entries(db.runtimeState.oidcState)) {
+        if (!entry || nowMs() - Number(entry.createdAt || 0) > oidcStateTtlMs) {
+          delete db.runtimeState.oidcState[key];
+        }
+      }
       db.runtimeState.oidcState[state] = { codeVerifier, nonce, createdAt: nowMs() };
       await writeDb(db, { silent: true });
       const authUrl = new URL(oidcConfig.authorization_endpoint);
@@ -7669,10 +7808,11 @@ const requestHandler = async (req, res) => {
       for (let i = 0; i < rows.length; i++) {
         const row = rows[i];
         const rowLabel = `第${i + 2}行`;
-        const name = (row.name || row['资产名称'] || '').trim();
+        // Excel 数字单元格会被解析为 number，先做字符串归一化再 trim。
+        const name = String(row.name ?? row['资产名称'] ?? '').trim();
         if (!name) { results.errors.push(`${rowLabel}: 资产名称为空`); results.skipped++; continue; }
         let projectId = user.projectId;
-        const projectName = (row.projectName || row['关联项目'] || '').trim();
+        const projectName = String(row.projectName ?? row['关联项目'] ?? '').trim();
         if (user.role === 'admin' && projectName) {
           const p = db.projects.find(prj => prj.name === projectName);
           if (p) {
@@ -8245,19 +8385,7 @@ const requestHandler = async (req, res) => {
       }
       const boundary = parseMultipartBoundary(contentType);
       if (!boundary) return json(res, 400, { message: '无效的上传格式' });
-      const rawBody = await new Promise((resolve, reject) => {
-        const chunks = [];
-        let exceeded = false;
-        req.on('data', chunk => {
-          chunks.push(chunk);
-          if (!exceeded && Buffer.concat(chunks).length > 20 * 1024 * 1024) {
-            exceeded = true;
-            reject({ status: 413, message: '附件不能超过 20MB' });
-          }
-        });
-        req.on('end', () => { if (!exceeded) resolve(Buffer.concat(chunks)); });
-        req.on('error', reject);
-      }).catch(err => {
+      const rawBody = await readMultipartBody(req, 20 * 1024 * 1024, '附件不能超过 20MB').catch(err => {
         if (err.status) return json(res, err.status, { message: err.message });
         throw err;
       });
@@ -8319,19 +8447,7 @@ const requestHandler = async (req, res) => {
       if (contentType.includes('multipart/form-data')) {
         const boundary = parseMultipartBoundary(contentType);
         if (!boundary) return json(res, 400, { message: '无效的上传格式' });
-        const rawBody = await new Promise((resolve, reject) => {
-          const chunks = [];
-          let exceeded = false;
-          req.on('data', chunk => {
-            chunks.push(chunk);
-            if (!exceeded && Buffer.concat(chunks).length > 20 * 1024 * 1024) {
-              exceeded = true;
-              reject({ status: 413, message: '附件不能超过 20MB' });
-            }
-          });
-          req.on('end', () => { if (!exceeded) resolve(Buffer.concat(chunks)); });
-          req.on('error', reject);
-        }).catch(err => {
+        const rawBody = await readMultipartBody(req, 20 * 1024 * 1024, '附件不能超过 20MB').catch(err => {
           if (err.status) return json(res, err.status, { message: err.message });
           throw err;
         });
@@ -10165,17 +10281,13 @@ const requestHandler = async (req, res) => {
       }
       const boundary = parseMultipartBoundary(contentType);
       if (!boundary) return json(res, 400, { message: '无效的上传格式' });
-      const rawBody = await new Promise((resolve, reject) => {
-        const chunks = [];
-        req.on('data', chunk => {
-          chunks.push(chunk);
-          if (Buffer.concat(chunks).length > 2 * 1024 * 1024) {
-            reject(new Error('证书文件不能超过 2MB'));
-          }
-        });
-        req.on('end', () => resolve(Buffer.concat(chunks)));
-        req.on('error', reject);
-      });
+      let rawBody;
+      try {
+        rawBody = await readMultipartBody(req, 2 * 1024 * 1024, '证书文件不能超过 2MB');
+      } catch (error) {
+        if (error.status) return json(res, error.status, { message: error.message });
+        throw error;
+      }
       const parts = parseMultipart(rawBody, boundary);
       const passwordPart = parts.find(part => part.name === 'password' && !part.filename);
       const certPassword = passwordPart ? passwordPart.data.toString('utf8').trim() : '';
@@ -10411,7 +10523,7 @@ const requestHandler = async (req, res) => {
       if (user.role !== 'admin' && user.role !== 'engineer') return json(res, 403, { message: '当前账号仅支持查看数据' });
       if (user.role !== 'admin' && user.id !== targetUserId) return json(res, 403, { message: '仅支持查看本人报表' });
       const period = reqUrl.searchParams.get('period') || 'month';
-      const content = buildOperationalReportHtml(db, 'user', targetUserId, period);
+      const content = buildOperationalReportHtml(db, 'user', targetUserId, period, user);
       if (!content) return json(res, 404, { message: '报表生成失败' });
       res.writeHead(200, buildSecurityHeaders({ 'Content-Type': 'text/html; charset=utf-8' }));
       return res.end(content);
@@ -10432,7 +10544,7 @@ const requestHandler = async (req, res) => {
         return json(res, 403, { message: '仅支持导出本人报表' });
       }
       const period = reqUrl.searchParams.get('period') || 'month';
-      const content = buildPptxBuffer(db, targetUserId, period);
+      const content = buildPptxBuffer(db, targetUserId, period, user);
       if (!content) {
         return json(res, 404, { message: '用户不存在' });
       }
@@ -10449,7 +10561,7 @@ const requestHandler = async (req, res) => {
       const projectId = pathname.split('/')[4];
       if (!canViewProject(user, projectId)) return json(res, 403, { message: '无权查看其他项目报表' });
       const period = reqUrl.searchParams.get('period') || 'month';
-      const content = buildOperationalReportHtml(db, 'project', projectId, period);
+      const content = buildOperationalReportHtml(db, 'project', projectId, period, user);
       if (!content) return json(res, 404, { message: '项目不存在' });
       res.writeHead(200, buildSecurityHeaders({ 'Content-Type': 'text/html; charset=utf-8' }));
       return res.end(content);
@@ -10463,7 +10575,7 @@ const requestHandler = async (req, res) => {
         return json(res, 403, { message: '无权导出其他项目报表' });
       }
       const period = reqUrl.searchParams.get('period') || 'month';
-      const content = buildProjectPptxBuffer(db, projectId, period);
+      const content = buildProjectPptxBuffer(db, projectId, period, user);
       if (!content) {
         return json(res, 404, { message: '项目不存在' });
       }
@@ -10482,7 +10594,7 @@ const requestHandler = async (req, res) => {
         return json(res, 403, { message: '无权查看其他项目巡检报表' });
       }
       const period = reqUrl.searchParams.get('period') || 'month';
-      const content = buildInspectionExecutionHtml(db, projectId, period);
+      const content = buildInspectionExecutionHtml(db, projectId, period, user);
       if (!content) {
         return json(res, 404, { message: '项目不存在' });
       }
@@ -10498,7 +10610,7 @@ const requestHandler = async (req, res) => {
         return json(res, 403, { message: '无权导出其他项目巡检报表' });
       }
       const period = reqUrl.searchParams.get('period') || 'month';
-      const content = buildInspectionExecutionCsv(db, projectId, period);
+      const content = buildInspectionExecutionCsv(db, projectId, period, user);
       if (!content) {
         return json(res, 404, { message: '项目不存在' });
       }
@@ -10535,7 +10647,7 @@ const requestHandler = async (req, res) => {
       if (!canViewProject(user, result.projectId)) {
         return json(res, 403, { message: '无权导出该巡检报告' });
       }
-      const content = buildAiInspectionResultPptxBuffer(db, resultId);
+      const content = buildAiInspectionResultPptxBuffer(db, resultId, user);
       if (!content) {
         return json(res, 404, { message: '巡检报告生成失败' });
       }
@@ -10555,21 +10667,13 @@ const requestHandler = async (req, res) => {
       }
       const boundary = parseMultipartBoundary(contentType);
       if (!boundary) return rejectUpgradeUpload(res, db, user, '', '无效的上传格式');
-      const rawBody = await new Promise((resolve, reject) => {
-        const chunks = [];
-        const maxBytes = 100 * 1024 * 1024;
-        let totalLength = 0;
-        req.on('data', chunk => {
-          totalLength += chunk.length;
-          if (totalLength > maxBytes) {
-            reject(new Error('升级包不能超过 100MB'));
-            return;
-          }
-          chunks.push(chunk);
-        });
-        req.on('end', () => resolve(Buffer.concat(chunks)));
-        req.on('error', reject);
-      });
+      let rawBody;
+      try {
+        rawBody = await readMultipartBody(req, 100 * 1024 * 1024, '升级包不能超过 100MB');
+      } catch (error) {
+        if (error.status) return rejectUpgradeUpload(res, db, user, '', error.message, { status: error.status });
+        throw error;
+      }
       const parts = parseMultipart(rawBody, boundary);
       const passwordPart = parts.find(part => part.name === 'password');
       const upgradePassword = passwordPart ? passwordPart.data.toString('utf8').replace(/\r?\n$/, '') : '';
@@ -10754,7 +10858,12 @@ const requestHandler = async (req, res) => {
     return serveStatic(req, res, pathname);
   } catch (error) {
     console.error('Request error:', error.message);
-    return json(res, 500, { message: '服务器内部错误' });
+    if (res.headersSent) {
+      if (!res.writableEnded) res.end();
+      return;
+    }
+    const status = Number(error.status) || 500;
+    return json(res, status, { message: status < 500 ? error.message : '服务器内部错误' });
   }
 };
 
@@ -11178,7 +11287,7 @@ async function runAssetMonitorScheduler() {
 }
 
 const monitorIntervalMs = 60000;
-setInterval(runAssetMonitorScheduler, monitorIntervalMs);
+const assetMonitorIntervalId = setInterval(runAssetMonitorScheduler, monitorIntervalMs);
 setTimeout(() => runAssetMonitorScheduler(), 5000);
 
 const trafficMonitorState = { lastCounters: {}, rates: {}, portStatus: {} };
@@ -11333,7 +11442,7 @@ async function runTrafficMonitorScheduler() {
   }
 }
 
-setInterval(runTrafficMonitorScheduler, 30000);
+const trafficMonitorIntervalId = setInterval(runTrafficMonitorScheduler, 30000);
 setTimeout(() => runTrafficMonitorScheduler(), 15000);
 
 function runAutoBackup() {
@@ -11367,6 +11476,12 @@ function gracefulShutdown(signal) {
   clearInterval(wsHeartbeatTimer);
   clearInterval(schedulerIntervalId);
   clearInterval(backupIntervalId);
+  clearInterval(assetMonitorIntervalId);
+  clearInterval(trafficMonitorIntervalId);
+  // 关闭前先断开 WebSocket，避免 server.close() 因长连接迟迟不回调。
+  for (const client of wsClients) {
+    try { client.close(); } catch (_) {}
+  }
   server.close(() => {
     console.error('HTTP server closed');
     if (httpsServer) {
