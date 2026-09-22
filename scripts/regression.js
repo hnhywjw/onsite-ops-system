@@ -2184,6 +2184,36 @@ async function main() {
   assert(invalidJson.status === 400, `非法 JSON 请求体应返回 400，实际 ${invalidJson.status}`);
 
   // 畸形 URL 编码不能再让请求挂死，应快速返回 400
+  // 并发写入不能因陈旧快照合并而丢失更新或让删除失效
+  const concurrencyStamp = Date.now();
+  const concurrencyCreates = await Promise.all(Array.from({ length: 10 }, (_, i) => request('/api/assets', {
+    method: 'POST', headers: { cookie, 'Content-Type': 'application/json' },
+    body: JSON.stringify({ name: `并发-${concurrencyStamp}-${i}`, type: '服务器', projectId })
+  })));
+  assert(concurrencyCreates.every(item => item.status === 201), `并发创建资产失败: ${concurrencyCreates.map(item => item.status).join(',')}`);
+  const concurrencyAssets = concurrencyCreates.map(item => item.data);
+  const concurrentUpdates = await Promise.all(concurrencyAssets.slice(0, 5).map((asset, i) => request(`/api/assets/${asset.id}`, {
+    method: 'PUT', headers: { cookie, 'Content-Type': 'application/json' },
+    body: JSON.stringify({ name: `并发已改-${concurrencyStamp}-${i}`, type: '服务器', projectId })
+  })));
+  const concurrentDeletes = await Promise.all(concurrencyAssets.slice(5).map(asset => request(`/api/assets/${asset.id}`, { method: 'DELETE', headers: { cookie } })));
+  assert(concurrentUpdates.every(item => item.status === 200), `并发更新资产失败: ${concurrentUpdates.map(item => item.status).join(',')}`);
+  assert(concurrentDeletes.every(item => item.status === 200), `并发删除资产失败: ${concurrentDeletes.map(item => item.status).join(',')}`);
+  const concurrencyList = await request('/api/assets?all=1', { headers: { cookie } });
+  const concurrencyNames = new Set((concurrencyList.data.data || []).map(item => item.name));
+  for (let i = 0; i < 5; i += 1) {
+    assert(concurrencyNames.has(`并发已改-${concurrencyStamp}-${i}`), `并发更新丢失记录 ${i}`);
+  }
+  for (let i = 5; i < 10; i += 1) {
+    assert(!concurrencyNames.has(`并发-${concurrencyStamp}-${i}`), `并发删除未生效 ${i}`);
+  }
+  for (const asset of (concurrencyList.data.data || [])) {
+    if (String(asset.name).startsWith(`并发-${concurrencyStamp}`) || String(asset.name).startsWith(`并发已改-${concurrencyStamp}`)) {
+      await request(`/api/assets/${asset.id}`, { method: 'DELETE', headers: { cookie } });
+    }
+  }
+
+  // 畸形 URL 编码不能再让请求挂死，应快速返回 400
   const malformedTarget = new URL(base);
   const malformedStatus = await new Promise((resolve, reject) => {
     const req = http.request({ hostname: malformedTarget.hostname, port: malformedTarget.port || 80, path: '/%', method: 'GET' }, res => {

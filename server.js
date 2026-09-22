@@ -3071,6 +3071,8 @@ async function readDb() {
       const cached = cloneDbSnapshot(latestFileDbCache);
       cached._seq = dbSequence;
       cached._normalized = true;
+      // 读取时的状态引用；后续写入会替换缓存对象而非原地改写，因此可用于计算增量。
+      cached._base = latestFileDbCache;
       return cached;
     }
     const raw = await readCollectionsFromMySql();
@@ -3080,10 +3082,12 @@ async function readDb() {
     });
     if (!hasCollectionData) {
       const initial = readDbFromFile();
+      const initialBase = cloneDbSnapshot(initial);
       await writeDb(initial, { silent: true });
       fileDbNeedsSyncToMySql = false;
       initial._seq = dbSequence;
       initial._normalized = true;
+      initial._base = initialBase;
       return initial;
     }
     const normalized = normalizeDb(raw);
@@ -3091,13 +3095,16 @@ async function readDb() {
     const snapshot = cloneDbSnapshot(normalized);
     snapshot._seq = dbSequence;
     snapshot._normalized = true;
+    snapshot._base = cloneDbSnapshot(normalized);
     return snapshot;
   } catch (error) {
     await resetMySqlConnection();
     if (allowFileDbFallback) {
       const fallback = readDbFromFile();
+      const fallbackBase = cloneDbSnapshot(fallback);
       fallback._seq = dbSequence;
       fallback._normalized = true;
+      fallback._base = fallbackBase;
       return fallback;
     }
     throw error;
@@ -3218,6 +3225,121 @@ async function syncFileDbToMySqlIfNeeded() {
 let dbWriteLock = Promise.resolve();
 let dbSequence = 0;
 
+function sameJsonValue(a, b) {
+  if (a === b) return true;
+  if (a === null || b === null || typeof a !== 'object' || typeof b !== 'object') return false;
+  return JSON.stringify(a) === JSON.stringify(b);
+}
+
+// 只把相对读取时快照真正发生变化的字段写回，避免用旧值覆盖并发请求写入的新数据。
+function applyStaleRecordDelta(targetItem, baseItem, curItem) {
+  if (baseItem === curItem) {
+    // 浅拷贝集合（通知、AI 结果）原地修改了共享记录，按目标与当前值差异回填。
+    for (const field of Object.keys(curItem)) {
+      if (field === '_dirty') continue;
+      if (!sameJsonValue(targetItem[field], curItem[field])) targetItem[field] = curItem[field];
+    }
+    return;
+  }
+  for (const field of Object.keys(curItem)) {
+    if (field === '_dirty') continue;
+    if (!sameJsonValue(baseItem[field], curItem[field])) targetItem[field] = curItem[field];
+  }
+  for (const field of Object.keys(baseItem)) {
+    if (!(field in curItem) && field in targetItem) delete targetItem[field];
+  }
+}
+
+// 陈旧快照的数组集合并：在最新状态上补齐新增、按字段更新、并让本请求的删除真正生效。
+// 返回新数组（已变化）或 null（无变化），避免原地改写缓存记录而干扰脏检测。
+function mergeStaleArrayCollection(target, baseList, curList) {
+  const curById = new Map();
+  curList.forEach(item => { if (item && item.id) curById.set(item.id, item); });
+  const baseById = new Map();
+  baseList.forEach(item => { if (item && item.id) baseById.set(item.id, item); });
+  const result = [];
+  const seenIds = new Set();
+  let changed = false;
+  for (const item of target) {
+    if (!item || !item.id) { result.push(item); continue; }
+    if (!curById.has(item.id)) {
+      // 本请求删除了该记录；其他请求新增的记录不在 base 中，需保留。
+      if (baseById.has(item.id)) { changed = true; continue; }
+      result.push(item);
+      continue;
+    }
+    seenIds.add(item.id);
+    const baseItem = baseById.get(item.id);
+    const curItem = curById.get(item.id);
+    if (baseItem && (baseItem === curItem || !sameJsonValue(baseItem, curItem))) {
+      const copy = { ...item };
+      applyStaleRecordDelta(copy, baseItem, curItem);
+      result.push(copy);
+      changed = true;
+    } else {
+      result.push(item);
+    }
+  }
+  for (const item of curList) {
+    if (!item || !item.id) { result.push(item); changed = true; continue; }
+    if (seenIds.has(item.id)) continue;
+    // 读取时已存在、但已被并发请求删除的记录不再补回，尊重删除结果。
+    if (baseById.has(item.id)) continue;
+    result.push(item);
+    changed = true;
+  }
+  return changed ? result : null;
+}
+
+// 无读取基线时退回按 id 合并，保证不会用旧记录整体覆盖新记录。
+function mergeLegacyArrayCollection(target, curList) {
+  const result = target.slice();
+  const indexById = new Map();
+  result.forEach((item, index) => { if (item && item.id) indexById.set(item.id, index); });
+  let changed = false;
+  for (const item of curList) {
+    if (!item || !item.id) { result.push(item); changed = true; continue; }
+    const index = indexById.get(item.id);
+    if (index === undefined) {
+      indexById.set(item.id, result.length);
+      result.push(item);
+      changed = true;
+      continue;
+    }
+    result[index] = { ...result[index], ...item };
+    changed = true;
+  }
+  return changed ? result : null;
+}
+
+// 对象型集合（systemConfig / runtimeState / topologyLayouts）同样按字段增量合并。
+function mergeStaleObjectCollection(targetRoot, key, base, cur) {
+  const curVal = cur[key];
+  if (!curVal || typeof curVal !== 'object') return false;
+  const baseVal = base ? base[key] : undefined;
+  if (!baseVal || typeof baseVal !== 'object' || baseVal === curVal) {
+    targetRoot[key] = curVal;
+    return true;
+  }
+  const targetVal = targetRoot[key] && typeof targetRoot[key] === 'object' ? { ...targetRoot[key] } : {};
+  let changed = false;
+  for (const field of Object.keys(curVal)) {
+    if (!sameJsonValue(baseVal[field], curVal[field])) {
+      targetVal[field] = curVal[field];
+      changed = true;
+    }
+  }
+  for (const field of Object.keys(baseVal)) {
+    if (!(field in curVal) && field in targetVal) {
+      delete targetVal[field];
+      changed = true;
+    }
+  }
+  if (!changed) return false;
+  targetRoot[key] = targetVal;
+  return true;
+}
+
 async function writeDb(db, options = {}) {
   const previousLock = dbWriteLock;
   let releaseLock;
@@ -3225,6 +3347,7 @@ async function writeDb(db, options = {}) {
   await previousLock;
   try {
     let writeTarget = db;
+    const forcedDirtyKeys = new Set();
     if (options.sessionActivityByToken instanceof Map) {
       writeTarget = readDbInternalSync();
       for (const session of writeTarget.sessions || []) {
@@ -3234,38 +3357,60 @@ async function writeDb(db, options = {}) {
         }
       }
       writeTarget._normalized = true;
+      forcedDirtyKeys.add('sessions');
     } else if (db._seq !== undefined && db._seq < dbSequence) {
       const latest = readDbInternalSync();
       const replaceCollections = new Set(options.replaceCollections || []);
+      const base = db._base && typeof db._base === 'object' ? db._base : null;
+      // 在最新状态的浅拷贝上合并，保证缓存记录不被原地改写从而影响脏检测与其他请求的基线。
+      const merged = { ...latest };
       for (const key of dbCollectionKeys) {
         if (replaceCollections.has(key)) {
-          latest[key] = Array.isArray(writeTarget[key]) ? [...writeTarget[key]] : writeTarget[key];
+          merged[key] = Array.isArray(writeTarget[key]) ? [...writeTarget[key]] : writeTarget[key];
+          forcedDirtyKeys.add(key);
+          continue;
+        }
+        if (isObjectCollection(key)) {
+          if (base && base[key] && typeof base[key] === 'object') {
+            if (mergeStaleObjectCollection(merged, key, base, writeTarget)) forcedDirtyKeys.add(key);
+          } else if (writeTarget[key] !== undefined) {
+            merged[key] = writeTarget[key];
+            forcedDirtyKeys.add(key);
+          }
           continue;
         }
         if (Array.isArray(latest[key]) && Array.isArray(writeTarget[key])) {
-          const latestById = new Map(latest[key].map(item => [item.id, item]));
-          for (const item of writeTarget[key]) {
-            const existing = latestById.get(item.id);
-            if (existing) {
-              Object.assign(existing, item);
-            } else if (item && item.id) {
-              latest[key].push(item);
-              latestById.set(item.id, item);
+          if (base && Array.isArray(base[key])) {
+            const nextList = mergeStaleArrayCollection(latest[key], base[key], writeTarget[key]);
+            if (nextList) {
+              merged[key] = nextList;
+              forcedDirtyKeys.add(key);
+            }
+          } else {
+            const nextList = mergeLegacyArrayCollection(latest[key], writeTarget[key]);
+            if (nextList) {
+              merged[key] = nextList;
+              forcedDirtyKeys.add(key);
             }
           }
         }
       }
-      if (writeTarget.systemConfig) latest.systemConfig = writeTarget.systemConfig;
-      if (writeTarget.runtimeState) latest.runtimeState = writeTarget.runtimeState;
-      writeTarget = latest;
+      merged._normalized = true;
+      writeTarget = merged;
+    }
+    const normalized = writeTarget._normalized ? pickDbCollections(writeTarget) : normalizeDb(writeTarget);
+    // 先同步计算脏集合并发布新状态，再执行异步落库；否则 await 期间序号已推进但缓存仍是旧数据，
+    // 会让并发读取拿到「新序号 + 旧快照」并走非陈旧分支覆盖掉刚写入的数据。
+    const dirtyKeys = changedCollectionKeys(latestFileDbCache, normalized);
+    for (const key of forcedDirtyKeys) {
+      if (!dirtyKeys.includes(key)) dirtyKeys.push(key);
     }
     dbSequence++;
     writeTarget._seq = dbSequence;
-    const normalized = writeTarget._normalized ? pickDbCollections(writeTarget) : normalizeDb(writeTarget);
+    rememberLiveDb(normalized);
     try {
       await ensureMySqlReady();
       await syncFileDbToMySqlIfNeeded();
-      const dirtyKeys = changedCollectionKeys(latestFileDbCache, normalized);
       if (dirtyKeys.length) {
         await writeNormalizedDbToMySql(normalized, dirtyKeys);
         dirtyKeys.forEach(key => clearCollectionDirtyFlags(normalized[key]));
