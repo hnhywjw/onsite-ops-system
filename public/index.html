@@ -3342,6 +3342,22 @@
             </div>
             <div id="workReportReminderMessage"></div>
           </div>
+          <div class="card" style="margin-top: 16px;">
+            <h3 style="margin:0 0 8px;">巡检 / 监控目标白名单</h3>
+            <div class="muted">每行一条，支持 IP、CIDR（如 10.0.0.0/24、2001:db8::/32）与主机名（*.example.com 匹配子域）。留空表示除特殊地址外全部放行；填写后仅白名单内的目标可配置与探测。回环、链路本地、云元数据、组播、保留段与 IPv6 ULA 地址始终禁止。</div>
+            <label style="margin-top:12px; display:block;">
+              <span>白名单条目（每行一条）</span>
+              <textarea id="monitorTargetAllowlist" rows="5" placeholder="10.0.0.0/24&#10;2001:db8::/32&#10;*.example.com"></textarea>
+            </label>
+            <label style="margin-top:12px; max-width: 320px; display:block;">
+              <span>管理员密码（保存必填）</span>
+              <input id="monitorAllowlistPassword" type="password" placeholder="请输入当前管理员密码" autocomplete="current-password" />
+            </label>
+            <div class="system-actions" style="margin-top: 16px;">
+              <button class="primary" id="saveMonitorAllowlistBtn" type="button">保存白名单</button>
+            </div>
+            <div id="monitorAllowlistMessage"></div>
+          </div>
         </div>
         <div class="subtab-panel hidden" data-section="system" data-subtab="auditLog">
         <div class="card">
@@ -7846,6 +7862,8 @@
       if (dailyHighHoursThresholdInput) dailyHighHoursThresholdInput.value = String(Number(state.systemConfig?.dailyHighHoursThreshold ?? 12));
       if (noLogStreakDaysInput) noLogStreakDaysInput.value = String(Number(state.systemConfig?.noLogStreakDays ?? 3));
       if (projectInactiveDaysInput) projectInactiveDaysInput.value = String(Number(state.systemConfig?.projectInactiveDays ?? 7));
+      const monitorTargetAllowlistInput = document.getElementById('monitorTargetAllowlist');
+      if (monitorTargetAllowlistInput) monitorTargetAllowlistInput.value = String(state.systemConfig?.monitorTargetAllowlist || '');
       const tzSelect = document.getElementById('systemTimezone');
       if (tzSelect) {
         const tzOffset = Number(state.systemConfig?.timezoneOffset);
@@ -11552,6 +11570,35 @@
         await refreshSystemManagement();
       } catch (error) {
         setMessage('workReportReminderMessage', error.message, 'error');
+      } finally {
+        button.disabled = false;
+        button.textContent = originalText;
+      }
+    });
+    document.getElementById('saveMonitorAllowlistBtn').addEventListener('click', async event => {
+      const allowlistInput = document.getElementById('monitorTargetAllowlist');
+      const passwordInput = document.getElementById('monitorAllowlistPassword');
+      const password = passwordInput ? passwordInput.value : '';
+      if (!password) {
+        setMessage('monitorAllowlistMessage', '请先输入当前管理员密码', 'error');
+        passwordInput?.focus();
+        return;
+      }
+      const button = event.currentTarget;
+      const originalText = button.textContent;
+      button.disabled = true;
+      button.textContent = '保存中...';
+      try {
+        const result = await api('/api/system/settings', {
+          method: 'POST',
+          body: JSON.stringify({ monitorTargetAllowlist: allowlistInput.value, password })
+        });
+        state.systemConfig = result.systemConfig || state.systemConfig;
+        if (passwordInput) passwordInput.value = '';
+        renderSystemSettings();
+        setMessage('monitorAllowlistMessage', result.message || '白名单已保存');
+      } catch (error) {
+        setMessage('monitorAllowlistMessage', error.message, 'error');
       } finally {
         button.disabled = false;
         button.textContent = originalText;

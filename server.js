@@ -917,7 +917,8 @@ function normalizeSystemConfig(rawSystemConfig = {}) {
     dailyLowHoursThreshold: Number.isFinite(dailyLowHoursThreshold) ? Math.min(24, Math.max(0, Math.round(dailyLowHoursThreshold * 10) / 10)) : defaultDailyLowHoursThreshold,
     dailyHighHoursThreshold: Number.isFinite(dailyHighHoursThreshold) ? Math.min(24, Math.max(0, Math.round(dailyHighHoursThreshold * 10) / 10)) : defaultDailyHighHoursThreshold,
     noLogStreakDays: Number.isFinite(noLogStreakDays) ? Math.min(30, Math.max(1, Math.round(noLogStreakDays))) : defaultNoLogStreakDays,
-    projectInactiveDays: Number.isFinite(projectInactiveDays) ? Math.min(90, Math.max(1, Math.round(projectInactiveDays))) : defaultProjectInactiveDays
+    projectInactiveDays: Number.isFinite(projectInactiveDays) ? Math.min(90, Math.max(1, Math.round(projectInactiveDays))) : defaultProjectInactiveDays,
+    monitorTargetAllowlist: String(rawSystemConfig.monitorTargetAllowlist || '').trim().slice(0, 4096)
   };
 }
 
@@ -929,7 +930,8 @@ function presentSystemConfig(user, config) {
     timezoneOffset: normalized.timezoneOffset,
     allowRegistration: normalized.allowRegistration,
     httpsLoginEnabled: normalized.httpsLoginEnabled,
-    httpLoginDisabled: normalized.httpLoginDisabled
+    httpLoginDisabled: normalized.httpLoginDisabled,
+    monitorTargetAllowlist: normalized.monitorTargetAllowlist
   };
 }
 
@@ -2022,6 +2024,192 @@ function isBlockedSsrfIp(ip) {
   return true;
 }
 
+function isLoopbackIp(ip) {
+  const mapped = extractIpv4FromMapped(ip);
+  if (mapped) return isLoopbackIp(mapped);
+  if (net.isIP(ip) === 4) {
+    const value = ipv4ToInt(ip);
+    return value >= ipv4ToInt('127.0.0.1') && value <= ipv4ToInt('127.255.255.255');
+  }
+  if (net.isIP(ip) === 6) return String(ip).trim().toLowerCase() === '::1';
+  return false;
+}
+
+function ipv6ToBuffer(ip) {
+  const raw = String(ip || '').trim().toLowerCase().split('%')[0];
+  if (net.isIP(raw) !== 6) return null;
+  const buffer = Buffer.alloc(16);
+  const doubleIndex = raw.indexOf('::');
+  const head = doubleIndex === -1 ? raw : raw.slice(0, doubleIndex);
+  const tail = doubleIndex === -1 ? '' : raw.slice(doubleIndex + 2);
+  const parseGroups = segment => {
+    const groups = [];
+    if (!segment) return groups;
+    for (const part of segment.split(':')) {
+      if (!part) return null;
+      if (part.includes('.')) {
+        if (net.isIP(part) !== 4) return null;
+        const value = ipv4ToInt(part);
+        groups.push(value >>> 16, value & 0xffff);
+      } else {
+        if (!/^[0-9a-f]{1,4}$/.test(part)) return null;
+        groups.push(parseInt(part, 16));
+      }
+    }
+    return groups;
+  };
+  const headGroups = parseGroups(head);
+  const tailGroups = parseGroups(tail);
+  if (!headGroups || !tailGroups) return null;
+  if (doubleIndex === -1) {
+    if (headGroups.length !== 8) return null;
+    headGroups.forEach((value, index) => buffer.writeUInt16BE(value, index * 2));
+    return buffer;
+  }
+  if (headGroups.length + tailGroups.length > 7) return null;
+  headGroups.forEach((value, index) => buffer.writeUInt16BE(value, index * 2));
+  tailGroups.forEach((value, index) => buffer.writeUInt16BE(value, 16 - (tailGroups.length - index) * 2));
+  return buffer;
+}
+
+function isValidMonitorAllowlistEntry(entry) {
+  if (!entry) return false;
+  if (net.isIP(entry)) return true;
+  const slash = entry.indexOf('/');
+  if (slash !== -1) {
+    const base = entry.slice(0, slash);
+    const family = net.isIP(base);
+    const prefix = Number(entry.slice(slash + 1));
+    if (family === 4) return Number.isInteger(prefix) && prefix >= 0 && prefix <= 32;
+    if (family === 6) return Number.isInteger(prefix) && prefix >= 0 && prefix <= 128;
+    return false;
+  }
+  return /^(\*\.)?[a-z0-9]([a-z0-9-]*[a-z0-9])?(\.[a-z0-9]([a-z0-9-]*[a-z0-9])?)*$/.test(entry);
+}
+
+// 解析管理员配置的巡检目标白名单：支持 IP、CIDR 与主机名（可用 *.example.com 通配子域）。
+function parseMonitorAllowlist(raw) {
+  const source = Array.isArray(raw) ? raw : String(raw == null ? '' : raw).split(/[\n,;]+/);
+  const entries = [];
+  const seen = new Set();
+  for (const item of source) {
+    const entry = String(item || '').trim().toLowerCase().replace(/\.$/, '');
+    if (!entry || seen.has(entry) || !isValidMonitorAllowlistEntry(entry)) continue;
+    seen.add(entry);
+    entries.push(entry);
+  }
+  return entries;
+}
+
+// 保存配置时校验：返回首个无法识别的白名单条目，供接口直接拒绝并提示。
+function findInvalidMonitorAllowlistEntry(raw) {
+  const source = Array.isArray(raw) ? raw : String(raw == null ? '' : raw).split(/[\n,;]+/);
+  for (const item of source) {
+    const entry = String(item || '').trim().toLowerCase().replace(/\.$/, '');
+    if (!entry) continue;
+    if (!isValidMonitorAllowlistEntry(entry)) return entry;
+  }
+  return '';
+}
+
+function ipMatchesAllowlistEntry(ip, entry) {
+  const target = extractIpv4FromMapped(ip) || String(ip || '').trim().toLowerCase();
+  const raw = String(entry || '').trim().toLowerCase();
+  if (!target || !raw) return false;
+  const slash = raw.indexOf('/');
+  if (slash === -1) {
+    const family = net.isIP(raw);
+    if (family === 4) return net.isIP(target) === 4 && ipv4ToInt(target) === ipv4ToInt(raw);
+    if (family === 6) {
+      const a = ipv6ToBuffer(target);
+      const b = ipv6ToBuffer(raw);
+      return Boolean(a && b && a.equals(b));
+    }
+    return false;
+  }
+  const base = raw.slice(0, slash);
+  const prefix = Number(raw.slice(slash + 1));
+  const family = net.isIP(base);
+  if (family === 4) {
+    if (net.isIP(target) !== 4) return false;
+    const mask = prefix === 0 ? 0 : (0xffffffff << (32 - prefix)) >>> 0;
+    return ((ipv4ToInt(target) & mask) >>> 0) === ((ipv4ToInt(base) & mask) >>> 0);
+  }
+  if (family === 6) {
+    if (net.isIP(target) !== 6) return false;
+    const targetBuffer = ipv6ToBuffer(target);
+    const baseBuffer = ipv6ToBuffer(base);
+    if (!targetBuffer || !baseBuffer) return false;
+    let bits = prefix;
+    for (let i = 0; i < 16 && bits > 0; i += 1) {
+      const take = Math.min(8, bits);
+      const mask = take === 0 ? 0 : (0xff << (8 - take)) & 0xff;
+      if ((targetBuffer[i] & mask) !== (baseBuffer[i] & mask)) return false;
+      bits -= take;
+    }
+    return true;
+  }
+  return false;
+}
+
+function hostMatchesAllowlistEntry(host, entry) {
+  const name = String(host || '').trim().toLowerCase().replace(/\.$/, '');
+  const raw = String(entry || '').trim().toLowerCase().replace(/\.$/, '');
+  if (!name || !raw) return false;
+  if (raw.startsWith('*.')) return name.endsWith(raw.slice(1)) && name.length > raw.length - 1;
+  return name === raw;
+}
+
+// 单项目标判定：先封禁特殊地址，再按白名单收窄（白名单为空表示内网私网默认放行）。
+function evaluateMonitorTarget(host, ip, entries, allowLoopback) {
+  if (allowLoopback && isLoopbackIp(ip)) return { allowed: true };
+  if (isBlockedSsrfIp(ip)) {
+    return { allowed: false, message: `目标地址 ${ip} 属于禁止探测的特殊地址（回环、链路本地、组播或保留段）` };
+  }
+  if (!entries.length) return { allowed: true };
+  const matched = entries.some(entry => (net.isIP(entry) || entry.includes('/'))
+    ? ipMatchesAllowlistEntry(ip, entry)
+    : hostMatchesAllowlistEntry(host, entry));
+  if (!matched) {
+    return { allowed: false, message: `目标地址 ${host} 不在巡检目标白名单内，请先在系统设置中放行` };
+  }
+  return { allowed: true };
+}
+
+let monitorTargetPolicy = { entries: [], allowLoopback: !isProduction };
+
+function refreshMonitorTargetPolicy(systemConfig) {
+  const normalized = normalizeSystemConfig(systemConfig || {});
+  monitorTargetPolicy = {
+    entries: parseMonitorAllowlist(normalized.monitorTargetAllowlist),
+    allowLoopback: !isProduction
+  };
+}
+
+// 解析目标地址并校验每个解析结果；连接前调用可防 DNS rebinding 与配置绕过。
+async function resolveMonitorTargetAddress(host) {
+  const raw = String(host || '').trim();
+  if (!validateHost(raw)) return { ok: false, message: '目标地址格式无效' };
+  const literalFamily = net.isIP(raw);
+  let ips = [];
+  if (literalFamily) {
+    ips = [raw];
+  } else {
+    try {
+      const records = await dns.lookup(raw, { all: true });
+      ips = records.map(record => record.address);
+    } catch (_) {
+      return { ok: false, message: '目标地址无法解析' };
+    }
+  }
+  if (!ips.length) return { ok: false, message: '目标地址无法解析' };
+  for (const ip of ips) {
+    const verdict = evaluateMonitorTarget(raw, ip, monitorTargetPolicy.entries, monitorTargetPolicy.allowLoopback);
+    if (!verdict.allowed) return { ok: false, message: verdict.message };
+  }
+  return { ok: true, ips, address: ips[0] };
+}
+
 // 出站请求前的目标校验：仅允许 HTTP/HTTPS、禁止内嵌凭据、要求地址与巡检对象一致，
 // 并封禁回环、链路本地/云元数据、组播、保留段与 IPv6 ULA 等特殊地址。
 // 返回已校验的 DNS 解析结果，供连接阶段固定使用，避免校验后再解析导致的 rebinding。
@@ -2034,6 +2222,12 @@ async function resolveValidatedHttpTarget(url, expectedHost) {
   const allowLocalTestTarget = !isProduction && ['127.0.0.1', 'localhost'].includes(url.hostname);
   if (!allowLocalTestTarget && (!records.length || records.some(record => isBlockedSsrfIp(record.address)))) {
     throw new Error('Web 备份地址指向受限网络');
+  }
+  if (!allowLocalTestTarget) {
+    for (const record of records) {
+      const verdict = evaluateMonitorTarget(url.hostname, record.address, monitorTargetPolicy.entries, monitorTargetPolicy.allowLoopback);
+      if (!verdict.allowed) throw new Error(verdict.message || 'Web 备份地址不在巡检目标白名单内');
+    }
   }
   return records[0];
 }
@@ -2079,10 +2273,11 @@ function requestPinnedUrl(url, pinned, options = {}) {
   });
 }
 
-function probeHostReachable(host) {
-  if (!validateHost(host)) return Promise.resolve({ reachable: false, latency: null });
+async function probeHostReachable(host) {
+  const gate = await resolveMonitorTargetAddress(host);
+  if (!gate.ok) return { reachable: false, latency: null };
   return new Promise((resolve) => {
-    execFile('ping', ['-c', '1', '-W', '2', host], { timeout: 5000 }, (error, stdout) => {
+    execFile('ping', ['-c', '1', '-W', '2', gate.address], { timeout: 5000 }, (error, stdout) => {
       if (error) return resolve({ reachable: false, latency: null });
       const match = stdout.match(/time=([\d.]+)\s*ms/);
       const latency = match ? parseFloat(match[1]) : null;
@@ -2091,10 +2286,12 @@ function probeHostReachable(host) {
   });
 }
 
-function probePortOpen(host, port) {
-  if (!validateHost(host) || !validatePort(port)) return Promise.resolve({ open: false });
+async function probePortOpen(host, port) {
+  if (!validatePort(port)) return { open: false };
+  const gate = await resolveMonitorTargetAddress(host);
+  if (!gate.ok) return { open: false };
   return new Promise((resolve) => {
-    const socket = net.createConnection({ host, port: Number(port), timeout: 3000 });
+    const socket = net.createConnection({ host: gate.address, port: Number(port), timeout: 3000 });
     let settled = false;
     const finish = open => {
       if (settled) return;
@@ -2156,6 +2353,17 @@ function ensureSshKnownHost(host, port) {
 function executeSSHCheck(host, port, username, secret, options = {}) {
   if (!validateHost(host) || !validatePort(port)) return Promise.resolve({ success: false, stdout: '', stderr: 'Invalid host or port' });
   if (!username || typeof username !== 'string' || !/^[a-zA-Z0-9_.-]+$/.test(username)) return Promise.resolve({ success: false, stdout: '', stderr: 'Invalid username' });
+  // 连接前再次校验目标地址，避免白名单配置被绕过或出现 DNS rebinding。
+  const gate = resolveMonitorTargetAddress(host).then(result => result.ok
+    ? null
+    : { success: false, stdout: '', stderr: result.message || '目标地址不允许探测' });
+  return gate.then(blocked => {
+    if (blocked) return blocked;
+    return runSshCheck(host, port, username, secret, options);
+  });
+}
+
+function runSshCheck(host, port, username, secret, options = {}) {
   return new Promise(resolve => {
     const keyFile = path.join(sshRuntimeDir(), `key-${Date.now()}-${crypto.randomBytes(8).toString('hex')}`);
     const knownHosts = sshKnownHostsPath();
@@ -2311,9 +2519,11 @@ function parseSnmpVarBind(buf) {
   return result;
 }
 
-function snmpUdpRequest(host, port, community, oid, timeoutMs, encodeFn) {
+async function snmpUdpRequest(host, port, community, oid, timeoutMs, encodeFn) {
+  if (!validatePort(port) || !String(community || '').trim()) return null;
+  const gate = await resolveMonitorTargetAddress(host);
+  if (!gate.ok) return null;
   return new Promise(resolve => {
-    if (!validateHost(host) || !validatePort(port) || !String(community || '').trim()) return resolve(null);
     const socket = dgram.createSocket('udp4');
     const requestId = crypto.randomInt(1, 0x7fffffff);
     const packet = encodeFn(community, requestId, oid);
@@ -2333,7 +2543,7 @@ function snmpUdpRequest(host, port, community, oid, timeoutMs, encodeFn) {
       clearTimeout(timer);
       finish(parseSnmpVarBind(msg));
     });
-    socket.send(packet, Number(port) || 161, host, error => {
+    socket.send(packet, Number(port) || 161, gate.address, error => {
       if (error) {
         clearTimeout(timer);
         finish(null);
@@ -2362,11 +2572,13 @@ async function snmpWalkSubtreeUdp(host, port, community, baseOid, timeoutMs = 40
   return items;
 }
 
-function snmpWalkSubtreeNative(host, port, community, oid, timeoutMs = 4000) {
+async function snmpWalkSubtreeNative(host, port, community, oid, timeoutMs = 4000) {
+  const gate = await resolveMonitorTargetAddress(host);
+  if (!gate.ok) throw new Error(gate.message || '目标地址不允许探测');
   const snmp = loadSnmpNative();
   if (!snmp) return Promise.reject(new Error('snmp-native unavailable'));
   return new Promise((resolve, reject) => {
-    const session = new snmp.Session({ host, community, port: Number(port) || 161, timeouts: [Math.min(timeoutMs, 3000)] });
+    const session = new snmp.Session({ host: gate.address, community, port: Number(port) || 161, timeouts: [Math.min(timeoutMs, 3000)] });
     const timer = setTimeout(() => {
       try { session.close(); } catch (_) {}
       reject(new Error('SNMP timeout'));
@@ -3461,6 +3673,7 @@ async function runAiInspectionScheduler() {
   try {
     const db = await readDb();
     systemTimezoneOffsetMinutes = db.systemConfig?.timezoneOffset ?? 480;
+    refreshMonitorTargetPolicy(db.systemConfig);
     const pendingTaskChanged = await processPendingAiInspectionTasks(db);
     const pendingConfigBackupChanged = await processPendingConfigBackupPlans(db);
     const maintenanceChanged = runMaintenanceTasks(db);
@@ -4705,6 +4918,14 @@ function executeSSHCommand(host, port, username, secret, command, options = {}) 
   if (!username || typeof username !== 'string' || !/^[a-zA-Z0-9_.-]+$/.test(username)) return Promise.resolve({ success: false, stdout: '', stderr: 'Invalid username' });
   const commandValidation = validateBackupCommand(command);
   if (!commandValidation.ok) return Promise.resolve({ success: false, stdout: '', stderr: commandValidation.message });
+  // 连接前再次校验目标地址，避免白名单配置被绕过或出现 DNS rebinding。
+  return resolveMonitorTargetAddress(host).then(gate => {
+    if (!gate.ok) return { success: false, stdout: '', stderr: gate.message || '目标地址不允许探测' };
+    return runSshCommand(host, port, username, secret, commandValidation, options);
+  });
+}
+
+function runSshCommand(host, port, username, secret, commandValidation, options = {}) {
   return new Promise((resolve) => {
     const keyFile = path.join(sshRuntimeDir(), `key-${Date.now()}-${crypto.randomBytes(8).toString('hex')}`);
     const knownHosts = sshKnownHostsPath();
@@ -7111,6 +7332,7 @@ const requestHandler = async (req, res) => {
     }
     const db = await readDb();
     systemTimezoneOffsetMinutes = db.systemConfig?.timezoneOffset ?? 480;
+    refreshMonitorTargetPolicy(db.systemConfig);
     if (!validateCsrf(req, res, db, pathname)) return;
 
     tryLazyInitHttps(db);
@@ -7910,6 +8132,10 @@ const requestHandler = async (req, res) => {
       }
       const monitorFields = readMonitorFields(body);
       if (monitorFields.error) return json(res, 400, { message: monitorFields.error });
+      if (monitorFields.monitorEnabled && monitorFields.monitorHost) {
+        const gate = await resolveMonitorTargetAddress(monitorFields.monitorHost);
+        if (!gate.ok) return json(res, 400, { message: gate.message });
+      }
       const item = {
         id: id('asset'),
         projectId,
@@ -8007,6 +8233,14 @@ const requestHandler = async (req, res) => {
           results.skipped++;
           continue;
         }
+        if (monitorFields.monitorEnabled && monitorFields.monitorHost) {
+          const gate = await resolveMonitorTargetAddress(monitorFields.monitorHost);
+          if (!gate.ok) {
+            results.errors.push(`${rowLabel}: ${gate.message}`);
+            results.skipped++;
+            continue;
+          }
+        }
         const item = {
           id: id('asset'),
           projectId,
@@ -8060,6 +8294,10 @@ const requestHandler = async (req, res) => {
       if (body.name !== undefined && !String(body.name || '').trim()) return json(res, 400, { message: '资产名称不能为空' });
       const monitorFields = readMonitorFields(body, target);
       if (monitorFields.error) return json(res, 400, { message: monitorFields.error });
+      if (monitorFields.monitorEnabled && monitorFields.monitorHost) {
+        const gate = await resolveMonitorTargetAddress(monitorFields.monitorHost);
+        if (!gate.ok) return json(res, 400, { message: gate.message });
+      }
       target.projectId = projectId;
       target.type = body.type || target.type;
       target.name = body.name !== undefined ? String(body.name).trim() : target.name;
@@ -9379,6 +9617,8 @@ const requestHandler = async (req, res) => {
       if (body.assetId && (!asset || asset.projectId !== projectId)) return json(res, 400, { message: '关联资产不存在或归属不一致' });
       if (!String(body.name || '').trim() || !String(body.address || '').trim()) return json(res, 400, { message: '巡检对象名称和管理地址不能为空' });
       if (!validateHost(String(body.address || '').trim())) return json(res, 400, { message: '管理地址格式无效，请填写 IP 或主机名' });
+      const addressGate = await resolveMonitorTargetAddress(String(body.address || '').trim());
+      if (!addressGate.ok) return json(res, 400, { message: addressGate.message });
       if (body.port !== undefined && body.port !== '' && body.port !== null && Number(body.port) !== 0 && !validatePort(body.port)) {
         return json(res, 400, { message: '管理端口需为 1-65535 之间的整数' });
       }
@@ -9473,6 +9713,10 @@ const requestHandler = async (req, res) => {
       if (body.address !== undefined || body.managementAddress !== undefined) {
         const nextAddress = String(body.address || body.managementAddress || '').trim();
         if (nextAddress && !validateHost(nextAddress)) return json(res, 400, { message: '管理地址格式无效，请填写 IP 或主机名' });
+        if (nextAddress) {
+          const addressGate = await resolveMonitorTargetAddress(nextAddress);
+          if (!addressGate.ok) return json(res, 400, { message: addressGate.message });
+        }
         target.address = nextAddress;
       }
       if (body.protocol !== undefined) {
@@ -10399,18 +10643,25 @@ const requestHandler = async (req, res) => {
       const user = requireAdmin(req, res, db);
       if (!user) return;
       const body = await readBody(req);
-      const allowedKeys = ['webIdleLogoutMinutes', 'httpsLoginEnabled', 'httpsPort', 'allowRegistration', 'httpLoginDisabled', 'loginRateLimitMaxAttempts', 'loginRateLimitWindowMinutes', 'loginRateLimitLockMinutes', 'timezoneOffset', 'dailyReportReminderHour', 'weeklyReportReminderDays', 'monthlyReportReminderDays', 'dailyLowHoursThreshold', 'dailyHighHoursThreshold', 'noLogStreakDays', 'projectInactiveDays'];
+      const allowedKeys = ['webIdleLogoutMinutes', 'httpsLoginEnabled', 'httpsPort', 'allowRegistration', 'httpLoginDisabled', 'loginRateLimitMaxAttempts', 'loginRateLimitWindowMinutes', 'loginRateLimitLockMinutes', 'timezoneOffset', 'dailyReportReminderHour', 'weeklyReportReminderDays', 'monthlyReportReminderDays', 'dailyLowHoursThreshold', 'dailyHighHoursThreshold', 'noLogStreakDays', 'projectInactiveDays', 'monitorTargetAllowlist'];
       const safeBody = {};
       for (const key of allowedKeys) {
         if (body[key] !== undefined) safeBody[key] = body[key];
       }
       // 涉及登录与账号锁定策略的敏感设置需要管理员二次验证，防止会话被盗后放宽防护。
-      const sensitiveKeys = ['httpsLoginEnabled', 'httpLoginDisabled', 'allowRegistration', 'loginRateLimitMaxAttempts', 'loginRateLimitWindowMinutes', 'loginRateLimitLockMinutes'];
+      const sensitiveKeys = ['httpsLoginEnabled', 'httpLoginDisabled', 'allowRegistration', 'loginRateLimitMaxAttempts', 'loginRateLimitWindowMinutes', 'loginRateLimitLockMinutes', 'monitorTargetAllowlist'];
       if (sensitiveKeys.some(key => safeBody[key] !== undefined) && !verifyAdminStepUp(user, body.password)) {
         return json(res, 401, { message: '修改登录安全设置需要管理员密码验证' });
       }
+      if (safeBody.monitorTargetAllowlist !== undefined) {
+        const invalidEntry = findInvalidMonitorAllowlistEntry(safeBody.monitorTargetAllowlist);
+        if (invalidEntry) {
+          return json(res, 400, { message: `白名单条目无效：${invalidEntry}，请填写 IP、CIDR 或主机名` });
+        }
+      }
       db.systemConfig = normalizeSystemConfig({ ...db.systemConfig, ...safeBody });
       systemTimezoneOffsetMinutes = db.systemConfig.timezoneOffset;
+      refreshMonitorTargetPolicy(db.systemConfig);
       await applyHttpsServerConfig(db.systemConfig);
       appendAuditLog(db, user, 'update', 'system', '', `更新系统设置`);
       await writeDb(db);
@@ -11194,12 +11445,12 @@ function setMonitorStatus(assetId, status) {
   return { prev, current: entry, changed: !prev || prev.status !== status };
 }
 
-function checkAssetPing(host, timeoutMs = 3000) {
+async function checkAssetPing(host, timeoutMs = 3000) {
+  const gate = await resolveMonitorTargetAddress(host);
+  if (!gate.ok) return 'offline';
   return new Promise(resolve => {
     try {
-      const safeHost = String(host || '').trim();
-      if (!validateHost(safeHost)) return resolve('offline');
-      const child = execFile('ping', ['-c', '1', '-W', '2', safeHost], { timeout: timeoutMs }, (err) => {
+      const child = execFile('ping', ['-c', '1', '-W', '2', gate.address], { timeout: timeoutMs }, (err) => {
         resolve(err ? 'offline' : 'online');
       });
       setTimeout(() => { try { child.kill(); } catch (_) {} resolve('offline'); }, timeoutMs);
@@ -11209,17 +11460,19 @@ function checkAssetPing(host, timeoutMs = 3000) {
   });
 }
 
-function checkAssetTcp(host, port, timeoutMs = 3000) {
+async function checkAssetTcp(host, port, timeoutMs = 3000) {
+  if (!validatePort(port)) return 'offline';
+  const gate = await resolveMonitorTargetAddress(host);
+  if (!gate.ok) return 'offline';
   return new Promise(resolve => {
     try {
-      if (!validateHost(host) || !validatePort(port)) return resolve('offline');
       const net = require('net');
       const socket = new net.Socket();
       socket.setTimeout(timeoutMs);
       socket.on('connect', () => { socket.destroy(); resolve('online'); });
       socket.on('error', () => { socket.destroy(); resolve('offline'); });
       socket.on('timeout', () => { socket.destroy(); resolve('offline'); });
-      socket.connect(Number(port), host);
+      socket.connect(Number(port), gate.address);
     } catch (_) {
       resolve('offline');
     }
@@ -11418,6 +11671,7 @@ async function notifyMonitorChange(asset, prevStatus, newStatus) {
 async function runAssetMonitorScheduler() {
   try {
     const db = await readDb();
+    refreshMonitorTargetPolicy(db.systemConfig);
     const monitoredAssets = (db.assets || []).filter(a => a.monitorEnabled && a.monitorHost);
     for (const asset of monitoredAssets) {
       await checkAssetMonitor(asset);

@@ -190,7 +190,7 @@ async function login(username, password, options = {}) {
 }
 
 async function updateSystemSettings(cookie, payload) {
-  const sensitiveKeys = ['httpsLoginEnabled', 'httpLoginDisabled', 'allowRegistration', 'loginRateLimitMaxAttempts', 'loginRateLimitWindowMinutes', 'loginRateLimitLockMinutes'];
+  const sensitiveKeys = ['httpsLoginEnabled', 'httpLoginDisabled', 'allowRegistration', 'loginRateLimitMaxAttempts', 'loginRateLimitWindowMinutes', 'loginRateLimitLockMinutes', 'monitorTargetAllowlist'];
   const needsStepUp = sensitiveKeys.some(key => payload[key] !== undefined);
   const body = needsStepUp && payload.password === undefined ? { ...payload, password: 'Admin123!' } : payload;
   return request('/api/system/settings', {
@@ -2292,6 +2292,35 @@ async function main() {
     body: JSON.stringify({ projectId, name: `非法端口-${Date.now()}`, address: '10.0.0.1', protocol: 'winrm', port: 99999, authType: 'password', account: 'a', password: 'b' })
   });
   assert(badPortTarget.status === 400, '非法巡检端口应返回 400');
+
+  // 巡检目标白名单：保存时校验条目语法，创建/连接前按白名单收窄，特殊地址始终禁止
+  const invalidAllowlist = await updateSystemSettings(cookie, { monitorTargetAllowlist: 'not a host!' });
+  assert(invalidAllowlist.status === 400, '非法白名单条目应返回 400');
+  const savedAllowlist = await updateSystemSettings(cookie, { monitorTargetAllowlist: '10.0.0.0/24' });
+  assert(savedAllowlist.status === 200 && savedAllowlist.data.systemConfig?.monitorTargetAllowlist === '10.0.0.0/24', '白名单保存结果不正确');
+  const buildTargetPayload = address => ({
+    projectId, name: `白名单目标-${Date.now()}`, address, protocol: 'winrm', port: 5985, authType: 'password', account: 'a', password: 'b'
+  });
+  const allowlistOutside = await request('/api/ai-inspection/targets', {
+    method: 'POST', headers: { cookie, 'Content-Type': 'application/json' }, body: JSON.stringify(buildTargetPayload('192.168.50.10'))
+  });
+  assert(allowlistOutside.status === 400, '白名单外地址应被拒绝');
+  const allowlistSpecial = await request('/api/ai-inspection/targets', {
+    method: 'POST', headers: { cookie, 'Content-Type': 'application/json' }, body: JSON.stringify(buildTargetPayload('169.254.169.254'))
+  });
+  assert(allowlistSpecial.status === 400, '云元数据等特殊地址应被拒绝');
+  const allowlistInside = await request('/api/ai-inspection/targets', {
+    method: 'POST', headers: { cookie, 'Content-Type': 'application/json' }, body: JSON.stringify(buildTargetPayload('10.0.0.77'))
+  });
+  assert(allowlistInside.status === 201, `白名单内地址应被放行: ${allowlistInside.status} ${JSON.stringify(allowlistInside.data)}`);
+  await request(`/api/ai-inspection/targets/${allowlistInside.data.id}`, { method: 'DELETE', headers: { cookie } });
+  const clearedAllowlist = await updateSystemSettings(cookie, { monitorTargetAllowlist: '' });
+  assert(clearedAllowlist.status === 200 && clearedAllowlist.data.systemConfig?.monitorTargetAllowlist === '', '清空白名单失败');
+  const privateAfterClear = await request('/api/ai-inspection/targets', {
+    method: 'POST', headers: { cookie, 'Content-Type': 'application/json' }, body: JSON.stringify(buildTargetPayload('192.168.50.10'))
+  });
+  assert(privateAfterClear.status === 201, '清空白名单后内网地址应默认放行');
+  await request(`/api/ai-inspection/targets/${privateAfterClear.data.id}`, { method: 'DELETE', headers: { cookie } });
 
   process.stdout.write('Regression passed\n');
 }
