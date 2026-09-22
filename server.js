@@ -2945,6 +2945,7 @@ function normalizeDb(raw = {}) {
     })),
     aiInspectionTemplates: ((raw.aiInspectionTemplates || []).length ? raw.aiInspectionTemplates : getDefaultAiInspectionTemplates()).map(item => ({
       id: item.id || id('aiTpl'),
+      projectId: item.projectId || '',
       name: item.name || '',
       category: item.category || 'server',
       description: item.description || '',
@@ -4168,6 +4169,14 @@ function filterByProjectScope(list, user, getProjectId) {
     const projectId = getProjectId(item);
     return Boolean(projectId) && projectId === user.projectId;
   });
+}
+
+// 无归属项目的模板（内置或管理员创建）对所有项目可见，带 projectId 的自建模板仅在所属项目内可见。
+function canUseAiInspectionTemplate(user, item) {
+  if (!user || !item) return false;
+  if (user.role === 'admin') return true;
+  if (!item.projectId) return true;
+  return Boolean(user.projectId) && item.projectId === user.projectId;
 }
 
 function appendAuditLog(db, user, action, targetType, targetId, detail, projectId = '') {
@@ -6153,43 +6162,6 @@ function buildSummary(db, period, userId, projectId = '') {
       projects: [...item.projects],
       users: [...item.users]
     }));
-}
-
-function buildDrilldown(db, user, period, groupBy) {
-  const logs = filterByProjectScope(db.logs, user, item => item.projectId).filter(item => getPeriodKey(String(item.date || '').slice(0, 10), period) === getPeriodKey(formatDateKey(new Date()), period));
-  const incidents = filterByProjectScope(db.incidentRecords || [], user, item => item.projectId).filter(item => getPeriodKey(String(item.occurredAt || '').slice(0, 10), period) === getPeriodKey(formatDateKey(new Date()), period));
-  const buckets = new Map();
-  const getKey = log => {
-    if (groupBy === 'customer') return db.projects.find(item => item.id === log.projectId)?.customerName || '-';
-    if (groupBy === 'user') return db.users.find(item => item.id === log.userId)?.name || '-';
-    if (groupBy === 'faultType') return log.event || '-';
-    return '-';
-  };
-  logs.forEach(log => {
-    const key = getKey(log);
-    const current = buckets.get(key) || { group: key, logCount: 0, totalHours: 0, incidentCount: 0, slaBreached: 0 };
-    current.logCount += 1;
-    current.totalHours += Number(log.durationHours || 0);
-    buckets.set(key, current);
-  });
-  if (groupBy === 'sla') {
-    incidents.forEach(item => {
-      const key = item.slaStatus || '-';
-      const current = buckets.get(key) || { group: key, logCount: 0, totalHours: 0, incidentCount: 0, slaBreached: 0 };
-      current.incidentCount += 1;
-      if (item.slaStatus === '超时') current.slaBreached += 1;
-      buckets.set(key, current);
-    });
-  } else if (groupBy === 'faultType') {
-    incidents.forEach(item => {
-      const key = item.faultType || '-';
-      const current = buckets.get(key) || { group: key, logCount: 0, totalHours: 0, incidentCount: 0, slaBreached: 0 };
-      current.incidentCount += 1;
-      if (item.slaStatus === '超时') current.slaBreached += 1;
-      buckets.set(key, current);
-    });
-  }
-  return [...buckets.values()].map(item => ({ ...item, totalHours: Number(item.totalHours.toFixed(2)) }));
 }
 
 function escapeHtml(value) {
@@ -8543,12 +8515,22 @@ const requestHandler = async (req, res) => {
       if (query.projectId) assets = assets.filter(a => a.projectId === query.projectId);
       if (user.role !== 'admin') assets = assets.filter(a => a.projectId === user.projectId);
       const statuses = {};
+      const alerts = [];
       for (const asset of assets) {
         if (asset.monitorEnabled) {
-          statuses[asset.id] = getMonitorStatus(asset.id) || { status: 'unknown', lastCheck: null };
+          const status = getMonitorStatus(asset.id) || { status: 'unknown', lastCheck: null };
+          statuses[asset.id] = status;
+          if (status.status === 'offline') {
+            alerts.push({
+              assetId: asset.id,
+              assetName: asset.name || '',
+              host: asset.monitorHost || '',
+              time: status.lastCheck || Date.now()
+            });
+          }
         }
       }
-      return json(res, 200, statuses);
+      return json(res, 200, { statuses, alerts });
     }
 
     if (req.method === 'GET' && pathname === '/api/logs') {
@@ -9790,7 +9772,7 @@ const requestHandler = async (req, res) => {
     if (req.method === 'GET' && pathname === '/api/ai-inspection/templates') {
       const user = requireAuth(req, res, db);
       if (!user) return;
-      const list = (db.aiInspectionTemplates || []);
+      const list = (db.aiInspectionTemplates || []).filter(item => canUseAiInspectionTemplate(user, item));
       const query = Object.fromEntries(reqUrl.searchParams);
       const sorted = parseSortQuery(query, list, 'createdAt');
       return json(res, 200, paginateResult(sorted, query));
@@ -9799,11 +9781,15 @@ const requestHandler = async (req, res) => {
     if (req.method === 'POST' && pathname === '/api/ai-inspection/templates') {
       const user = requireEditor(req, res, db);
       if (!user) return;
+      if (user.role !== 'admin' && !user.projectId) {
+        return json(res, 400, { message: '当前账号未绑定项目，无法创建巡检模板' });
+      }
       const body = await readBody(req);
       const metrics = normalizeAiInspectionMetrics(body.metrics, body.category || 'server');
       if (!metrics.length) return json(res, 400, { message: '巡检模板至少包含一个指标' });
       const item = {
         id: id('aiTpl'),
+        projectId: user.role === 'admin' ? String(body.projectId || '').trim() : (user.projectId || ''),
         name: String(body.name || '').trim(),
         category: body.category || 'server',
         description: String(body.description || '').trim(),
@@ -9827,7 +9813,7 @@ const requestHandler = async (req, res) => {
       if (index === -1) return json(res, 404, { message: '巡检模板不存在' });
       const target = db.aiInspectionTemplates[index];
       if (target.createdBy === 'system') return json(res, 400, { message: '内置模板不支持删除' });
-      if (user.role !== 'admin' && target.createdBy !== user.id) {
+      if (user.role !== 'admin' && (target.createdBy !== user.id || (target.projectId || '') !== (user.projectId || ''))) {
         return json(res, 403, { message: '仅支持删除自己创建的巡检模板' });
       }
       const relatedTasks = (db.aiInspectionTasks || []).filter(item => item.templateId === templateId);
@@ -9847,7 +9833,7 @@ const requestHandler = async (req, res) => {
       const index = (db.aiInspectionTemplates || []).findIndex(item => item.id === templateId);
       if (index === -1) return json(res, 404, { message: '巡检模板不存在' });
       const target = db.aiInspectionTemplates[index];
-      if (user.role !== 'admin' && target.createdBy !== user.id) {
+      if (user.role !== 'admin' && (target.createdBy !== user.id || (target.projectId || '') !== (user.projectId || ''))) {
         return json(res, 403, { message: '仅支持修改自己创建的巡检模板' });
       }
       const body = await readBody(req);
@@ -9909,6 +9895,7 @@ const requestHandler = async (req, res) => {
       if (user.role !== 'admin' && target.projectId !== user.projectId) return json(res, 403, { message: '无权执行该巡检对象' });
       const template = (db.aiInspectionTemplates || []).find(item => item.id === body.templateId);
       if (!template) return json(res, 404, { message: '巡检模板不存在' });
+      if (!canUseAiInspectionTemplate(user, template)) return json(res, 403, { message: '无权使用该巡检模板' });
       if (hasInvalidAiInspectionMetricValue(body.metrics)) return json(res, 400, { message: '指标值必须为有效数字' });
       const metrics = normalizeAiInspectionValues(body.metrics);
       if (!metrics.length) return json(res, 400, { message: '请填写至少一个巡检指标' });
@@ -10606,15 +10593,6 @@ const requestHandler = async (req, res) => {
         'Content-Disposition': `attachment; filename="workload-${range.rangeStart}-${range.rangeEnd}.csv"`
       }));
       return res.end(buildWorkloadCsv(rows));
-    }
-
-    if (req.method === 'GET' && pathname === '/api/reports/drilldown') {
-      const user = requireAuth(req, res, db);
-      if (!user) return;
-      if (user.role === 'customer') return json(res, 403, { message: '当前账号无权查看下钻报表' });
-      const period = reqUrl.searchParams.get('period') || 'month';
-      const groupBy = reqUrl.searchParams.get('groupBy') || 'customer';
-      return json(res, 200, buildDrilldown(db, user, period, groupBy));
     }
 
     if (req.method === 'GET' && pathname === '/api/system/info') {

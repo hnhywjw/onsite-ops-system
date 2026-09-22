@@ -1081,8 +1081,8 @@ async function main() {
   assert((customerOnline.data.users || []).every(item => !item.username || item.id === wrCustomerLogin.data.user.id), '客户在线会话不应暴露他人账号');
   const customerSummaryBoundDenied = await request('/api/reports/summary?period=week', { headers: { cookie: wrCustomerCookie } });
   assert(customerSummaryBoundDenied.status === 403, '已绑定项目的客户不应查看日志汇总');
-  const customerDrilldownDenied = await request('/api/reports/drilldown?period=month', { headers: { cookie: wrCustomerCookie } });
-  assert(customerDrilldownDenied.status === 403, '客户不应查看下钻报表');
+  const drilldownRemoved = await request('/api/reports/drilldown?period=month', { headers: { cookie: wrCustomerCookie } });
+  assert(drilldownRemoved.status === 404, '下钻报表接口应已下线');
   const enableRegistration = await updateSystemSettings(cookie, { allowRegistration: true });
   assert(enableRegistration.status === 200, '开启自主注册失败');
   const pendingUsername = `reg_enum_${Date.now()}`;
@@ -2086,6 +2086,38 @@ async function main() {
   const otherCabinet = adminCabinets.find(item => item.name === '他项机柜');
   assert(otherCabinet && otherCabinet.projectId === otherProject.data.id, '同名机柜应按项目拆分');
   assert(otherCabinet.label && otherCabinet.label.includes('布局隔离项目'), '多项目机柜标题应带项目标识');
+
+  // 巡检模板按项目隔离：管理员可指定归属项目，其他项目工程师不可见且不可改删
+  const scopedTemplate = await request('/api/ai-inspection/templates', {
+    method: 'POST', headers: { cookie, 'Content-Type': 'application/json' },
+    body: JSON.stringify({
+      name: `项目隔离模板-${Date.now()}`, category: 'server', projectId: otherProject.data.id,
+      metrics: [{ key: 'cpuUsage', label: 'CPU使用率', unit: '%', warn: 70, critical: 90, direction: 'high' }]
+    })
+  });
+  assert(scopedTemplate.status === 201 && scopedTemplate.data.projectId === otherProject.data.id, '管理员应能创建指定项目的巡检模板');
+  const engineerTemplates = await request('/api/ai-inspection/templates?all=1', { headers: { cookie: engineerRelogin.cookie } });
+  assert(engineerTemplates.status === 200, '工程师查询巡检模板失败');
+  assert(!(engineerTemplates.data.data || []).some(item => item.id === scopedTemplate.data.id), '工程师不应看到其他项目的巡检模板');
+  assert((engineerTemplates.data.data || []).some(item => item.createdBy === 'system'), '工程师应能看到内置巡检模板');
+  const crossProjectTemplatePut = await request(`/api/ai-inspection/templates/${scopedTemplate.data.id}`, {
+    method: 'PUT', headers: { cookie: engineerRelogin.cookie, 'Content-Type': 'application/json' },
+    body: JSON.stringify({ name: '跨项目改名' })
+  });
+  assert(crossProjectTemplatePut.status === 403, '工程师不应修改其他项目的巡检模板');
+  const engineerTemplate = await request('/api/ai-inspection/templates', {
+    method: 'POST', headers: { cookie: engineerRelogin.cookie, 'Content-Type': 'application/json' },
+    body: JSON.stringify({
+      name: `工程师自建模板-${Date.now()}`, category: 'network',
+      metrics: [{ key: 'packetLoss', label: '丢包率', unit: '%', warn: 1, critical: 5, direction: 'high' }]
+    })
+  });
+  assert(engineerTemplate.status === 201 && engineerTemplate.data.projectId === projectId, '工程师创建模板应归属本项目的 projectId');
+  const scopedTemplateDelete = await request(`/api/ai-inspection/templates/${scopedTemplate.data.id}`, { method: 'DELETE', headers: { cookie } });
+  assert(scopedTemplateDelete.status === 200, '管理员应能删除项目隔离巡检模板');
+  const engineerTemplateDelete = await request(`/api/ai-inspection/templates/${engineerTemplate.data.id}`, { method: 'DELETE', headers: { cookie: engineerRelogin.cookie } });
+  assert(engineerTemplateDelete.status === 200, '工程师应能删除自己创建的巡检模板');
+
   await request(`/api/assets/${pingAsset.data.id}`, { method: 'DELETE', headers: { cookie } });
   await request(`/api/assets/${snmpAsset.data.id}`, { method: 'DELETE', headers: { cookie } });
   await request(`/api/assets/${conflictA.data.id}`, { method: 'DELETE', headers: { cookie } });
