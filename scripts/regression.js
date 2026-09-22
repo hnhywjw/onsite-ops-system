@@ -298,6 +298,7 @@ async function main() {
   assert(captchaProbe.data.code === undefined, '验证码接口不应返回明文 code');
   assert(!String(captchaProbe.data.token || '').includes(':'), '验证码 token 不应编码明文');
   assert(!String(captchaProbe.data.svgMarkup || captchaProbe.data.svg || '').includes('<text'), '验证码 SVG 不应包含 text 节点');
+  assert(captchaProbe.data.svgMarkup === undefined, '验证码接口不应返回 svgMarkup 原文');
   assert(decodeCaptchaFromSvg(captchaProbe.data).length === 4, '验证码 SVG 未能解析出 4 位字符');
   const throttledHeaders = { 'x-forwarded-for': '198.51.100.10' };
   for (let index = 0; index < 5; index += 1) {
@@ -680,6 +681,12 @@ async function main() {
   assert(createWorkReport.data.data?.metricsSnapshot?.logCount === 1, '工作汇报日志快照数量不正确');
   assert(Number(createWorkReport.data.data?.metricsSnapshot?.totalHours) === 2.5, '工作汇报工时快照不正确');
   const reportId = createWorkReport.data.data.id;
+  const bogusProjectReport = await request('/api/work-reports', {
+    method: 'POST',
+    headers: { cookie, 'Content-Type': 'application/json' },
+    body: JSON.stringify({ reportType: 'daily', anchorDate: reportDate, projectId: 'project_not_exists', summary: '非法项目' })
+  });
+  assert(bogusProjectReport.status === 400, '工作汇报不应绑定不存在的项目');
   const partialUpdateWorkReport = await request(`/api/work-reports/${reportId}`, {
     method: 'PUT',
     headers: { cookie: engineerCookie, 'Content-Type': 'application/json' },
@@ -1203,6 +1210,18 @@ async function main() {
     })
   });
   assert(highEngineer.status === 201, '创建提醒高工时工程师失败');
+  const invalidRoleUser = await request('/api/users', {
+    method: 'POST',
+    headers: { cookie, 'Content-Type': 'application/json' },
+    body: JSON.stringify({
+      name: '非法角色用户',
+      username: `invalid_role_${suffix}`,
+      password: 'Reminder123!',
+      role: 'superuser',
+      projectId: reminderProjectId
+    })
+  });
+  assert(invalidRoleUser.status === 400, '创建用户不应接受非法角色');
 
   const reminderTriggerOffset = getTimezoneOffsetForHour(String(health.data.checkedAt || ''), 12);
   const reminderTriggerSettings = await updateSystemSettings(cookie, { timezoneOffset: reminderTriggerOffset, dailyReportReminderHour: 11 });
@@ -2096,6 +2115,19 @@ async function main() {
     })
   });
   assert(scopedTemplate.status === 201 && scopedTemplate.data.projectId === otherProject.data.id, '管理员应能创建指定项目的巡检模板');
+  const bogusProjectTemplate = await request('/api/ai-inspection/templates', {
+    method: 'POST', headers: { cookie, 'Content-Type': 'application/json' },
+    body: JSON.stringify({
+      name: `非法项目模板-${Date.now()}`, category: 'server', projectId: 'project_not_exists',
+      metrics: [{ key: 'cpuUsage', label: 'CPU使用率', unit: '%', warn: 70, critical: 90, direction: 'high' }]
+    })
+  });
+  assert(bogusProjectTemplate.status === 400, '巡检模板不应绑定不存在的项目');
+  const crossProjectSpare = await request('/api/spare-parts', {
+    method: 'POST', headers: { cookie, 'Content-Type': 'application/json' },
+    body: JSON.stringify({ name: `跨项目备件-${Date.now()}`, projectId: otherProject.data.id, assetId: sortAssetSmall.data.id, quantity: 1, safeStock: 0 })
+  });
+  assert(crossProjectSpare.status === 400, '备件不应关联其他项目的资产');
   const engineerTemplates = await request('/api/ai-inspection/templates?all=1', { headers: { cookie: engineerRelogin.cookie } });
   assert(engineerTemplates.status === 200, '工程师查询巡检模板失败');
   assert(!(engineerTemplates.data.data || []).some(item => item.id === scopedTemplate.data.id), '工程师不应看到其他项目的巡检模板');
@@ -2174,6 +2206,11 @@ async function main() {
     body: JSON.stringify({ sourceAssetId: relSrc.data.id, targetAssetId: relTgt.data.id })
   });
   assert(rel.status === 201, `创建资产关系失败: ${JSON.stringify(rel.data)}`);
+  const blankRelEndpoint = await request(`/api/asset-relations/${rel.data.id}`, {
+    method: 'PUT', headers: { cookie, 'Content-Type': 'application/json' },
+    body: JSON.stringify({ sourceAssetId: '' })
+  });
+  assert(blankRelEndpoint.status === 400, '资产关系更新不应允许清空端点');
   const delRelSrc = await request(`/api/assets/${relSrc.data.id}`, { method: 'DELETE', headers: { cookie } });
   assert(delRelSrc.status === 200, '删除带拓扑关系的资产应成功');
   const relsAfter = await request('/api/asset-relations', { headers: { cookie } });

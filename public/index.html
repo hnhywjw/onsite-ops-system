@@ -3468,6 +3468,7 @@
       logPage: 1,
       logPageSize: 10,
       documentPage: 1,
+      documentPageRows: [],
       selectedLogIds: [],
       selectedKbIds: [],
       logFilterProjectId: '',
@@ -5798,21 +5799,6 @@
       }
     }
 
-    const TAB_SECTION_MAP = {
-      dashboard: [],
-      assetOps: ['list', 'inspection', 'spare', 'change', 'incident'],
-      aiInspection: ['targets', 'templates', 'tasks', 'results'],
-      governance: ['approvals', 'reports'],
-      users: ['list'],
-      projects: ['list'],
-      logs: ['list'],
-      assets: ['list', 'topology', 'cabinetLayout'],
-      documents: ['form', 'list'],
-      kb: ['list'],
-      system: ['serviceStatus', 'workReportReminder', 'upgrade', 'databaseInit', 'auditLog'],
-      reports: ['overview', 'workload', 'workReports', 'export']
-    };
-
     function switchTab(tab) {
       if (window.__DISABLE_WS_REFRESH && tab === 'dashboard' && state.currentTab && state.currentTab !== 'dashboard') {
         return;
@@ -7290,8 +7276,9 @@
       if (search) params.set('keyword', search);
       try {
         const result = await api(`/api/documents?${params.toString()}`, { silent: true });
-        state.documents = result.data || [];
-        document.getElementById('documentTable').innerHTML = state.documents.map(item => {
+        // 分页结果只用于渲染当前页；state.documents 保留全量集合，供报表统计与按 id 查找。
+        state.documentPageRows = result.data || [];
+        document.getElementById('documentTable').innerHTML = state.documentPageRows.map(item => {
           const typeLabels = { device: '设备管理信息', topology: '网络拓扑图', layout: '设备位置布局图', proposal: '项目方案', config: '配置文档', contract: '项目合同', acceptance: '项目验收报告' };
           const displayActions = canEditData()
             ? `<button class="secondary" data-action="edit-document" data-id="${item.id}" type="button">修改</button><button class="secondary" data-action="delete-document" data-id="${item.id}" type="button" style="background:#fee2e2;color:#dc2626;border-color:#fecaca;">删除</button>`

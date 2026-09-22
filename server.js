@@ -685,7 +685,7 @@ function generateCaptchaCode() {
   return chars.join('');
 }
 
-function renderCaptchaGlyph(ch, originX, originY, color, groupIndex) {
+function renderCaptchaGlyph(ch, originX, originY, color, groupIndex, exposeMeta) {
   const pattern = CAPTCHA_GLYPHS[ch];
   if (!pattern) return '';
   const cell = 3.2;
@@ -693,13 +693,19 @@ function renderCaptchaGlyph(ch, originX, originY, color, groupIndex) {
   for (let row = 0; row < pattern.length; row += 1) {
     for (let col = 0; col < pattern[row].length; col += 1) {
       if (pattern[row][col] !== '1') continue;
-      out += `<rect class="cg" data-g="${groupIndex}" data-r="${row}" data-c="${col}" x="${(originX + col * cell).toFixed(2)}" y="${(originY + row * cell).toFixed(2)}" width="${(cell - 0.5).toFixed(2)}" height="${(cell - 0.5).toFixed(2)}" fill="${color}"/>`;
+      // 生产环境不输出字形序号与点阵坐标，避免客户端直接还原验证码字符。
+      const meta = exposeMeta ? ` data-g="${groupIndex}" data-r="${row}" data-c="${col}"` : '';
+      out += `<rect class="cg"${meta} x="${(originX + col * cell).toFixed(2)}" y="${(originY + row * cell).toFixed(2)}" width="${(cell - 0.5).toFixed(2)}" height="${(cell - 0.5).toFixed(2)}" fill="${color}"/>`;
     }
+  }
+  if (!exposeMeta) {
+    const angle = ((Math.random() - 0.5) * 30).toFixed(1);
+    return `<g transform="rotate(${angle} ${(originX + 8).toFixed(1)} ${(originY + 11).toFixed(1)})">${out}</g>`;
   }
   return out;
 }
 
-function renderCaptchaSvg(code) {
+function renderCaptchaSvg(code, exposeMeta = false) {
   const w = 140, h = 44;
   let paths = '';
   for (let i = 0; i < 6; i++) {
@@ -717,9 +723,16 @@ function renderCaptchaSvg(code) {
     const x = 12 + i * 32 + (Math.random() - 0.5) * 4;
     const y = 10 + (Math.random() - 0.5) * 4;
     const color = `hsl(${210 + Math.random() * 30}, 60%, ${30 + Math.random() * 25}%)`;
-    letters += renderCaptchaGlyph(chars[i], x, y, color, i);
+    letters += renderCaptchaGlyph(chars[i], x, y, color, i, exposeMeta);
   }
-  return `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 ${w} ${h}" width="${w}" height="${h}"><rect width="${w}" height="${h}" fill="#f8fafc" rx="4"/><rect width="${w}" height="${h}" fill="none" stroke="#e2e8f0" rx="4"/>${paths}${dots}${letters}</svg>`;
+  // 生产环境在字符之上再叠加干扰线，增加分割字形的难度。
+  let overlay = '';
+  if (!exposeMeta) {
+    for (let i = 0; i < 3; i++) {
+      overlay += `<line x1="${Math.random() * w}" y1="${Math.random() * h}" x2="${Math.random() * w}" y2="${Math.random() * h}" stroke="hsl(${200 + Math.random() * 60}, 70%, ${55 + Math.random() * 20}%)" stroke-width="1" opacity="0.6"/>`;
+    }
+  }
+  return `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 ${w} ${h}" width="${w}" height="${h}"><rect width="${w}" height="${h}" fill="#f8fafc" rx="4"/><rect width="${w}" height="${h}" fill="none" stroke="#e2e8f0" rx="4"/>${paths}${dots}${letters}${overlay}</svg>`;
 }
 
 function createCaptchaToken(code) {
@@ -1374,7 +1387,9 @@ function sanitizeUserForViewer(user, viewer) {
 
 function sanitizeAiInspectionResultForViewer(result, viewer) {
   if (!result) return result;
-  if (!viewer || viewer.role !== 'customer') return result;
+  // 原始探测输出（CLI 回显、配置片段）只对管理员与工程师可见。
+  const privileged = Boolean(viewer) && (viewer.role === 'admin' || viewer.role === 'engineer');
+  if (privileged) return result;
   const {
     probeError,
     rawOutput,
@@ -4812,6 +4827,7 @@ async function executeAiInspectionTask(db, task, options = {}) {
         taskId: task.id,
         targetId: target.id,
         templateId: template.id,
+        createdBy: task.createdBy || '',
         score: 0,
         level: '严重',
         summary: failureMessage,
@@ -4846,6 +4862,7 @@ async function executeAiInspectionTask(db, task, options = {}) {
       taskId: task.id,
       targetId: target.id,
       templateId: template.id,
+      createdBy: task.createdBy || '',
       score: analysis.score,
       level: analysis.level,
       summary: analysis.summary,
@@ -4883,6 +4900,7 @@ async function executeAiInspectionTask(db, task, options = {}) {
       taskId: task.id,
       targetId: target.id,
       templateId: template.id,
+      createdBy: task.createdBy || '',
       score: 0,
       level: '严重',
       summary: failureMessage,
@@ -5249,8 +5267,9 @@ function canOperateInspectionRecord(user, item) {
 function canManageInspectionRecord(user, item) {
   if (!user || !item) return false;
   if (user.role === 'admin') return true;
-  if (item.projectId !== user.projectId) return false;
-  if (!item.createdBy) return true;
+  if (!user.projectId || item.projectId !== user.projectId) return false;
+  // 无创建者的存量记录仅管理员可改删，避免同项目工程师横向越权。
+  if (!item.createdBy) return false;
   return item.createdBy === user.id;
 }
 
@@ -7246,12 +7265,21 @@ function validateUpgradePackageIntegrity(pendingDir) {
   };
 }
 
-function serveStatic(req, res, pathname) {
+function serveStatic(req, res, pathname, db) {
   const filePath = pathname === '/' ? path.join(publicDir, 'index.html') : path.join(publicDir, pathname);
   const normalized = path.resolve(filePath);
   if (!(normalized === publicDir || normalized.startsWith(publicDir + path.sep))) {
     text(res, 403, 'Forbidden');
     return;
+  }
+  // 安装包与校验文件包含完整源码，仅允许管理员下载，避免匿名获取。
+  const downloadsDir = path.join(publicDir, 'downloads');
+  if (normalized === downloadsDir || normalized.startsWith(downloadsDir + path.sep)) {
+    const user = db ? getAuthUser(req, db) : null;
+    if (!user || user.role !== 'admin') {
+      text(res, 404, 'Not Found');
+      return;
+    }
   }
   if (!fs.existsSync(normalized) || fs.statSync(normalized).isDirectory()) {
     text(res, 404, 'Not Found');
@@ -7320,11 +7348,11 @@ const requestHandler = async (req, res) => {
     if (req.method === 'GET' && pathname === '/api/captcha') {
       const code = generateCaptchaCode();
       const token = createCaptchaToken(code);
-      const svg = renderCaptchaSvg(code);
+      // 仅非生产环境保留字形元数据，供自动化测试解码；生产环境只返回图片本身。
+      const svg = renderCaptchaSvg(code, !isProduction);
       return json(res, 200, {
         token,
         svg: `data:image/svg+xml;charset=UTF-8,${encodeURIComponent(svg)}`,
-        svgMarkup: svg,
         csrfToken: getSessionCsrfToken(token)
       }, {
         'Cache-Control': 'no-store, no-cache, must-revalidate',
@@ -7840,11 +7868,14 @@ const requestHandler = async (req, res) => {
       if (body.projectId && !requireExistingProject(body.projectId, db)) {
         return json(res, 400, { message: '关联项目不存在' });
       }
+      if (!allowedUserRoles.includes(body.role)) {
+        return json(res, 400, { message: '请选择有效的账号角色' });
+      }
       const created = {
         id: id('user'),
         username: body.username,
         passwordHash: hash(body.password),
-        role: allowedUserRoles.includes(body.role) ? body.role : 'engineer',
+        role: body.role,
         name: body.name,
         phone: body.phone || '',
         idCard: body.idCard || '',
@@ -8401,9 +8432,12 @@ const requestHandler = async (req, res) => {
         if (!srcAsset || srcAsset.projectId !== user.projectId) return json(res, 403, { message: '无权操作此关系' });
       }
       const body = await readBody(req);
-      if (body.sourceAssetId !== undefined || body.targetAssetId !== undefined) {
-        const newSrc = body.sourceAssetId || rel.sourceAssetId;
-        const newTgt = body.targetAssetId || rel.targetAssetId;
+      const hasSourceField = body.sourceAssetId !== undefined;
+      const hasTargetField = body.targetAssetId !== undefined;
+      if (hasSourceField || hasTargetField) {
+        const newSrc = hasSourceField ? String(body.sourceAssetId || '') : rel.sourceAssetId;
+        const newTgt = hasTargetField ? String(body.targetAssetId || '') : rel.targetAssetId;
+        if (!newSrc || !newTgt) return json(res, 400, { message: '源资产和目标资产不能为空' });
         if (newSrc === newTgt) return json(res, 400, { message: '不能连接自身' });
         if (!db.assets.find(a => a.id === newSrc)) return json(res, 404, { message: '源资产不存在' });
         if (!db.assets.find(a => a.id === newTgt)) return json(res, 404, { message: '目标资产不存在' });
@@ -8418,8 +8452,8 @@ const requestHandler = async (req, res) => {
       if (body.targetPort !== undefined) rel.targetPort = body.targetPort;
       if (body.relationType !== undefined) rel.relationType = body.relationType;
       if (body.label !== undefined) rel.label = body.label;
-      if (body.sourceAssetId !== undefined) rel.sourceAssetId = body.sourceAssetId;
-      if (body.targetAssetId !== undefined) rel.targetAssetId = body.targetAssetId;
+      if (hasSourceField) rel.sourceAssetId = String(body.sourceAssetId);
+      if (hasTargetField) rel.targetAssetId = String(body.targetAssetId);
       await writeDb(db);
       return json(res, 200, { ok: true, relation: rel });
     }
@@ -8521,10 +8555,11 @@ const requestHandler = async (req, res) => {
           const status = getMonitorStatus(asset.id) || { status: 'unknown', lastCheck: null };
           statuses[asset.id] = status;
           if (status.status === 'offline') {
+            const presented = sanitizeAssetForApi(asset, user);
             alerts.push({
               assetId: asset.id,
               assetName: asset.name || '',
-              host: asset.monitorHost || '',
+              host: presented.monitorHost || '',
               time: status.lastCheck || Date.now()
             });
           }
@@ -8738,7 +8773,9 @@ const requestHandler = async (req, res) => {
         const verified = verifyDocumentAccessToken(readDocumentAccessToken(req), docId, user.id);
         if (!verified.ok) return json(res, 403, { message: verified.message });
       }
-      return json(res, 200, sanitizeDocumentForApi(target, user.role !== 'customer'));
+      // 仅管理员与工程师可查看管理 IP / 登录账号等受保护字段，只读角色同样隐藏。
+      const revealProtected = user.role === 'admin' || user.role === 'engineer';
+      return json(res, 200, sanitizeDocumentForApi(target, revealProtected));
     }
 
     if (req.method === 'POST' && pathname === '/api/documents') {
@@ -9203,7 +9240,13 @@ const requestHandler = async (req, res) => {
       const body = await readBody(req);
       const projectId = user.role === 'admin' ? body.projectId : user.projectId;
       if (!requireExistingProject(projectId, db)) return json(res, 400, { message: '关联项目不存在' });
-      const item = { id: id('spare'), projectId, assetId: body.assetId || '', name: body.name || '', model: body.model || '', quantity: Number(body.quantity || 0), safeStock: Number(body.safeStock || 0), location: body.location || '', createdAt: now() };
+      const assetId = body.assetId ? String(body.assetId) : '';
+      if (assetId) {
+        const asset = (db.assets || []).find(a => a.id === assetId);
+        if (!asset) return json(res, 404, { message: '关联资产不存在' });
+        if (asset.projectId !== projectId) return json(res, 400, { message: '关联资产不属于该项目' });
+      }
+      const item = { id: id('spare'), projectId, assetId, name: body.name || '', model: body.model || '', quantity: Number(body.quantity || 0), safeStock: Number(body.safeStock || 0), location: body.location || '', createdAt: now() };
       db.spareParts.push(item);
       appendAuditLog(db, user, 'create', 'sparePart', item.id, `创建备件 ${item.name}`, projectId);
       if (item.quantity <= item.safeStock) createNotification(db, projectId, '备件库存提醒', `${item.name} 库存达到安全阈值`, 'warning', 'inventory');
@@ -9221,6 +9264,15 @@ const requestHandler = async (req, res) => {
         return json(res, 403, { message: '无权操作该备件' });
       }
       const body = await readBody(req);
+      const nextProjectId = user.role === 'admin' && body.projectId !== undefined ? String(body.projectId || '').trim() : target.projectId;
+      if (user.role === 'admin' && body.projectId !== undefined && !requireExistingProject(nextProjectId, db)) {
+        return json(res, 400, { message: '关联项目不存在' });
+      }
+      if (body.assetId !== undefined && body.assetId) {
+        const asset = (db.assets || []).find(a => a.id === String(body.assetId));
+        if (!asset) return json(res, 404, { message: '关联资产不存在' });
+        if (asset.projectId !== nextProjectId) return json(res, 400, { message: '关联资产不属于该项目' });
+      }
       if (body.name !== undefined) target.name = body.name;
       if (body.model !== undefined) target.model = body.model;
       if (body.quantity !== undefined) target.quantity = Number(body.quantity || 0);
@@ -9785,11 +9837,15 @@ const requestHandler = async (req, res) => {
         return json(res, 400, { message: '当前账号未绑定项目，无法创建巡检模板' });
       }
       const body = await readBody(req);
+      const templateProjectId = user.role === 'admin' ? String(body.projectId || '').trim() : '';
+      if (templateProjectId && !requireExistingProject(templateProjectId, db)) {
+        return json(res, 400, { message: '关联项目不存在' });
+      }
       const metrics = normalizeAiInspectionMetrics(body.metrics, body.category || 'server');
       if (!metrics.length) return json(res, 400, { message: '巡检模板至少包含一个指标' });
       const item = {
         id: id('aiTpl'),
-        projectId: user.role === 'admin' ? String(body.projectId || '').trim() : (user.projectId || ''),
+        projectId: user.role === 'admin' ? templateProjectId : (user.projectId || ''),
         name: String(body.name || '').trim(),
         category: body.category || 'server',
         description: String(body.description || '').trim(),
@@ -10389,6 +10445,7 @@ const requestHandler = async (req, res) => {
       if (!targetUser) return json(res, 404, { message: '汇报人员不存在' });
       const projectId = user.role === 'admin' ? String(body.projectId || targetUser.projectId || '').trim() : user.projectId;
       if (!projectId) return json(res, 400, { message: '请选择关联项目' });
+      if (!requireExistingProject(projectId, db)) return json(res, 400, { message: '关联项目不存在' });
       if (user.role !== 'admin' && targetUserId !== user.id) return json(res, 403, { message: '仅支持创建本人的工作汇报' });
       const periodMeta = getWorkReportPeriodMeta(reportType, body.anchorDate || body.rangeStart || formatDateKey(new Date()));
       if (!periodMeta) return json(res, 400, { message: '无效的汇报周期' });
@@ -10449,6 +10506,7 @@ const requestHandler = async (req, res) => {
         ? String(body.projectId || '').trim()
         : target.projectId;
       if (!nextProjectId) return json(res, 400, { message: '请选择关联项目' });
+      if (!requireExistingProject(nextProjectId, db)) return json(res, 400, { message: '关联项目不存在' });
       const periodMeta = getWorkReportPeriodMeta(nextReportType, body.anchorDate || body.rangeStart || target.rangeStart);
       if (!periodMeta) return json(res, 400, { message: '无效的汇报周期' });
       const duplicate = (db.workReports || []).find(item => item.id !== target.id
@@ -11229,7 +11287,7 @@ const requestHandler = async (req, res) => {
       });
     }
 
-    return serveStatic(req, res, pathname);
+    return serveStatic(req, res, pathname, db);
   } catch (error) {
     console.error('Request error:', error.message);
     if (res.headersSent) {
