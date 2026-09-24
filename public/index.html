@@ -3522,6 +3522,7 @@
       expandedLogId: '',
       expandedUserId: '',
       expandedKbId: '',
+      kbDetails: {},
       selectedWorkReportId: ''
     };
 
@@ -7214,6 +7215,8 @@
       const pageItems = sourceKb.slice(start, start + pageSize);
       document.getElementById('kbTable').innerHTML = pageItems.map(item => {
         const expanded = state.expandedKbId === item.id;
+        // 客户角色的列表接口会脱敏正文，展开时以详情接口返回的完整内容为准。
+        const detail = expanded ? (state.kbDetails[item.id] || item) : item;
         const kbActions = `<button class="secondary" data-action="detail-kb" data-id="${item.id}" type="button">${expanded ? '收起' : '详情'}</button>${canEditData() ? `<button class="secondary" data-action="edit-kb" data-id="${item.id}" type="button">修改</button><button class="secondary" data-action="delete-kb" data-id="${item.id}" type="button" style="background:#fee2e2;color:#dc2626;border-color:#fecaca;">删除</button>` : ''}`;
         const checked = (state.selectedKbIds || []).includes(item.id) ? ' checked' : '';
         return `
@@ -7225,7 +7228,7 @@
           <td style="width:520px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;">${esc(item.solution)}</td>
           <td><div class="toolbar" style="white-space:nowrap;">${kbActions}</div></td>
         </tr>
-        ${expanded ? `<tr><td colspan="6"><div class="card" style="margin:8px 0;"><div class="muted" style="margin-bottom:8px;">问题详情</div><div style="margin-bottom:12px;white-space:pre-wrap;">${esc(item.problem)}</div><div class="muted" style="margin-bottom:8px;">解决方案</div><div style="white-space:pre-wrap;">${esc(item.solution)}</div></div></td></tr>` : ''}`;
+        ${expanded ? `<tr><td colspan="6"><div class="card" style="margin:8px 0;"><div class="muted" style="margin-bottom:8px;">问题详情</div><div style="margin-bottom:12px;white-space:pre-wrap;">${esc(detail.problem)}</div><div class="muted" style="margin-bottom:8px;">解决方案</div><div style="white-space:pre-wrap;">${esc(detail.solution)}</div></div></td></tr>` : ''}`;
       }).join('') || '<tr><td colspan="6">暂无数据</td></tr>';
       document.getElementById('kbPageInfo').textContent = `第 ${state.kbPage} / ${totalPages} 页`;
       document.getElementById('kbPrevBtn').disabled = state.kbPage <= 1;
@@ -8643,6 +8646,7 @@
       await api(`/api/kb/${id}`, { method: 'DELETE' });
       setMessage('kbMessage', '知识条目已删除');
       state.kb = (await apiCollection('/api/kb')).data;
+      state.kbDetails = {};
       renderKb();
       await refreshReports();
       openTabWithSubtab('kb', 'list');
@@ -9087,6 +9091,7 @@
       BASE_DATA_ENDPOINTS.forEach(endpoint => {
         state[endpoint.key] = [];
       });
+      state.kbDetails = {};
       state.aiInspectionResults = [];
       state.aiInspectionResultTotal = 0;
       state.aiInspectionResultTotalPages = 1;
@@ -10526,6 +10531,7 @@
         await api(`/api/kb/${id}`, { method: 'PUT', body: JSON.stringify(data) });
         closeModal('kbEditModal');
         state.kb = (await apiCollection('/api/kb')).data;
+        state.kbDetails = {};
         renderKb();
         await refreshReports();
         showToast('知识条目修改成功');
@@ -10912,7 +10918,15 @@
       if (!button) return;
       try {
         if (button.dataset.action === 'detail-kb') {
-          state.expandedKbId = state.expandedKbId === button.dataset.id ? '' : button.dataset.id;
+          const kbId = button.dataset.id;
+          if (state.expandedKbId === kbId) {
+            state.expandedKbId = '';
+          } else {
+            state.expandedKbId = kbId;
+            // 列表接口对客户脱敏正文，每次展开都拉取最新详情，避免展示编辑前的旧内容。
+            const detail = await api(`/api/kb/${kbId}`, { silent: true });
+            state.kbDetails[kbId] = detail?.data || detail;
+          }
           renderKb();
           return;
         }
@@ -12148,6 +12162,7 @@
         resetKbForm();
         setMessage('kbMessage', id ? '知识条目修改成功' : '知识条目创建成功');
         state.kb = (await apiCollection('/api/kb')).data;
+        state.kbDetails = {};
         renderKb();
         await refreshReports();
         switchSectionSubtab('kb', 'list');

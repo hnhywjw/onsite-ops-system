@@ -145,6 +145,9 @@ function changedCollectionKeys(previous, next) {
 const importCollectionLimit = parseInt(process.env.IMPORT_COLLECTION_LIMIT, 10) || 50000;
 const importUserLimit = parseInt(process.env.IMPORT_USER_LIMIT, 10) || 10000;
 const importBodyLimitBytes = parseInt(process.env.IMPORT_BODY_LIMIT_BYTES, 10) || 50 * 1024 * 1024;
+// 附件上传在内存中解析 multipart，故通过上限约束单请求内存占用（默认 10MB，可用环境变量调整）。
+const documentAttachmentLimitBytes = parseInt(process.env.DOCUMENT_ATTACHMENT_LIMIT_BYTES, 10) || 10 * 1024 * 1024;
+const documentAttachmentLimitMb = Math.round(documentAttachmentLimitBytes / (1024 * 1024));
 const allowFileDbFallback = process.env.ALLOW_FILE_DB_FALLBACK === 'true';
 const loginRateLimitWindowMs = parseInt(process.env.LOGIN_RATE_LIMIT_WINDOW_MS, 10) || 10 * 60 * 1000;
 const loginRateLimitLockMs = parseInt(process.env.LOGIN_RATE_LIMIT_LOCK_MS, 10) || 15 * 60 * 1000;
@@ -7956,6 +7959,8 @@ const requestHandler = async (req, res) => {
       const user = requireAdmin(req, res, db);
       if (!user) return;
       const projectId = pathname.split('/')[3];
+      // 通知属于过程性提醒，不构成业务关联；随项目删除级联清理，避免历史通知长期阻断项目删除。
+      db.notifications = (db.notifications || []).filter(item => item.projectId !== projectId);
       const projectRelationCollections = ['users','assets','logs','workReports','knowledgeBase','documents','inspectionPlans','inspectionExecutions','spareParts','sparePartMovements','changeRecords','incidentRecords','approvals','notifications','aiInspectionTargets','aiInspectionTasks','aiInspectionResults','configBackupPlans','configBackupRecords'];
       const relationNames = projectRelationCollections.filter(key => (db[key] || []).some(item => item.projectId === projectId));
       if (relationNames.length) {
@@ -8854,6 +8859,17 @@ const requestHandler = async (req, res) => {
       return json(res, 200, paginateResult(presented, query));
     }
 
+    // 详情读取对项目内所有角色开放（含客户），列表接口只脱敏正文，详情接口按权限返回完整内容。
+    if (req.method === 'GET' && /^\/api\/kb\/[^/]+$/.test(pathname)) {
+      const user = requireAuth(req, res, db);
+      if (!user) return;
+      const kbId = pathname.split('/')[3];
+      const target = (db.knowledgeBase || []).find(item => item.id === kbId);
+      if (!target) return json(res, 404, { message: '知识条目不存在' });
+      if (!canViewProject(user, target.projectId)) return json(res, 403, { message: '无权访问该知识条目' });
+      return json(res, 200, target);
+    }
+
     if (req.method === 'POST' && pathname === '/api/kb') {
       const user = requireEditor(req, res, db);
       if (!user) return;
@@ -8953,7 +8969,7 @@ const requestHandler = async (req, res) => {
       }
       const boundary = parseMultipartBoundary(contentType);
       if (!boundary) return json(res, 400, { message: '无效的上传格式' });
-      const rawBody = await readMultipartBody(req, 20 * 1024 * 1024, '附件不能超过 20MB').catch(err => {
+      const rawBody = await readMultipartBody(req, documentAttachmentLimitBytes, `附件不能超过 ${documentAttachmentLimitMb}MB`).catch(err => {
         if (err.status) return json(res, err.status, { message: err.message });
         throw err;
       });
@@ -9015,7 +9031,7 @@ const requestHandler = async (req, res) => {
       if (contentType.includes('multipart/form-data')) {
         const boundary = parseMultipartBoundary(contentType);
         if (!boundary) return json(res, 400, { message: '无效的上传格式' });
-        const rawBody = await readMultipartBody(req, 20 * 1024 * 1024, '附件不能超过 20MB').catch(err => {
+        const rawBody = await readMultipartBody(req, documentAttachmentLimitBytes, `附件不能超过 ${documentAttachmentLimitMb}MB`).catch(err => {
           if (err.status) return json(res, err.status, { message: err.message });
           throw err;
         });
@@ -9835,6 +9851,26 @@ const requestHandler = async (req, res) => {
       appendAuditLog(db, user, 'decision', 'approval', item.id, `${item.title} ${item.status}`, item.projectId);
       await writeDb(db);
       return json(res, 200, item);
+    }
+
+    // 作废/删除审批：变更流程的审批记录只能随变更记录一并删除，避免变更记录停留在无审批的半闭环状态。
+    if (req.method === 'DELETE' && /^\/api\/approvals\/[^/]+$/.test(pathname)) {
+      const user = requireEditor(req, res, db);
+      if (!user) return;
+      const approvalId = pathname.split('/')[3];
+      const index = (db.approvals || []).findIndex(item => item.id === approvalId);
+      if (index === -1) return json(res, 404, { message: '审批记录不存在' });
+      const target = db.approvals[index];
+      const linkedChange = (db.changeRecords || []).find(entry => entry.approvalId === target.id || (target.category === 'change' && entry.id === target.relatedId));
+      if (linkedChange) return json(res, 400, { message: '该审批属于变更记录流程，请删除对应变更记录' });
+      if (user.role !== 'admin') {
+        if (target.requestedBy !== user.id) return json(res, 403, { message: '仅支持作废自己提交的审批' });
+        if (target.currentStage === 'completed') return json(res, 403, { message: '已完成的审批不能作废' });
+      }
+      db.approvals.splice(index, 1);
+      appendAuditLog(db, user, 'delete', 'approval', target.id, `作废审批 ${target.title}`, target.projectId);
+      await writeDb(db);
+      return json(res, 200, { ok: true });
     }
 
     if (req.method === 'GET' && pathname === '/api/ai-inspection/targets') {

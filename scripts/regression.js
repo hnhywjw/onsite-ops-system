@@ -1070,6 +1070,11 @@ async function main() {
   assert(!(customerKbOracle.data.data || []).some(item => item.id === kbOracle.data.id), '客户不应通过正文关键字命中知识库');
   const customerKbTitle = await request(`/api/kb?keyword=${encodeURIComponent(kbOracle.data.title)}`, { headers: { cookie: wrCustomerCookie } });
   assert((customerKbTitle.data.data || []).some(item => item.id === kbOracle.data.id), '客户应能按标题搜索知识库');
+  const customerKbDetail = await request(`/api/kb/${kbOracle.data.id}`, { headers: { cookie: wrCustomerCookie } });
+  assert(customerKbDetail.status === 200, '客户应能读取知识条目详情');
+  assert(customerKbDetail.data.problem === kbOracleKeyword && customerKbDetail.data.solution === '内部处理步骤', '知识条目详情应返回完整正文');
+  const customerKbDetailMissing = await request(`/api/kb/kb_not_exists_${Date.now()}`, { headers: { cookie: wrCustomerCookie } });
+  assert(customerKbDetailMissing.status === 404, '不存在的知识条目详情应返回 404');
   const customerChanges = await request('/api/change-records?all=1', { headers: { cookie: wrCustomerCookie } });
   assert(customerChanges.status === 200, '客户读取变更记录失败');
   assert((customerChanges.data.data || []).every(item => item.content === '' && item.title === '' && item.assetId === '' && item.rejectionReason === ''), '客户变更记录应隐藏标题、正文、资产和驳回原因');
@@ -1260,6 +1265,20 @@ async function main() {
   await request(`/api/projects/${blockProjectA.data.id}`, { method: 'DELETE', headers: { cookie } });
   await request(`/api/projects/${blockProjectB.data.id}`, { method: 'DELETE', headers: { cookie } });
 
+  // 通知属于过程性记录，项目删除时应级联清理而非长期阻断
+  const cascadeProject = await request('/api/projects', {
+    method: 'POST', headers: { cookie, 'Content-Type': 'application/json' },
+    body: JSON.stringify({ name: `通知级联清理项目-${suffix}` })
+  });
+  assert(cascadeProject.status === 201, '创建通知级联清理项目失败');
+  const cascadeNotification = await request('/api/notifications', {
+    method: 'POST', headers: { cookie, 'Content-Type': 'application/json' },
+    body: JSON.stringify({ projectId: cascadeProject.data.id, title: '级联通知', content: '项目删除应清理该通知', level: 'info', category: 'manual' })
+  });
+  assert(cascadeNotification.status === 201, '创建级联清理通知失败');
+  const deleteCascadeProject = await request(`/api/projects/${cascadeProject.data.id}`, { method: 'DELETE', headers: { cookie } });
+  assert(deleteCascadeProject.status === 200, `带通知的项目应可删除: ${deleteCascadeProject.status} ${JSON.stringify(deleteCascadeProject.data)}`);
+
   const reminderTriggerOffset = getTimezoneOffsetForHour(String(health.data.checkedAt || ''), 12);
   const reminderTriggerSettings = await updateSystemSettings(cookie, { timezoneOffset: reminderTriggerOffset, dailyReportReminderHour: 11 });
   assert(reminderTriggerSettings.status === 200, '保存提醒触发时区设置失败');
@@ -1434,6 +1453,31 @@ async function main() {
       body: JSON.stringify({ projectId, category: 'change', title: '只读审批人审批', content: '越权', approverId: viewerUser.data.id, customerId })
     });
     assert(approvalWithViewerApprover.status === 400, '只读角色不应被指定为审批人');
+
+    // 独立审批的作废/删除闭环：仅提交人本人或管理员可作废未完成的审批
+    const voidCustomer = await request('/api/users', {
+      method: 'POST', headers: { cookie, 'Content-Type': 'application/json' },
+      body: JSON.stringify({ name: `作废审批客户-${Date.now()}`, username: `void_customer_${Date.now()}`, password: 'Voidpass1!', role: 'customer', projectId })
+    });
+    assert(voidCustomer.status === 201, '创建作废审批客户失败');
+    const voidableApproval = await request('/api/approvals', {
+      method: 'POST',
+      headers: { cookie, 'Content-Type': 'application/json' },
+      body: JSON.stringify({ projectId, category: 'other', title: '待作废审批', content: '待作废', approverId: changeApproverId, customerId: voidCustomer.data.id })
+    });
+    assert(voidableApproval.status === 201, `创建待作废审批失败: ${voidableApproval.status} ${JSON.stringify(voidableApproval.data)}`);
+    const voidByEngineer = await request(`/api/approvals/${voidableApproval.data.id}`, { method: 'DELETE', headers: { cookie: engineerCookie } });
+    assert(voidByEngineer.status === 403, '非提交人不应作废他人审批');
+    const voidByOwner = await request(`/api/approvals/${voidableApproval.data.id}`, { method: 'DELETE', headers: { cookie } });
+    assert(voidByOwner.status === 200, '提交人应能作废未完成的审批');
+    const approvalsAfterVoid = await request('/api/approvals?all=1', { headers: { cookie } });
+    assert(!(approvalsAfterVoid.data.data || []).some(item => item.id === voidableApproval.data.id), '作废后审批不应再出现在列表中');
+    const delVoidCustomer = await request(`/api/users/${voidCustomer.data.id}`, { method: 'DELETE', headers: { cookie } });
+    assert(delVoidCustomer.status === 200, '清理作废审批客户失败');
+    if (change && change.data.approvalId) {
+      const voidLinkedChange = await request(`/api/approvals/${change.data.approvalId}`, { method: 'DELETE', headers: { cookie } });
+      assert(voidLinkedChange.status === 400, '变更流程审批应阻止单独作废');
+    }
   }
 
   const incident = await request('/api/incidents', {
