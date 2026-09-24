@@ -5272,6 +5272,8 @@ function requireExistingAsset(assetId, db) {
 
 function canDecideApproval(user, approval) {
   if (!user || !approval) return false;
+  // 禁止提交人审批自己的单据，避免自审自批。
+  if (user.id === approval.requestedBy) return false;
   if (user.role === 'admin') return true;
   if (approval.currentStage === 'customer') return user.role === 'customer' && user.id === approval.customerId;
   // 运维审批阶段仅允许同项目工程师执行，避免只读角色被指派后获得写权限。
@@ -9436,6 +9438,7 @@ const requestHandler = async (req, res) => {
       if (body.assetId && (!asset || asset.projectId !== projectId)) return json(res, 400, { message: '关联资产不存在或不属于当前项目' });
       const approver = requireExistingUser(body.approverId, db);
       if (!approver || !canViewProject(approver, projectId) || !['admin', 'engineer'].includes(approver.role)) return json(res, 400, { message: '审批人不存在或无权限审批当前项目' });
+      if (approver.id === user.id) return json(res, 400, { message: '不能指定提交人本人为审批人' });
       const customer = requireExistingUser(body.customerId, db);
       if (!customer || customer.projectId !== projectId || customer.role !== 'customer') return json(res, 400, { message: '甲方客户不存在或不属于当前项目' });
       const item = {
@@ -9497,6 +9500,7 @@ const requestHandler = async (req, res) => {
       if (body.approverId !== undefined) {
         const approver = requireExistingUser(body.approverId, db);
         if (!approver || !canViewProject(approver, target.projectId) || !['admin', 'engineer'].includes(approver.role)) return json(res, 400, { message: '审批人不存在或无权限审批当前项目' });
+        if (approver.id === target.createdBy) return json(res, 400, { message: '不能指定提交人本人为审批人' });
         target.approverId = approver.id;
         target.approverName = approver.name;
       }
@@ -9642,6 +9646,7 @@ const requestHandler = async (req, res) => {
       if (!requireExistingProject(projectId, db)) return json(res, 400, { message: '关联项目不存在' });
       const approver = requireExistingUser(body.approverId, db);
       if (!approver || !canViewProject(approver, projectId) || !['admin', 'engineer'].includes(approver.role)) return json(res, 400, { message: '审批人不存在或无权限审批当前项目' });
+      if (approver.id === user.id) return json(res, 400, { message: '不能指定提交人本人为审批人' });
       const customer = requireExistingUser(body.customerId, db);
       if (!customer || customer.projectId !== projectId || customer.role !== 'customer') return json(res, 400, { message: '甲方客户不存在或不属于当前项目' });
       const relatedId = body.relatedId || '';

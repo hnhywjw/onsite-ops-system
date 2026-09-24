@@ -479,6 +479,7 @@ async function main() {
   const assetId = assets.data.data.find(item => item.projectId === projectId)?.id || '';
   const approverId = users.data.data.find(item => item.role === 'admin')?.id || '';
   const engineerAccount = users.data.data.find(item => item.role === 'engineer' && item.projectId === projectId);
+  const changeApproverId = engineerAccount?.id || '';
   const customerId = users.data.data.find(item => item.role === 'customer' && item.projectId === projectId)?.id || '';
   assert(engineerAccount?.username, '未找到可用的工程师测试账号');
 
@@ -1394,17 +1395,31 @@ async function main() {
     change = await request('/api/change-records', {
       method: 'POST',
       headers: { cookie, 'Content-Type': 'application/json' },
-      body: JSON.stringify({ projectId, assetId, approverId, customerId, title: '回归变更', content: '回归测试变更', riskLevel: '中' })
+      body: JSON.stringify({ projectId, assetId, approverId: changeApproverId, customerId, title: '回归变更', content: '回归测试变更', riskLevel: '中' })
     });
     assert(change.status === 201, '创建变更记录失败');
   }
 
+  // 自审禁止：提交人不能指定自己为审批人
+  const selfChangeApproval = await request('/api/change-records', {
+    method: 'POST',
+    headers: { cookie, 'Content-Type': 'application/json' },
+    body: JSON.stringify({ projectId, assetId, approverId, customerId, title: '自审变更', content: '自审', riskLevel: '中' })
+  });
+  assert(selfChangeApproval.status === 400 && String(selfChangeApproval.data.message || '').includes('本人'), '变更记录不应允许指定提交人本人为审批人');
+  const selfApproval = await request('/api/approvals', {
+    method: 'POST',
+    headers: { cookie, 'Content-Type': 'application/json' },
+    body: JSON.stringify({ projectId, category: 'change', title: '自审审批', content: '自审', approverId, customerId })
+  });
+  assert(selfApproval.status === 400 && String(selfApproval.data.message || '').includes('本人'), '审批不应允许指定提交人本人为审批人');
+
   // 审批归属与角色校验：relatedId 必须属于本项目，审批人必须是可写的运维角色
-  if (approverId) {
+  if (changeApproverId) {
     const approvalWithForeignRelated = await request('/api/approvals', {
       method: 'POST',
       headers: { cookie, 'Content-Type': 'application/json' },
-      body: JSON.stringify({ projectId, category: 'change', title: '越权关联审批', content: '越权', approverId, customerId, relatedId: 'change_not_exists' })
+      body: JSON.stringify({ projectId, category: 'change', title: '越权关联审批', content: '越权', approverId: changeApproverId, customerId, relatedId: 'change_not_exists' })
     });
     assert(approvalWithForeignRelated.status === 400, '审批不应关联不存在的变更记录');
     const viewerUser = await request('/api/users', {

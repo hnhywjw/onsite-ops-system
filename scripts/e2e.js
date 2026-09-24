@@ -1007,6 +1007,21 @@ async function main() {
     await page.waitForSelector('#changeRecordForm', { state: 'visible', timeout: 5000 });
     await page.waitForTimeout(300);
     await ensureCreatedProjectAndUser(page, createdProject, createdUser);
+    // 禁止自审后，审批人必须是与提交人不同的运维角色。
+    const approverUsername = `e2e_approver_${suffix}`;
+    const approverPassword = 'Approver-123';
+    const approverCreated = await browserRequest(page, '/api/users', {
+      method: 'POST',
+      body: JSON.stringify({ name: `E2E审批工程师-${suffix}`, username: approverUsername, password: approverPassword, role: 'engineer', projectId: createdProject.id })
+    });
+    assert(approverCreated.status === 201 && approverCreated.data.id, `E2E 审批工程师创建失败: ${approverCreated.status} ${JSON.stringify(approverCreated.data)}`);
+    const approverUserId = approverCreated.data.id;
+    const approverUserList = await browserRequest(page, '/api/users?all=1');
+    await page.evaluate(({ approver, list }) => {
+      const next = Array.isArray(list) ? list.slice() : [];
+      if (approver && approver.id && !next.some(item => item.id === approver.id)) next.unshift(approver);
+      state.users = next;
+    }, { approver: approverCreated.data, list: approverUserList.data?.data });
     await pickOptionByText(page, '#changeProjectId', projectName);
     await page.evaluate(id => fillChangeApprovalUsers(id), createdProject.id);
     await page.waitForFunction(({ approverId, customerId }) => {
@@ -1015,8 +1030,8 @@ async function main() {
       return approverSelect && customerSelect
         && Array.from(approverSelect.options).some(option => option.value === approverId)
         && Array.from(customerSelect.options).some(option => option.value === customerId);
-    }, { approverId: adminUserId, customerId: customerUserId });
-    await page.selectOption('#changeCustomerId', adminUserId);
+    }, { approverId: approverUserId, customerId: customerUserId });
+    await page.selectOption('#changeCustomerId', approverUserId);
     await page.selectOption('#changeApproverId', customerUserId);
     await page.fill('#changeRecordForm input[name="title"]', changeTitle);
     await page.fill('#changeRecordForm textarea[name="content"]', 'E2E 变更审批流程验证');
@@ -1024,15 +1039,18 @@ async function main() {
     await waitForTableRow(page, '#changeRecordTable', changeTitle);
     await page.waitForTimeout(2000);
 
-    // === Approval Flow: Admin Approve ===
-    logStep('管理员审批变更');
+    // === Approval Flow: Engineer Approve ===
+    logStep('工程师审批变更');
+    await logout(page);
+    await login(page, approverUsername, approverPassword);
+    await page.waitForTimeout(2000);
     await page.click('button[data-tab="governance"]');
     await waitForTableRow(page, '#approvalTable', changeTitle);
-    const adminApprovalRow = page.locator('#approvalTable tr').filter({ hasText: changeTitle }).first();
-    await adminApprovalRow.scrollIntoViewIfNeeded();
+    const engineerApprovalRow = page.locator('#approvalTable tr').filter({ hasText: changeTitle }).first();
+    await engineerApprovalRow.scrollIntoViewIfNeeded();
     await page.waitForTimeout(300);
-    const adminApproveBtn = adminApprovalRow.getByRole('button', { name: '通过' });
-    await adminApproveBtn.click({ force: true });
+    const engineerApproveBtn = engineerApprovalRow.getByRole('button', { name: '通过' });
+    await engineerApproveBtn.click({ force: true });
     await page.waitForFunction(title => {
       const rows = Array.from(document.querySelectorAll('#approvalTable tr'));
       return rows.some(row => (row.textContent || '').includes(title) && (row.textContent || '').includes('待客户确认'));
