@@ -4058,6 +4058,16 @@
       return new Date(date.getTime() + offsetMinutes * 60000).toISOString().slice(0, 10);
     }
 
+    // 与后端 inspectionPlanDoneStatuses 保持一致，避免已执行计划仍计入待办。
+    function isInspectionPlanDone(status) {
+      return ['已完成', '已执行', '异常待处理'].includes(String(status || ''));
+    }
+
+    // 与后端工作量统计口径一致：已关闭/已恢复/已解决均视为故障已解决。
+    function isIncidentResolved(status) {
+      return ['已关闭', '已恢复', '已解决'].includes(String(status || ''));
+    }
+
     function addUtcDays(date, days) {
       const next = new Date(date.getTime());
       next.setUTCDate(next.getUTCDate() + days);
@@ -7249,7 +7259,7 @@
       return filterByUserProject(state.inspectionPlans)
         .filter(item => {
           if (!item.nextDate) return false;
-          if (item.status === '已完成') return false;
+          if (isInspectionPlanDone(item.status)) return false;
           return item.nextDate <= nowDateStr;
         })
         .map(item => {
@@ -8730,7 +8740,7 @@
       const executionRate = duePlans.length ? `${Math.round((executedPlanCount / duePlans.length) * 100)}%` : '0%';
       const abnormalCount = periodExecutions.filter(item => item.result === '异常').length;
       const todayKey = formatLocalDateKey(new Date());
-      const overdueCount = userPlans.filter(item => item.nextDate && item.nextDate < todayKey && item.status !== '已完成').length;
+      const overdueCount = userPlans.filter(item => item.nextDate && item.nextDate < todayKey && !isInspectionPlanDone(item.status)).length;
       const totalProjects = userProjects.length;
       const userLogs = filterByUserProject(state.logs);
       const totalLogs = userLogs.length;
@@ -8803,9 +8813,9 @@
       if (role === 'admin' || role === 'engineer') {
         const pendingApprovals = filterByUserProject(state.approvals).filter(a => a.status === '待运维审批').length;
         const pendingTasks = filterByUserProject(state.aiInspectionTasks).filter(t => t.status === '待执行' || t.status === '执行中').length;
-        const todayInspections = filterByUserProject(state.inspectionPlans).filter(p => p.nextDate === todayKey && p.status !== '已完成').length;
+        const todayInspections = filterByUserProject(state.inspectionPlans).filter(p => p.nextDate === todayKey && !isInspectionPlanDone(p.status)).length;
         const expiredMaintenance = filterByUserProject(state.assets).filter(a => a.maintainExpiryDate && a.maintainExpiryDate < todayKey).length;
-        const pendingIncidents = filterByUserProject(state.incidents).filter(i => i.status !== '已关闭' && i.status !== '已解决').length;
+        const pendingIncidents = filterByUserProject(state.incidents).filter(i => !isIncidentResolved(i.status)).length;
         const pendingChanges = filterByUserProject(state.changeRecords).filter(c => c.status === '待运维审批').length;
         panels.push({ title: '待审批', count: pendingApprovals, color: '#ea580c', link: 'governance', linkSubtab: 'approvals' });
         panels.push({ title: '自动化任务', count: pendingTasks, color: '#2563eb', link: 'aiInspection', linkSubtab: 'tasks' });
@@ -8815,7 +8825,7 @@
         panels.push({ title: '待审批变更', count: pendingChanges, color: '#9333ea', link: 'assetOps', linkSubtab: 'change' });
       } else if (role === 'customer') {
         const pendingCustomerApprovals = filterByUserProject(state.approvals).filter(a => a.status === '待客户确认').length;
-        const myIncidents = filterByUserProject(state.incidents).filter(i => i.status !== '已关闭').length;
+        const myIncidents = filterByUserProject(state.incidents).filter(i => !isIncidentResolved(i.status)).length;
         panels.push({ title: '待客户确认', count: pendingCustomerApprovals, color: '#ea580c', link: 'governance', linkSubtab: 'approvals' });
         panels.push({ title: '我的故障', count: myIncidents, color: '#dc2626', link: 'assetOps', linkSubtab: 'incident' });
       }
@@ -11187,8 +11197,8 @@
             method: 'POST',
             body: JSON.stringify({ status: 'approved', relatedType: 'changeRecord' })
           });
-          state.approvals = (await api('/api/approvals', { silent: true })).data;
-          state.changeRecords = (await api('/api/change-records', { silent: true })).data;
+          state.approvals = (await apiCollection('/api/approvals', { silent: true })).data;
+          state.changeRecords = (await apiCollection('/api/change-records', { silent: true })).data;
           renderApprovals();
           renderAssetOps();
         } else if (button.dataset.action === 'reject') {
@@ -11213,8 +11223,8 @@
           body: JSON.stringify({ status: 'rejected', reason, relatedType: 'changeRecord' })
         });
         closeModal('rejectionReasonModal');
-        state.approvals = (await api('/api/approvals', { silent: true })).data;
-        state.changeRecords = (await api('/api/change-records', { silent: true })).data;
+        state.approvals = (await apiCollection('/api/approvals', { silent: true })).data;
+        state.changeRecords = (await apiCollection('/api/change-records', { silent: true })).data;
         renderApprovals();
         renderAssetOps();
       } catch (error) {

@@ -1223,6 +1223,42 @@ async function main() {
   });
   assert(invalidRoleUser.status === 400, '创建用户不应接受非法角色');
 
+  // 删除阻断：项目存在工作汇报、人员存在工作汇报时都不允许删除
+  const blockProjectA = await request('/api/projects', {
+    method: 'POST', headers: { cookie, 'Content-Type': 'application/json' },
+    body: JSON.stringify({ name: `删除阻断项目A-${suffix}` })
+  });
+  const blockProjectB = await request('/api/projects', {
+    method: 'POST', headers: { cookie, 'Content-Type': 'application/json' },
+    body: JSON.stringify({ name: `删除阻断项目B-${suffix}` })
+  });
+  assert(blockProjectA.status === 201 && blockProjectB.status === 201, '创建删除阻断用项目失败');
+  const blockUser = await request('/api/users', {
+    method: 'POST', headers: { cookie, 'Content-Type': 'application/json' },
+    body: JSON.stringify({ name: '删除阻断用户', username: `block_user_${suffix}`, password: 'Block123!', role: 'engineer', projectId: blockProjectA.data.id })
+  });
+  assert(blockUser.status === 201, '创建删除阻断用人员失败');
+  const reportForProjectB = await request('/api/work-reports', {
+    method: 'POST', headers: { cookie, 'Content-Type': 'application/json' },
+    body: JSON.stringify({ reportType: 'daily', anchorDate: '2098-04-11', projectId: blockProjectB.data.id, userId: blockUser.data.id, summary: '项目删除阻断回归' })
+  });
+  assert(reportForProjectB.status === 200, '创建项目删除阻断用汇报失败');
+  const deleteProjectWithReport = await request(`/api/projects/${blockProjectB.data.id}`, { method: 'DELETE', headers: { cookie } });
+  assert(deleteProjectWithReport.status === 400 && String(deleteProjectWithReport.data.message || '').includes('workReports'), '存在工作汇报的项目不应被删除');
+  const reportForUser = await request('/api/work-reports', {
+    method: 'POST', headers: { cookie, 'Content-Type': 'application/json' },
+    body: JSON.stringify({ reportType: 'daily', anchorDate: '2098-04-12', projectId: blockProjectA.data.id, userId: blockUser.data.id, summary: '人员删除阻断回归' })
+  });
+  assert(reportForUser.status === 200, '创建人员删除阻断用汇报失败');
+  const deleteUserWithReport = await request(`/api/users/${blockUser.data.id}`, { method: 'DELETE', headers: { cookie } });
+  assert(deleteUserWithReport.status === 400 && String(deleteUserWithReport.data.message || '').includes('工作汇报'), '存在工作汇报的人员不应被删除');
+  // 清理阻断测试数据
+  await request(`/api/work-reports/${reportForProjectB.data.data.id}`, { method: 'DELETE', headers: { cookie, 'Content-Type': 'application/json' }, body: '{}' });
+  await request(`/api/work-reports/${reportForUser.data.data.id}`, { method: 'DELETE', headers: { cookie, 'Content-Type': 'application/json' }, body: '{}' });
+  await request(`/api/users/${blockUser.data.id}`, { method: 'DELETE', headers: { cookie } });
+  await request(`/api/projects/${blockProjectA.data.id}`, { method: 'DELETE', headers: { cookie } });
+  await request(`/api/projects/${blockProjectB.data.id}`, { method: 'DELETE', headers: { cookie } });
+
   const reminderTriggerOffset = getTimezoneOffsetForHour(String(health.data.checkedAt || ''), 12);
   const reminderTriggerSettings = await updateSystemSettings(cookie, { timezoneOffset: reminderTriggerOffset, dailyReportReminderHour: 11 });
   assert(reminderTriggerSettings.status === 200, '保存提醒触发时区设置失败');
@@ -1361,6 +1397,28 @@ async function main() {
       body: JSON.stringify({ projectId, assetId, approverId, customerId, title: '回归变更', content: '回归测试变更', riskLevel: '中' })
     });
     assert(change.status === 201, '创建变更记录失败');
+  }
+
+  // 审批归属与角色校验：relatedId 必须属于本项目，审批人必须是可写的运维角色
+  if (approverId) {
+    const approvalWithForeignRelated = await request('/api/approvals', {
+      method: 'POST',
+      headers: { cookie, 'Content-Type': 'application/json' },
+      body: JSON.stringify({ projectId, category: 'change', title: '越权关联审批', content: '越权', approverId, customerId, relatedId: 'change_not_exists' })
+    });
+    assert(approvalWithForeignRelated.status === 400, '审批不应关联不存在的变更记录');
+    const viewerUser = await request('/api/users', {
+      method: 'POST',
+      headers: { cookie, 'Content-Type': 'application/json' },
+      body: JSON.stringify({ name: `只读审批人-${Date.now()}`, username: `viewer_approver_${Date.now()}`, password: 'Viewer123!', role: 'viewer', projectId })
+    });
+    assert(viewerUser.status === 201, '创建只读测试账号失败');
+    const approvalWithViewerApprover = await request('/api/approvals', {
+      method: 'POST',
+      headers: { cookie, 'Content-Type': 'application/json' },
+      body: JSON.stringify({ projectId, category: 'change', title: '只读审批人审批', content: '越权', approverId: viewerUser.data.id, customerId })
+    });
+    assert(approvalWithViewerApprover.status === 400, '只读角色不应被指定为审批人');
   }
 
   const incident = await request('/api/incidents', {
@@ -2102,7 +2160,7 @@ async function main() {
   const scopedLayout = await request(`/api/assets/cabinet-layout?projectId=${otherProject.data.id}`, { headers: { cookie } });
   assert(scopedLayout.status === 200, '管理员按项目查询布局图失败');
   assert((scopedLayout.data.cabinets || []).every(item => item.projectId === otherProject.data.id), '管理员按项目过滤应只返回该项目机柜');
-  const otherCabinet = adminCabinets.find(item => item.name === '他项机柜');
+  const otherCabinet = adminCabinets.find(item => item.name === '他项机柜' && item.projectId === otherProject.data.id);
   assert(otherCabinet && otherCabinet.projectId === otherProject.data.id, '同名机柜应按项目拆分');
   assert(otherCabinet.label && otherCabinet.label.includes('布局隔离项目'), '多项目机柜标题应带项目标识');
 
@@ -2128,6 +2186,17 @@ async function main() {
     body: JSON.stringify({ name: `跨项目备件-${Date.now()}`, projectId: otherProject.data.id, assetId: sortAssetSmall.data.id, quantity: 1, safeStock: 0 })
   });
   assert(crossProjectSpare.status === 400, '备件不应关联其他项目的资产');
+  const spareOnOther = await request('/api/spare-parts', {
+    method: 'POST', headers: { cookie, 'Content-Type': 'application/json' },
+    body: JSON.stringify({ name: `归属备件-${Date.now()}`, projectId, assetId: sortAssetSmall.data.id, quantity: 2, safeStock: 0 })
+  });
+  assert(spareOnOther.status === 201 && spareOnOther.data.assetId === sortAssetSmall.data.id, `创建归属备件失败: ${spareOnOther.status} ${JSON.stringify(spareOnOther.data)}`);
+  const spareProjectMove = await request(`/api/spare-parts/${spareOnOther.data.id}`, {
+    method: 'PUT', headers: { cookie, 'Content-Type': 'application/json' },
+    body: JSON.stringify({ projectId: otherProject.data.id })
+  });
+  assert(spareProjectMove.status === 200 && spareProjectMove.data.assetId === '', `备件改项目后应清空不匹配的关联资产: ${spareProjectMove.status} ${JSON.stringify(spareProjectMove.data)}`);
+  await request(`/api/spare-parts/${spareOnOther.data.id}`, { method: 'DELETE', headers: { cookie } });
   const engineerTemplates = await request('/api/ai-inspection/templates?all=1', { headers: { cookie: engineerRelogin.cookie } });
   assert(engineerTemplates.status === 200, '工程师查询巡检模板失败');
   assert(!(engineerTemplates.data.data || []).some(item => item.id === scopedTemplate.data.id), '工程师不应看到其他项目的巡检模板');

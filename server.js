@@ -152,6 +152,10 @@ const loginRateLimitMaxAttempts = parseInt(process.env.LOGIN_RATE_LIMIT_MAX_ATTE
 const webSocketHeartbeatIntervalMs = parseInt(process.env.WS_HEARTBEAT_INTERVAL_MS, 10) || 30000;
 const isProduction = process.env.NODE_ENV === 'production';
 const allowedUserRoles = ['admin', 'engineer', 'viewer', 'auditor', 'customer'];
+// 巡检计划进入这些状态即视为本轮已处理，不再计入待办与逾期提醒。
+const inspectionPlanDoneStatuses = ['已完成', '已执行', '异常待处理'];
+const incidentStatusOptions = ['处理中', '已恢复', '已关闭'];
+const incidentSlaStatusOptions = ['正常', '预警', '超时'];
 const upgradeSigningKeyEnv = String(process.env.UPGRADE_SIGNING_KEY || '').trim();
 const allowedBackupCommands = (process.env.CONFIG_BACKUP_ALLOWED_COMMANDS || 'show running-config,show startup-config,display current-configuration,cat /etc/os-release')
   .split(',')
@@ -1120,11 +1124,27 @@ function runMaintenanceTasks(db) {
 
   if (runtimeState.maintenance.lastNotificationCleanupDate !== todayKey) {
     const notifications = db.notifications || [];
+    // 通知可见范围：全部管理员 + 同项目成员。仅当所有可见用户都已读或已隐藏时才可归档。
+    const adminUserIds = (db.users || []).filter(item => item.role === 'admin').map(item => item.id);
+    const projectUserIds = new Map();
+    for (const item of db.users || []) {
+      if (!item.projectId) continue;
+      if (!projectUserIds.has(item.projectId)) projectUserIds.set(item.projectId, []);
+      projectUserIds.get(item.projectId).push(item.id);
+    }
+    const isReadByAllRecipients = item => {
+      if (item.readAt) return true;
+      const readBy = item.readBy && typeof item.readBy === 'object' ? item.readBy : {};
+      const hiddenBy = item.hiddenBy && typeof item.hiddenBy === 'object' ? item.hiddenBy : {};
+      const recipients = adminUserIds.concat(projectUserIds.get(item.projectId) || []);
+      if (!recipients.length) return false;
+      return recipients.every(userId => Boolean(readBy[userId] || hiddenBy[userId]));
+    };
     const retained = [];
     const archived = [];
     for (const item of notifications) {
       const createdAtMs = Date.parse(item.createdAt || '') || nowMs();
-      const isRead = Boolean(item.readAt);
+      const isRead = isReadByAllRecipients(item);
       const important = ['ai-inspection', 'approval', 'system-upgrade'].includes(String(item.category || ''));
       const retentionDays = important ? importantNotificationRetentionDays : generalNotificationRetentionDays;
       const expired = createdAtMs < nowMs() - retentionDays * 24 * 60 * 60 * 1000;
@@ -1803,6 +1823,17 @@ function sanitizeDocumentForApi(doc, revealProtected = false) {
 function getNotificationReadAtForUser(item, userId) {
   const map = item && item.readBy && typeof item.readBy === 'object' ? item.readBy : {};
   return map[userId] || '';
+}
+
+// 通知的已读/隐藏状态是按用户 id 存储的映射，归一化时只保留合法的字符串键值。
+function sanitizeNotificationUserStampMap(map) {
+  if (!map || typeof map !== 'object' || Array.isArray(map)) return {};
+  const result = {};
+  for (const [key, value] of Object.entries(map)) {
+    if (!key || typeof value !== 'string') continue;
+    result[key] = value;
+  }
+  return result;
 }
 
 function markNotificationReadForUser(item, userId) {
@@ -2844,6 +2875,9 @@ function normalizeDb(raw = {}) {
       category: item.category || '',
       readAt: item.readAt || '',
       archivedAt: item.archivedAt || '',
+      // 已读/隐藏按用户维度存储，必须随通知一起持久化，否则重启后状态丢失。
+      readBy: sanitizeNotificationUserStampMap(item.readBy),
+      hiddenBy: sanitizeNotificationUserStampMap(item.hiddenBy),
       createdAt: item.createdAt || now()
     })),
     auditLogs: (raw.auditLogs || []).map(item => ({
@@ -3942,17 +3976,6 @@ function parseSortQuery(query, items, defaultSort) {
   });
 }
 
-function parseFilterQuery(query, items, filterFields) {
-  let result = items;
-  for (const field of filterFields) {
-    const value = query[field];
-    if (value) {
-      result = result.filter(item => String(item[field] || '').toLowerCase().includes(String(value).toLowerCase()));
-    }
-  }
-  return result;
-}
-
 function parseCookies(req) {
   const cookie = req.headers.cookie || '';
   return Object.fromEntries(
@@ -3977,10 +4000,13 @@ function readBody(req, maxBytes = 10 * 1024 * 1024) {
   return new Promise((resolve, reject) => {
     let settled = false;
     let data = '';
+    // 累计字节数用 chunk.length 计数，避免每次 Buffer.byteLength(data) 展平字符串造成 O(n^2)。
+    let receivedBytes = 0;
     req.on('data', chunk => {
       if (settled) return;
       data += chunk;
-      if (Buffer.byteLength(data) > maxBytes) {
+      receivedBytes += chunk.length;
+      if (receivedBytes > maxBytes) {
         settled = true;
         reject(Object.assign(new Error('请求体过大'), { status: 413 }));
         req.destroy();
@@ -5089,16 +5115,16 @@ async function executeConfigBackupPlan(db, plan, options = {}) {
     `备份时间: ${createdAt}`,
     `巡检对象: ${target.name || '-'}`,
     `关联资产: ${asset.name || '-'}`,
-    `资产编号: ${asset.code || '-'}`,
+    `资产编号: ${asset.serialNumber || '-'}`,
     `设备类别: ${target.category || '-'}`,
     `管理地址: ${target.address}:${port}`,
     `管理协议: ${target.protocol || '-'}`,
     `认证方式: ${target.authType || '-'}`,
     `系统版本: ${target.systemVersion || asset.version || '-'}`,
     `部署位置: ${target.location || asset.location || '-'}`,
-    `资产厂商: ${asset.vendor || '-'}`,
+    `资产厂商: ${asset.brand || '-'}`,
     `资产型号: ${asset.model || '-'}`,
-    `资产序列号: ${asset.serialNo || '-'}`,
+    `资产序列号: ${asset.serialNumber || '-'}`,
     '',
     '[备份内容]',
     backupPayload,
@@ -5209,7 +5235,7 @@ function checkExpiryNotifications(db) {
   }
 
   for (const plan of db.inspectionPlans || []) {
-    if (!plan.nextDate || plan.status === '已完成') continue;
+    if (!plan.nextDate || inspectionPlanDoneStatuses.includes(String(plan.status || ''))) continue;
     const todayKey = formatDateKey(new Date());
     const nextDate = parseDateOnly(plan.nextDate);
     const today = parseDateOnly(todayKey);
@@ -5248,6 +5274,9 @@ function canDecideApproval(user, approval) {
   if (!user || !approval) return false;
   if (user.role === 'admin') return true;
   if (approval.currentStage === 'customer') return user.role === 'customer' && user.id === approval.customerId;
+  // 运维审批阶段仅允许同项目工程师执行，避免只读角色被指派后获得写权限。
+  if (user.role !== 'engineer') return false;
+  if (!user.projectId || approval.projectId !== user.projectId) return false;
   return user.id === approval.approverId;
 }
 
@@ -7821,7 +7850,7 @@ const requestHandler = async (req, res) => {
       const user = requireAdmin(req, res, db);
       if (!user) return;
       const projectId = pathname.split('/')[3];
-      const projectRelationCollections = ['users','assets','logs','knowledgeBase','documents','inspectionPlans','inspectionExecutions','spareParts','sparePartMovements','changeRecords','incidentRecords','approvals','notifications','aiInspectionTargets','aiInspectionTasks','aiInspectionResults','configBackupPlans','configBackupRecords'];
+      const projectRelationCollections = ['users','assets','logs','workReports','knowledgeBase','documents','inspectionPlans','inspectionExecutions','spareParts','sparePartMovements','changeRecords','incidentRecords','approvals','notifications','aiInspectionTargets','aiInspectionTasks','aiInspectionResults','configBackupPlans','configBackupRecords'];
       const relationNames = projectRelationCollections.filter(key => (db[key] || []).some(item => item.projectId === projectId));
       if (relationNames.length) {
         return json(res, 400, { message: `该项目存在关联数据(${relationNames.join(', ')})，请先清理后再删除` });
@@ -7831,6 +7860,10 @@ const requestHandler = async (req, res) => {
         return json(res, 404, { message: '项目不存在' });
       }
       db.projects.splice(index, 1);
+      // 拓扑布局按 projectId 存放，删除项目时同步清理，避免残留陈旧布局。
+      if (db.topologyLayouts && db.topologyLayouts.positions && typeof db.topologyLayouts.positions === 'object') {
+        delete db.topologyLayouts.positions[projectId];
+      }
       appendAuditLog(db, user, 'delete', 'project', projectId, '删除项目', projectId);
       await writeDb(db);
       return json(res, 200, { ok: true });
@@ -8041,10 +8074,30 @@ const requestHandler = async (req, res) => {
       if (user.id === targetUserId) {
         return json(res, 400, { message: '当前登录账号不能删除自己' });
       }
-      const hasRelations = db.logs.some(item => item.userId === targetUserId)
-        || db.knowledgeBase.some(item => item.createdBy === targetUserId);
+      // 删除人员前阻断所有引用该用户的数据，避免产生孤儿引用。
+      const userRelationChecks = [
+        ['日志', (db.logs || []), ['userId']],
+        ['知识库', (db.knowledgeBase || []), ['createdBy']],
+        ['工作汇报', (db.workReports || []), ['userId', 'reviewedBy']],
+        ['巡检计划', (db.inspectionPlans || []), ['createdBy']],
+        ['巡检执行', (db.inspectionExecutions || []), ['createdBy']],
+        ['资料', (db.documents || []), ['createdBy']],
+        ['变更记录', (db.changeRecords || []), ['createdBy', 'approverId', 'customerId']],
+        ['故障记录', (db.incidentRecords || []), ['createdBy']],
+        ['审批记录', (db.approvals || []), ['requestedBy', 'approverId', 'customerId']],
+        ['备件流水', (db.sparePartMovements || []), ['operatorId']],
+        ['巡检对象', (db.aiInspectionTargets || []), ['createdBy']],
+        ['巡检模板', (db.aiInspectionTemplates || []), ['createdBy']],
+        ['巡检任务', (db.aiInspectionTasks || []), ['createdBy']],
+        ['配置备份计划', (db.configBackupPlans || []), ['createdBy']],
+        ['配置备份记录', (db.configBackupRecords || []), ['createdBy']]
+      ];
+      const blockingRelations = userRelationChecks
+        .filter(([, list, fields]) => list.some(item => fields.some(field => item[field] === targetUserId)))
+        .map(([label]) => label);
+      const hasRelations = blockingRelations.length > 0;
       if (hasRelations) {
-        return json(res, 400, { message: '该人员已关联日志或知识库，暂时不能删除' });
+        return json(res, 400, { message: `该人员已关联数据(${blockingRelations.join('、')})，暂时不能删除` });
       }
       const index = db.users.findIndex(item => item.id === targetUserId);
       if (index === -1) {
@@ -9282,6 +9335,11 @@ const requestHandler = async (req, res) => {
       if (body.notes !== undefined) target.notes = body.notes;
       if (body.assetId !== undefined) target.assetId = body.assetId;
       if (user.role === 'admin' && body.projectId !== undefined) target.projectId = body.projectId;
+      // 项目变更后原关联资产可能已不属于该项目，无法确认归属时清空关联，避免跨项目脏引用。
+      if (target.assetId) {
+        const linkedAsset = (db.assets || []).find(a => a.id === String(target.assetId));
+        if (!linkedAsset || linkedAsset.projectId !== target.projectId) target.assetId = '';
+      }
       appendAuditLog(db, user, 'update', 'sparePart', sparePartId, `修改备件 ${target.name}`, target.projectId);
       await writeDb(db);
       return json(res, 200, target);
@@ -9355,12 +9413,9 @@ const requestHandler = async (req, res) => {
           rejectionMap.set(a.relatedId, a.rejectionReason);
         }
       });
-      (db.changeRecords || []).forEach(item => {
-        if (!item.rejectionReason && rejectionMap.has(item.id)) {
-          item.rejectionReason = rejectionMap.get(item.id);
-        }
-      });
-      const list = filterByProjectScope(db.changeRecords || [], user, item => item.projectId);
+      // GET 不应改写共享状态，驳回原因以只读视图方式合成。
+      const list = filterByProjectScope(db.changeRecords || [], user, item => item.projectId)
+        .map(item => (!item.rejectionReason && rejectionMap.has(item.id) ? { ...item, rejectionReason: rejectionMap.get(item.id) } : item));
       const query = Object.fromEntries(reqUrl.searchParams);
       const sorted = parseSortQuery(query, list, 'createdAt');
       const presented = sorted.map(item => sanitizeChangeRecordForViewer(item, user));
@@ -9380,7 +9435,7 @@ const requestHandler = async (req, res) => {
       const asset = requireExistingAsset(body.assetId, db);
       if (body.assetId && (!asset || asset.projectId !== projectId)) return json(res, 400, { message: '关联资产不存在或不属于当前项目' });
       const approver = requireExistingUser(body.approverId, db);
-      if (!approver || !canViewProject(approver, projectId) || approver.role === 'customer') return json(res, 400, { message: '审批人不存在或无权限审批当前项目' });
+      if (!approver || !canViewProject(approver, projectId) || !['admin', 'engineer'].includes(approver.role)) return json(res, 400, { message: '审批人不存在或无权限审批当前项目' });
       const customer = requireExistingUser(body.customerId, db);
       if (!customer || customer.projectId !== projectId || customer.role !== 'customer') return json(res, 400, { message: '甲方客户不存在或不属于当前项目' });
       const item = {
@@ -9441,7 +9496,7 @@ const requestHandler = async (req, res) => {
       if (body.assetId !== undefined) target.assetId = body.assetId;
       if (body.approverId !== undefined) {
         const approver = requireExistingUser(body.approverId, db);
-        if (!approver || !canViewProject(approver, target.projectId) || approver.role === 'customer') return json(res, 400, { message: '审批人不存在或无权限审批当前项目' });
+        if (!approver || !canViewProject(approver, target.projectId) || !['admin', 'engineer'].includes(approver.role)) return json(res, 400, { message: '审批人不存在或无权限审批当前项目' });
         target.approverId = approver.id;
         target.approverName = approver.name;
       }
@@ -9507,6 +9562,8 @@ const requestHandler = async (req, res) => {
       const body = await readBody(req);
       const projectId = user.role === 'admin' ? body.projectId : user.projectId;
       if (!requireExistingProject(projectId, db)) return json(res, 400, { message: '关联项目不存在' });
+      if (body.status !== undefined && !incidentStatusOptions.includes(String(body.status))) return json(res, 400, { message: '无效的故障处理状态' });
+      if (body.slaStatus !== undefined && !incidentSlaStatusOptions.includes(String(body.slaStatus))) return json(res, 400, { message: '无效的 SLA 状态' });
       const item = { id: id('incident'), projectId, assetId: body.assetId || '', title: body.title || '', faultType: body.faultType || '', severity: body.severity || '中', slaStatus: body.slaStatus || '正常', status: body.status || '处理中', description: body.description || '', occurredAt: body.occurredAt || '', resolution: body.resolution || '', createdBy: user.id, createdAt: now() };
       db.incidentRecords.push(item);
       appendAuditLog(db, user, 'create', 'incident', item.id, `登记故障 ${item.title}`, projectId);
@@ -9523,6 +9580,8 @@ const requestHandler = async (req, res) => {
       if (!target) return json(res, 404, { message: '故障记录不存在' });
       if (!canDeleteOwnedRecord(user, target, target.createdBy || '')) return json(res, 403, { message: '仅支持修改自己创建的故障记录' });
       const body = await readBody(req);
+      if (body.status !== undefined && !incidentStatusOptions.includes(String(body.status))) return json(res, 400, { message: '无效的故障处理状态' });
+      if (body.slaStatus !== undefined && !incidentSlaStatusOptions.includes(String(body.slaStatus))) return json(res, 400, { message: '无效的 SLA 状态' });
       if (body.title !== undefined) target.title = body.title;
       if (body.faultType !== undefined) target.faultType = body.faultType;
       if (body.severity !== undefined) target.severity = body.severity;
@@ -9582,10 +9641,17 @@ const requestHandler = async (req, res) => {
       const projectId = user.role === 'admin' ? body.projectId : user.projectId;
       if (!requireExistingProject(projectId, db)) return json(res, 400, { message: '关联项目不存在' });
       const approver = requireExistingUser(body.approverId, db);
-      if (!approver || !canViewProject(approver, projectId) || approver.role === 'customer') return json(res, 400, { message: '审批人不存在或无权限审批当前项目' });
+      if (!approver || !canViewProject(approver, projectId) || !['admin', 'engineer'].includes(approver.role)) return json(res, 400, { message: '审批人不存在或无权限审批当前项目' });
       const customer = requireExistingUser(body.customerId, db);
       if (!customer || customer.projectId !== projectId || customer.role !== 'customer') return json(res, 400, { message: '甲方客户不存在或不属于当前项目' });
-      const item = { id: id('approval'), projectId, category: body.category || '', title: body.title || '', content: body.content || '', status: '待运维审批', requestedBy: user.id, approvedBy: '', approverId: approver.id, customerId: customer.id, currentStage: 'approver', relatedId: body.relatedId || '', createdAt: now(), updatedAt: now() };
+      const relatedId = body.relatedId || '';
+      if (body.category === 'change' && relatedId) {
+        const changeRecord = (db.changeRecords || []).find(entry => entry.id === relatedId);
+        if (!changeRecord || changeRecord.projectId !== projectId) {
+          return json(res, 400, { message: '关联变更记录不存在或不属于当前项目' });
+        }
+      }
+      const item = { id: id('approval'), projectId, category: body.category || '', title: body.title || '', content: body.content || '', status: '待运维审批', requestedBy: user.id, approvedBy: '', approverId: approver.id, customerId: customer.id, currentStage: 'approver', relatedId, createdAt: now(), updatedAt: now() };
       db.approvals.push(item);
       appendAuditLog(db, user, 'create', 'approval', item.id, `提交审批 ${item.title}`, projectId);
       createNotification(db, projectId, '审批待处理', `${item.title} 等待 ${approver.name} 审批`, 'warning', 'approval');
@@ -9623,7 +9689,8 @@ const requestHandler = async (req, res) => {
       item.updatedAt = now();
       if (body.relatedType === 'changeRecord' || item.category === 'change') {
         const target = (db.changeRecords || []).find(entry => entry.id === item.relatedId);
-        if (target) { target.status = item.status; target.rejectionReason = item.rejectionReason || ''; }
+        // 仅同步同项目的变更记录，避免跨项目篡改他人数据。
+        if (target && target.projectId === item.projectId) { target.status = item.status; target.rejectionReason = item.rejectionReason || ''; }
       }
       appendAuditLog(db, user, 'decision', 'approval', item.id, `${item.title} ${item.status}`, item.projectId);
       await writeDb(db);
