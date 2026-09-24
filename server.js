@@ -364,10 +364,20 @@ function parseJwtHeader(token) {
 
 let _jwksCache = null;
 let _jwksCacheTime = 0;
+// 外部请求统一加超时；IdP 不可达或丢包时避免请求长时间挂起、占用连接与内存。
+async function fetchWithTimeout(url, options = {}, timeoutMs = 8000) {
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), timeoutMs);
+  try {
+    return await fetch(url, { ...options, signal: controller.signal });
+  } finally {
+    clearTimeout(timer);
+  }
+}
 async function fetchJwks(jwksUri) {
   const current = nowMs();
   if (_jwksCache && current - _jwksCacheTime < 3600000) return _jwksCache;
-  const res = await fetch(jwksUri);
+  const res = await fetchWithTimeout(jwksUri);
   if (!res.ok) throw new Error('JWKS unavailable');
   _jwksCache = await res.json();
   _jwksCacheTime = current;
@@ -403,7 +413,7 @@ async function fetchOidcConfig(issuer) {
   if (_oidcConfigCache && (now - _oidcConfigCacheTime) < 3600000) return _oidcConfigCache;
   try {
     const url = issuer.replace(/\/$/, '') + '/.well-known/openid-configuration';
-    const res = await fetch(url);
+    const res = await fetchWithTimeout(url);
     if (!res.ok) return null;
     _oidcConfigCache = await res.json();
     _oidcConfigCacheTime = now;
@@ -3487,6 +3497,21 @@ async function syncFileDbToMySqlIfNeeded() {
 let dbWriteLock = Promise.resolve();
 let dbSequence = 0;
 
+// 串行化「读取最新状态 → 校验 → 修改 → 落库」这类临界区（库存、用户名唯一性、登录失败计数），
+// 避免并发请求基于同一旧快照各自写入造成丢失更新。锁内必须重新 readDb() 以拿到最新状态。
+let dbMutationLock = Promise.resolve();
+async function withDbMutationLock(fn) {
+  const previous = dbMutationLock;
+  let release;
+  dbMutationLock = new Promise(resolve => { release = resolve; });
+  await previous;
+  try {
+    return await fn();
+  } finally {
+    release();
+  }
+}
+
 function sameJsonValue(a, b) {
   if (a === b) return true;
   if (a === null || b === null || typeof a !== 'object' || typeof b !== 'object') return false;
@@ -3551,6 +3576,29 @@ function mergeStaleArrayCollection(target, baseList, curList) {
     changed = true;
   }
   return changed ? result : null;
+}
+
+// 会话集合没有 id，以 token 为键做增量合并：在最新会话表上应用本请求的「新增/删除」，
+// 避免并发登录或登出时用整表覆盖把彼此刚建立的会话删掉。
+function mergeStaleSessions(targetList, baseList, curList) {
+  const baseTokens = new Set((baseList || []).map(item => item && item.token).filter(Boolean));
+  const targetTokens = new Set((curList || []).map(item => item && item.token).filter(Boolean));
+  const result = [];
+  const seen = new Set();
+  for (const item of targetList || []) {
+    if (!item || !item.token) { result.push(item); continue; }
+    // 本请求读取时存在、且本请求已删除的会话不再保留。
+    if (baseTokens.has(item.token) && !targetTokens.has(item.token)) continue;
+    result.push(item);
+    seen.add(item.token);
+  }
+  for (const item of curList || []) {
+    if (!item || !item.token) continue;
+    if (seen.has(item.token)) continue;
+    result.push(item);
+    seen.add(item.token);
+  }
+  return result;
 }
 
 // 无读取基线时退回按 id 合并，保证不会用旧记录整体覆盖新记录。
@@ -3628,6 +3676,16 @@ async function writeDb(db, options = {}) {
       const merged = { ...latest };
       for (const key of dbCollectionKeys) {
         if (replaceCollections.has(key)) {
+          if (key === 'sessions') {
+            const baseSessions = base && Array.isArray(base.sessions) ? base.sessions : [];
+            merged.sessions = mergeStaleSessions(
+              Array.isArray(latest.sessions) ? latest.sessions : [],
+              baseSessions,
+              Array.isArray(writeTarget.sessions) ? writeTarget.sessions : []
+            );
+            forcedDirtyKeys.add('sessions');
+            continue;
+          }
           merged[key] = Array.isArray(writeTarget[key]) ? [...writeTarget[key]] : writeTarget[key];
           forcedDirtyKeys.add(key);
           continue;
@@ -3739,6 +3797,32 @@ async function runAiInspectionScheduler() {
 
 let pptxTemplateCache = null;
 let aiInspectionSchedulerRunning = false;
+
+// 进程在任务执行中途被中断时，状态会永久停留在「执行中」并阻断后续调度；启动时统一复位一次。
+let interruptedRunsRecovered = false;
+async function recoverInterruptedRunsOnce() {
+  if (interruptedRunsRecovered) return;
+  interruptedRunsRecovered = true;
+  try {
+    const db = await readDb();
+    let changed = false;
+    for (const task of db.aiInspectionTasks || []) {
+      if (task.status === '执行中') {
+        task.status = task.cycle ? '待执行' : '失败';
+        changed = true;
+      }
+    }
+    for (const plan of db.configBackupPlans || []) {
+      if (plan.status === '执行中') {
+        plan.status = plan.cycle ? '待执行' : '已完成';
+        changed = true;
+      }
+    }
+    if (changed) await writeDb(db);
+  } catch (error) {
+    console.error(`Interrupted run recovery failed: ${error.message}`);
+  }
+}
 
 function readPptxTemplate() {
   if (!pptxTemplateCache) {
@@ -3999,23 +4083,27 @@ function parseCookies(req) {
 function readBody(req, maxBytes = 10 * 1024 * 1024) {
   return new Promise((resolve, reject) => {
     let settled = false;
-    let data = '';
-    // 累计字节数用 chunk.length 计数，避免每次 Buffer.byteLength(data) 展平字符串造成 O(n^2)。
+    const chunks = [];
+    // 按 Buffer 分片收集、结束前统一解码：既避免重复展平字符串造成 O(n^2)，
+    // 也避免 Buffer 直接被逐片 toString 时把多字节 UTF-8 字符切坏。
     let receivedBytes = 0;
     req.on('data', chunk => {
       if (settled) return;
-      data += chunk;
-      receivedBytes += chunk.length;
+      const buffer = Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk);
+      receivedBytes += buffer.length;
       if (receivedBytes > maxBytes) {
         settled = true;
         reject(Object.assign(new Error('请求体过大'), { status: 413 }));
         req.destroy();
+        return;
       }
+      chunks.push(buffer);
     });
     req.on('end', () => {
       if (settled) return;
       settled = true;
       try {
+        const data = Buffer.concat(chunks).toString('utf8');
         resolve(data ? JSON.parse(data) : {});
       } catch (error) {
         reject(Object.assign(new Error('请求体格式无效'), { status: 400, cause: error }));
@@ -4612,6 +4700,17 @@ function clearLoginFailures(db, req, username) {
   const store = getLoginRateLimitStateStore(db);
   store.delete(getLoginRateLimitKey(req, username));
   setLoginRateLimitStateStore(db, store);
+}
+
+// 登录失败计数存放在 runtimeState（整字段覆盖式合并），必须在临界区内基于最新状态自增，
+// 否则并发失败会丢失计数，导致达到锁定阈值的尝试数被低估。
+async function recordLoginFailureLocked(req, username) {
+  return withDbMutationLock(async () => {
+    const lockDb = await readDb();
+    const failedState = registerLoginFailure(lockDb, req, username);
+    await writeDb(lockDb, { silent: true });
+    return failedState;
+  });
 }
 
 const forgotPasswordRateLimitMap = new Map();
@@ -7400,8 +7499,7 @@ const requestHandler = async (req, res) => {
         return json(res, 429, { message: loginBlockedMessage(rateLimitState.retryAfterMs) }, rateLimitResponseHeaders(rateLimitState.retryAfterMs));
       }
       if (!verifyCaptchaToken(body.captchaToken, body.captcha)) {
-        const failedState = registerLoginFailure(db, req, username);
-        await writeDb(db, { silent: true });
+        const failedState = await recordLoginFailureLocked(req, username);
         if (failedState.lockedUntil > nowMs()) {
           return json(res, 429, { message: loginBlockedMessage(failedState.lockedUntil - nowMs()) }, rateLimitResponseHeaders(failedState.lockedUntil - nowMs()));
         }
@@ -7410,8 +7508,7 @@ const requestHandler = async (req, res) => {
       const user = db.users.find(item => item.username === username);
       const passwordMatches = verifyPassword(body.password, user ? user.passwordHash : LOGIN_DUMMY_PASSWORD_HASH);
       if (!user || !passwordMatches) {
-        const failedState = registerLoginFailure(db, req, username);
-        await writeDb(db, { silent: true });
+        const failedState = await recordLoginFailureLocked(req, username);
         if (failedState.lockedUntil > nowMs()) {
           return json(res, 429, { message: loginBlockedMessage(failedState.lockedUntil - nowMs()) }, rateLimitResponseHeaders(failedState.lockedUntil - nowMs()));
         }
@@ -7426,15 +7523,22 @@ const requestHandler = async (req, res) => {
       if (user.status === 'rejected') {
         return json(res, 403, { message: '账号注册申请未通过，请联系管理员' });
       }
-      clearLoginFailures(db, req, username);
-      if (!String(user.passwordHash).startsWith('$scrypt$')) {
-        user.passwordHash = hash(body.password);
-      }
       const token = crypto.randomBytes(24).toString('hex');
       const expiresAt = new Date(nowMs() + sessionMaxAgeSeconds * 1000).toISOString();
-      db.sessions = (db.sessions || []).filter(item => item.userId !== user.id && Date.parse(item.expiresAt) > nowMs());
-      db.sessions.push({ token, userId: user.id, createdAt: now(), lastActivityAt: now(), expiresAt });
-      await writeDb(db, { silent: true, replaceCollections: ['sessions'] });
+      // 清除失败计数、升级哈希、建立会话需在同一临界区内基于最新状态完成，
+      // 既避免并发失败计数被覆盖，也避免与并发登录互相清掉会话。
+      const upgradedHash = !String(user.passwordHash).startsWith('$scrypt$') ? hash(body.password) : '';
+      await withDbMutationLock(async () => {
+        const lockDb = await readDb();
+        clearLoginFailures(lockDb, req, username);
+        if (upgradedHash) {
+          const lockUser = (lockDb.users || []).find(item => item.id === user.id);
+          if (lockUser) lockUser.passwordHash = upgradedHash;
+        }
+        lockDb.sessions = (lockDb.sessions || []).filter(item => item.userId !== user.id && Date.parse(item.expiresAt) > nowMs());
+        lockDb.sessions.push({ token, userId: user.id, createdAt: now(), lastActivityAt: now(), expiresAt });
+        await writeDb(lockDb, { silent: true, replaceCollections: ['sessions'] });
+      });
       return json(res, 200, { user: sanitizeUser(user), systemConfig: presentSystemConfig(user, db.systemConfig), csrfToken: getSessionCsrfToken(token) }, { 'Set-Cookie': buildSessionCookie(req, token, db.systemConfig) });
     }
 
@@ -7525,30 +7629,32 @@ const requestHandler = async (req, res) => {
       if (!/[a-zA-Z]/.test(body.password) || !/[0-9]/.test(body.password) || !/[^a-zA-Z0-9]/.test(body.password)) {
         return json(res, 400, { message: '密码必须包含字母、数字和特殊字符' });
       }
-      if (db.users.some(item => item.username === username)) {
-        return json(res, 201, { message: '提交成功，请等待管理员审批' });
-      }
-      const created = {
-        id: id('user'),
-        username,
-        passwordHash: hash(body.password),
-        role: 'viewer',
-        name: body.name || username,
-        phone: body.phone || '',
-        idCard: body.idCard || '',
-        email: body.email || '',
-        wechat: body.wechat || '',
-        projectId: body.projectId || '',
-        startDate: body.startDate || '',
-        endDate: body.endDate || '',
-        securityQuestion: body.securityQuestion || '',
-        securityAnswerHash: body.securityAnswer ? hash(body.securityAnswer) : '',
-        status: 'pending',
-        createdAt: now()
-      };
-      db.users.push(created);
-      appendAuditLog(db, created, 'create', 'user', created.id, `自注册账号 ${created.name}`);
-      await writeDb(db);
+      // 无论账号是否已存在都返回相同文案，唯一性检查与写入在同一临界区内完成。
+      await withDbMutationLock(async () => {
+        const lockDb = await readDb();
+        if ((lockDb.users || []).some(item => item.username === username)) return;
+        const created = {
+          id: id('user'),
+          username,
+          passwordHash: hash(body.password),
+          role: 'viewer',
+          name: body.name || username,
+          phone: body.phone || '',
+          idCard: body.idCard || '',
+          email: body.email || '',
+          wechat: body.wechat || '',
+          projectId: body.projectId || '',
+          startDate: body.startDate || '',
+          endDate: body.endDate || '',
+          securityQuestion: body.securityQuestion || '',
+          securityAnswerHash: body.securityAnswer ? hash(body.securityAnswer) : '',
+          status: 'pending',
+          createdAt: now()
+        };
+        lockDb.users.push(created);
+        appendAuditLog(lockDb, created, 'create', 'user', created.id, `自注册账号 ${created.name}`);
+        await writeDb(lockDb);
+      });
       return json(res, 201, { message: '提交成功，请等待管理员审批' });
     }
 
@@ -7605,7 +7711,7 @@ const requestHandler = async (req, res) => {
         return json(res, 502, { message: '无法获取 OIDC 配置' });
       }
       try {
-        const tokenRes = await fetch(oidcConfig.token_endpoint, {
+        const tokenRes = await fetchWithTimeout(oidcConfig.token_endpoint, {
           method: 'POST',
           headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
           body: String(new URLSearchParams({
@@ -7684,8 +7790,7 @@ const requestHandler = async (req, res) => {
         return json(res, 429, { message: loginBlockedMessage(rateLimitState.retryAfterMs) }, rateLimitResponseHeaders(rateLimitState.retryAfterMs));
       }
       if (!verifyCaptchaToken(body.captchaToken, body.captcha)) {
-        const failedState = registerLoginFailure(db, req, username);
-        await writeDb(db, { silent: true });
+        const failedState = await recordLoginFailureLocked(req, username);
         if (failedState.lockedUntil > nowMs()) {
           return json(res, 429, { message: loginBlockedMessage(failedState.lockedUntil - nowMs()) }, rateLimitResponseHeaders(failedState.lockedUntil - nowMs()));
         }
@@ -7697,8 +7802,7 @@ const requestHandler = async (req, res) => {
       try {
         const ldapUser = await ldapAuthenticate(ldapUrl, ldapBaseDn, ldapBindDn, ldapBindPassword, username, password);
         if (!ldapUser) {
-          const failedState = registerLoginFailure(db, req, username);
-          await writeDb(db, { silent: true });
+          const failedState = await recordLoginFailureLocked(req, username);
           if (failedState.lockedUntil > nowMs()) {
             return json(res, 429, { message: loginBlockedMessage(failedState.lockedUntil - nowMs()) }, rateLimitResponseHeaders(failedState.lockedUntil - nowMs()));
           }
@@ -7888,9 +7992,6 @@ const requestHandler = async (req, res) => {
       const user = requireAdmin(req, res, db);
       if (!user) return;
       const body = await readBody(req);
-      if (db.users.some(item => item.username === body.username)) {
-        return json(res, 400, { message: '账号已存在' });
-      }
       if (!body.password) {
         return json(res, 400, { message: '创建人员时必须填写密码' });
       }
@@ -7900,34 +8001,43 @@ const requestHandler = async (req, res) => {
       if (!/[a-zA-Z]/.test(body.password) || !/[0-9]/.test(body.password) || !/[^a-zA-Z0-9]/.test(body.password)) {
         return json(res, 400, { message: '密码必须包含字母、数字和特殊字符' });
       }
-      if (body.projectId && !requireExistingProject(body.projectId, db)) {
-        return json(res, 400, { message: '关联项目不存在' });
-      }
       if (!allowedUserRoles.includes(body.role)) {
         return json(res, 400, { message: '请选择有效的账号角色' });
       }
-      const created = {
-        id: id('user'),
-        username: body.username,
-        passwordHash: hash(body.password),
-        role: body.role,
-        name: body.name,
-        phone: body.phone || '',
-        idCard: body.idCard || '',
-        email: body.email || '',
-        wechat: body.wechat || '',
-        projectId: body.projectId || '',
-        startDate: body.startDate || '',
-        endDate: body.endDate || '',
-        status: 'active',
-        createdAt: now()
-      };
-      created.securityQuestion = String(body.securityQuestion || '').trim();
-      created.securityAnswerHash = body.securityAnswer ? hash(body.securityAnswer) : '';
-      db.users.push(created);
-      appendAuditLog(db, user, 'create', 'user', created.id, `创建人员 ${created.name}`, created.projectId);
-      await writeDb(db);
-      return json(res, 201, sanitizeUser(created));
+      // 用户名唯一性检查与写入放入同一临界区，避免并发创建出重复账号。
+      const outcome = await withDbMutationLock(async () => {
+        const lockDb = await readDb();
+        if ((lockDb.users || []).some(item => item.username === body.username)) {
+          return { status: 400, message: '账号已存在' };
+        }
+        if (body.projectId && !requireExistingProject(body.projectId, lockDb)) {
+          return { status: 400, message: '关联项目不存在' };
+        }
+        const created = {
+          id: id('user'),
+          username: body.username,
+          passwordHash: hash(body.password),
+          role: body.role,
+          name: body.name,
+          phone: body.phone || '',
+          idCard: body.idCard || '',
+          email: body.email || '',
+          wechat: body.wechat || '',
+          projectId: body.projectId || '',
+          startDate: body.startDate || '',
+          endDate: body.endDate || '',
+          status: 'active',
+          createdAt: now()
+        };
+        created.securityQuestion = String(body.securityQuestion || '').trim();
+        created.securityAnswerHash = body.securityAnswer ? hash(body.securityAnswer) : '';
+        lockDb.users.push(created);
+        appendAuditLog(lockDb, user, 'create', 'user', created.id, `创建人员 ${created.name}`, created.projectId);
+        await writeDb(lockDb);
+        return { status: 201, item: sanitizeUser(created) };
+      });
+      if (!outcome.item) return json(res, outcome.status, { message: outcome.message });
+      return json(res, 201, outcome.item);
     }
 
     if (req.method === 'PUT' && pathname.endsWith('/approve') && pathname.startsWith('/api/users/')) {
@@ -8080,6 +8190,7 @@ const requestHandler = async (req, res) => {
       const userRelationChecks = [
         ['日志', (db.logs || []), ['userId']],
         ['知识库', (db.knowledgeBase || []), ['createdBy']],
+        ['资产', (db.assets || []), ['createdBy']],
         ['工作汇报', (db.workReports || []), ['userId', 'reviewedBy']],
         ['巡检计划', (db.inspectionPlans || []), ['createdBy']],
         ['巡检执行', (db.inspectionExecutions || []), ['createdBy']],
@@ -9301,7 +9412,12 @@ const requestHandler = async (req, res) => {
         if (!asset) return json(res, 404, { message: '关联资产不存在' });
         if (asset.projectId !== projectId) return json(res, 400, { message: '关联资产不属于该项目' });
       }
-      const item = { id: id('spare'), projectId, assetId, name: body.name || '', model: body.model || '', quantity: Number(body.quantity || 0), safeStock: Number(body.safeStock || 0), location: body.location || '', createdAt: now() };
+      const quantityValue = body.quantity === undefined || body.quantity === '' ? 0 : Number(body.quantity);
+      const safeStockValue = body.safeStock === undefined || body.safeStock === '' ? 0 : Number(body.safeStock);
+      if (!Number.isFinite(quantityValue) || quantityValue < 0 || !Number.isFinite(safeStockValue) || safeStockValue < 0) {
+        return json(res, 400, { message: '库存数量与安全库存必须为非负数' });
+      }
+      const item = { id: id('spare'), projectId, assetId, name: body.name || '', model: body.model || '', quantity: quantityValue, safeStock: safeStockValue, location: body.location || '', createdAt: now() };
       db.spareParts.push(item);
       appendAuditLog(db, user, 'create', 'sparePart', item.id, `创建备件 ${item.name}`, projectId);
       if (item.quantity <= item.safeStock) createNotification(db, projectId, '备件库存提醒', `${item.name} 库存达到安全阈值`, 'warning', 'inventory');
@@ -9313,38 +9429,51 @@ const requestHandler = async (req, res) => {
       const user = requireEditor(req, res, db);
       if (!user) return;
       const sparePartId = pathname.split('/')[3];
-      const target = (db.spareParts || []).find(item => item.id === sparePartId);
-      if (!target) return json(res, 404, { message: '备件不存在' });
-      if (user.role !== 'admin' && target.projectId !== user.projectId) {
-        return json(res, 403, { message: '无权操作该备件' });
-      }
       const body = await readBody(req);
-      const nextProjectId = user.role === 'admin' && body.projectId !== undefined ? String(body.projectId || '').trim() : target.projectId;
-      if (user.role === 'admin' && body.projectId !== undefined && !requireExistingProject(nextProjectId, db)) {
-        return json(res, 400, { message: '关联项目不存在' });
-      }
-      if (body.assetId !== undefined && body.assetId) {
-        const asset = (db.assets || []).find(a => a.id === String(body.assetId));
-        if (!asset) return json(res, 404, { message: '关联资产不存在' });
-        if (asset.projectId !== nextProjectId) return json(res, 400, { message: '关联资产不属于该项目' });
-      }
-      if (body.name !== undefined) target.name = body.name;
-      if (body.model !== undefined) target.model = body.model;
-      if (body.quantity !== undefined) target.quantity = Number(body.quantity || 0);
-      if (body.safeStock !== undefined) target.safeStock = Number(body.safeStock || 0);
-      if (body.unit !== undefined) target.unit = body.unit;
-      if (body.location !== undefined) target.location = body.location;
-      if (body.notes !== undefined) target.notes = body.notes;
-      if (body.assetId !== undefined) target.assetId = body.assetId;
-      if (user.role === 'admin' && body.projectId !== undefined) target.projectId = body.projectId;
-      // 项目变更后原关联资产可能已不属于该项目，无法确认归属时清空关联，避免跨项目脏引用。
-      if (target.assetId) {
-        const linkedAsset = (db.assets || []).find(a => a.id === String(target.assetId));
-        if (!linkedAsset || linkedAsset.projectId !== target.projectId) target.assetId = '';
-      }
-      appendAuditLog(db, user, 'update', 'sparePart', sparePartId, `修改备件 ${target.name}`, target.projectId);
-      await writeDb(db);
-      return json(res, 200, target);
+      const outcome = await withDbMutationLock(async () => {
+        const lockDb = await readDb();
+        const target = (lockDb.spareParts || []).find(item => item.id === sparePartId);
+        if (!target) return { status: 404, message: '备件不存在' };
+        if (user.role !== 'admin' && target.projectId !== user.projectId) {
+          return { status: 403, message: '无权操作该备件' };
+        }
+        const nextProjectId = user.role === 'admin' && body.projectId !== undefined ? String(body.projectId || '').trim() : target.projectId;
+        if (user.role === 'admin' && body.projectId !== undefined && !requireExistingProject(nextProjectId, lockDb)) {
+          return { status: 400, message: '关联项目不存在' };
+        }
+        if (body.assetId !== undefined && body.assetId) {
+          const asset = (lockDb.assets || []).find(a => a.id === String(body.assetId));
+          if (!asset) return { status: 404, message: '关联资产不存在' };
+          if (asset.projectId !== nextProjectId) return { status: 400, message: '关联资产不属于该项目' };
+        }
+        if (body.name !== undefined) target.name = body.name;
+        if (body.model !== undefined) target.model = body.model;
+        if (body.quantity !== undefined) {
+          const quantityValue = body.quantity === '' ? 0 : Number(body.quantity);
+          if (!Number.isFinite(quantityValue) || quantityValue < 0) return { status: 400, message: '库存数量必须为非负数' };
+          target.quantity = quantityValue;
+        }
+        if (body.safeStock !== undefined) {
+          const safeStockValue = body.safeStock === '' ? 0 : Number(body.safeStock);
+          if (!Number.isFinite(safeStockValue) || safeStockValue < 0) return { status: 400, message: '安全库存必须为非负数' };
+          target.safeStock = safeStockValue;
+        }
+        if (body.unit !== undefined) target.unit = body.unit;
+        if (body.location !== undefined) target.location = body.location;
+        if (body.notes !== undefined) target.notes = body.notes;
+        if (body.assetId !== undefined) target.assetId = body.assetId;
+        if (user.role === 'admin' && body.projectId !== undefined) target.projectId = body.projectId;
+        // 项目变更后原关联资产可能已不属于该项目，无法确认归属时清空关联，避免跨项目脏引用。
+        if (target.assetId) {
+          const linkedAsset = (lockDb.assets || []).find(a => a.id === String(target.assetId));
+          if (!linkedAsset || linkedAsset.projectId !== target.projectId) target.assetId = '';
+        }
+        appendAuditLog(lockDb, user, 'update', 'sparePart', sparePartId, `修改备件 ${target.name}`, target.projectId);
+        await writeDb(lockDb);
+        return { status: 200, item: target };
+      });
+      if (!outcome.item) return json(res, outcome.status, { message: outcome.message });
+      return json(res, 200, outcome.item);
     }
 
     if (req.method === 'DELETE' && pathname.startsWith('/api/spare-parts/') && !pathname.endsWith('/stock')) {
@@ -9369,41 +9498,47 @@ const requestHandler = async (req, res) => {
       const user = requireEditor(req, res, db);
       if (!user) return;
       const sparePartId = pathname.split('/')[3];
-      const target = (db.spareParts || []).find(item => item.id === sparePartId);
-      if (!target) return json(res, 404, { message: '备件不存在' });
-      if (user.role !== 'admin' && target.projectId !== user.projectId) {
-        return json(res, 403, { message: '无权操作该备件' });
-      }
       const body = await readBody(req);
       const type = body.type === 'inbound' ? 'inbound' : 'outbound';
       const quantity = Number(body.quantity || 0);
       if (!Number.isFinite(quantity) || quantity <= 0) {
         return json(res, 400, { message: '数量必须大于 0' });
       }
-      if (type === 'outbound' && target.quantity < quantity) {
-        return json(res, 400, { message: '库存不足，无法消耗' });
-      }
-      target.quantity = type === 'inbound' ? target.quantity + quantity : target.quantity - quantity;
-      const movement = {
-        id: id('spareMove'),
-        sparePartId: target.id,
-        projectId: target.projectId,
-        assetId: target.assetId || '',
-        type,
-        quantity,
-        reason: body.reason || '',
-        operatorId: user.id,
-        operatorName: user.name,
-        createdAt: now()
-      };
-      db.sparePartMovements = db.sparePartMovements || [];
-      db.sparePartMovements.push(movement);
-      appendAuditLog(db, user, 'stock', 'sparePart', target.id, `${type === 'inbound' ? '入库' : '消耗'}备件 ${target.name} 数量 ${quantity}`, target.projectId);
-      if (target.quantity <= target.safeStock) {
-        createNotification(db, target.projectId, '备件库存提醒', `${target.name} 当前库存 ${target.quantity}，已达到安全阈值`, 'warning', 'inventory');
-      }
-      await writeDb(db);
-      return json(res, 200, { item: target, movement });
+      // 库存校验与扣减必须在同一临界区内基于最新库存完成，否则并发出库会绕过负库存保护。
+      const outcome = await withDbMutationLock(async () => {
+        const lockDb = await readDb();
+        const target = (lockDb.spareParts || []).find(item => item.id === sparePartId);
+        if (!target) return { status: 404, message: '备件不存在' };
+        if (user.role !== 'admin' && target.projectId !== user.projectId) {
+          return { status: 403, message: '无权操作该备件' };
+        }
+        if (type === 'outbound' && target.quantity < quantity) {
+          return { status: 400, message: '库存不足，无法消耗' };
+        }
+        target.quantity = type === 'inbound' ? target.quantity + quantity : target.quantity - quantity;
+        const movement = {
+          id: id('spareMove'),
+          sparePartId: target.id,
+          projectId: target.projectId,
+          assetId: target.assetId || '',
+          type,
+          quantity,
+          reason: body.reason || '',
+          operatorId: user.id,
+          operatorName: user.name,
+          createdAt: now()
+        };
+        lockDb.sparePartMovements = lockDb.sparePartMovements || [];
+        lockDb.sparePartMovements.push(movement);
+        appendAuditLog(lockDb, user, 'stock', 'sparePart', target.id, `${type === 'inbound' ? '入库' : '消耗'}备件 ${target.name} 数量 ${quantity}`, target.projectId);
+        if (target.quantity <= target.safeStock) {
+          createNotification(lockDb, target.projectId, '备件库存提醒', `${target.name} 当前库存 ${target.quantity}，已达到安全阈值`, 'warning', 'inventory');
+        }
+        await writeDb(lockDb);
+        return { status: 200, item: target, movement };
+      });
+      if (!outcome.item) return json(res, outcome.status, { message: outcome.message });
+      return json(res, 200, { item: outcome.item, movement: outcome.movement });
     }
 
     if (req.method === 'GET' && pathname === '/api/change-records') {
@@ -11537,6 +11672,9 @@ async function initializeRuntimeServices() {
 initializeRuntimeServices().catch(error => {
   console.error(`Runtime services initialization failed: ${error.message}`);
 });
+recoverInterruptedRunsOnce().catch(error => {
+  console.error(`Interrupted run recovery failed: ${error.message}`);
+});
 runAiInspectionScheduler();
 const schedulerIntervalId = setInterval(runAiInspectionScheduler, maintenanceIntervalMs);
 
@@ -11776,7 +11914,11 @@ async function notifyMonitorChange(asset, prevStatus, newStatus) {
   } catch (_) {}
 }
 
+let assetMonitorSchedulerRunning = false;
 async function runAssetMonitorScheduler() {
+  // 单轮探测可能超过调度间隔，必须防止重叠执行导致重复告警与资源翻倍。
+  if (assetMonitorSchedulerRunning) return;
+  assetMonitorSchedulerRunning = true;
   try {
     const db = await readDb();
     refreshMonitorTargetPolicy(db.systemConfig);
@@ -11790,6 +11932,8 @@ async function runAssetMonitorScheduler() {
     monitorRuntimeState.lastRunAt = now();
   } catch (error) {
     console.warn('Asset monitor scheduler error:', error.message);
+  } finally {
+    assetMonitorSchedulerRunning = false;
   }
 }
 
@@ -11894,7 +12038,10 @@ async function updateLinkPortStatuses() {
   } catch (_) {}
 }
 
+let trafficMonitorSchedulerRunning = false;
 async function runTrafficMonitorScheduler() {
+  if (trafficMonitorSchedulerRunning) return;
+  trafficMonitorSchedulerRunning = true;
   try {
     const db = await readDb();
     const relations = db.assetRelations || [];
@@ -11946,6 +12093,8 @@ async function runTrafficMonitorScheduler() {
     }
   } catch (e) {
     console.warn('Traffic monitor scheduler error:', e.message);
+  } finally {
+    trafficMonitorSchedulerRunning = false;
   }
 }
 

@@ -3933,9 +3933,7 @@
       if (isInteractive) return scheduleWsDataRefresh(1500);
       wsRefreshPending = true;
       try {
-        const pageState = Object.fromEntries(Object.entries(state).filter(([key, value]) => key.endsWith('Page') && Number.isFinite(Number(value))));
         await loadBaseData();
-        Object.assign(state, pageState);
         const currentTab = state.currentTab || 'dashboard';
         const currentSubtab = state.currentSubtab;
         switchTab(currentTab);
@@ -7308,12 +7306,27 @@
           return `<tr><td>${esc(item.title)}</td><td>${typeLabels[item.type] || item.type}</td><td>${esc(formatProjectDisplayById(item.projectId))}</td><td>${brandModel}</td><td>${warrantyDays}</td><td>${esc(item.createdAt || '-')}</td><td><div class="toolbar" style="white-space:nowrap;">${viewBtn}${displayActions}</div></td></tr>`;
         }).join('') || '<tr><td colspan="7">暂无数据</td></tr>';
         const totalPages = Math.max(1, Math.ceil((result.total || 0) / pageSize));
+        // 筛选后结果可能不足当前页，需钳制页码并重新加载，避免出现「第 3 / 1 页」的空页。
+        if ((state.documentPage || 1) > totalPages) {
+          state.documentPage = totalPages;
+          return renderDocuments();
+        }
         document.getElementById('documentPageInfo').textContent = `第 ${state.documentPage || 1} / ${totalPages} 页`;
         document.getElementById('documentPrevBtn').disabled = (state.documentPage || 1) <= 1;
         document.getElementById('documentNextBtn').disabled = (state.documentPage || 1) >= totalPages;
       } catch (error) {
         showGlobalError(error.message || '加载资料列表失败');
       }
+    }
+
+    // 资料写操作后需同步全量 state.documents，否则按 id 查找（下载/密码弹窗标题）会取不到记录。
+    async function reloadDocuments() {
+      try {
+        const result = await apiCollection('/api/documents', { silent: true });
+        state.documents = result.data || [];
+      } catch (_) {
+      }
+      await renderDocuments();
     }
 
     let pendingDocumentId = '';
@@ -7585,7 +7598,7 @@
       if (!confirmed) return;
       await api(`/api/documents/${id}`, { method: 'DELETE' });
       state.documentPage = 1;
-      renderDocuments();
+      await reloadDocuments();
       showToast('资料已删除');
     }
 
@@ -8629,7 +8642,7 @@
       if (!confirmed) return;
       await api(`/api/kb/${id}`, { method: 'DELETE' });
       setMessage('kbMessage', '知识条目已删除');
-      state.kb = (await api('/api/kb')).data;
+      state.kb = (await apiCollection('/api/kb')).data;
       renderKb();
       await refreshReports();
       openTabWithSubtab('kb', 'list');
@@ -9215,29 +9228,33 @@
         setMessage('globalStatus', `部分数据加载失败: ${failedEndpoints.join(', ')}`);
       }
 
-      state.auditLogPage = 1;
-      state.inspectionExecutionPage = 1;
-      state.changeRecordPage = 1;
-      state.logPage = 1;
-      state.kbPage = 1;
-      state.assetPage = 1;
-      state.projectPage = 1;
-      state.userPage = 1;
-      state.sparePartPage = 1;
-      state.approvalPage = 1;
-      state.reportPage = 1;
-      state.workloadPage = 1;
-      state.workReportListPage = 1;
-      state.inspectionPlanPage = 1;
-      state.sparePartMovementPage = 1;
-      state.incidentPage = 1;
-      state.aiInspectionTargetPage = 1;
-      state.aiInspectionTemplatePage = 1;
-      state.aiInspectionTaskPage = 1;
-      state.aiInspectionResultPage = 1;
-      state.aiInspectionReportPage = 1;
-      state.configBackupPlanPage = 1;
-      state.configBackupRecordPage = 1;
+      // 仅在首次加载/明确清空时重置分页；后台 WS 刷新或写操作后的刷新保留当前页码，
+      // 由各 render 函数自行钳制到有效范围，避免用户被弹回第一页。
+      if (options.clearBeforeLoad) {
+        state.auditLogPage = 1;
+        state.inspectionExecutionPage = 1;
+        state.changeRecordPage = 1;
+        state.logPage = 1;
+        state.kbPage = 1;
+        state.assetPage = 1;
+        state.projectPage = 1;
+        state.userPage = 1;
+        state.sparePartPage = 1;
+        state.approvalPage = 1;
+        state.reportPage = 1;
+        state.workloadPage = 1;
+        state.workReportListPage = 1;
+        state.inspectionPlanPage = 1;
+        state.sparePartMovementPage = 1;
+        state.incidentPage = 1;
+        state.aiInspectionTargetPage = 1;
+        state.aiInspectionTemplatePage = 1;
+        state.aiInspectionTaskPage = 1;
+        state.aiInspectionResultPage = 1;
+        state.aiInspectionReportPage = 1;
+        state.configBackupPlanPage = 1;
+        state.configBackupRecordPage = 1;
+      }
       const refreshedCurrentUser = state.users.find(item => item.id === state.user?.id);
       if (refreshedCurrentUser) {
         state.user = refreshedCurrentUser;
@@ -9281,7 +9298,7 @@
         setMessage('loginMessage', '');
         switchTab('dashboard');
         refreshAppVersion();
-        await loadBaseData();
+        await loadBaseData({ clearBeforeLoad: true });
         startSystemLoadAutoRefresh();
       } catch (error) {
         const isAuthError = error.message === '请先登录';
@@ -10478,7 +10495,7 @@
         if (!confirmed) return;
         await api(`/api/logs/${id}`, { method: 'PUT', body: JSON.stringify(data) });
         closeModal('logEditModal');
-        state.logs = (await api('/api/logs')).data;
+        state.logs = (await apiCollection('/api/logs')).data;
         renderLogs();
         await refreshDashboard();
         await refreshReports();
@@ -10508,7 +10525,7 @@
       try {
         await api(`/api/kb/${id}`, { method: 'PUT', body: JSON.stringify(data) });
         closeModal('kbEditModal');
-        state.kb = (await api('/api/kb')).data;
+        state.kb = (await apiCollection('/api/kb')).data;
         renderKb();
         await refreshReports();
         showToast('知识条目修改成功');
@@ -12109,7 +12126,7 @@
         await api('/api/logs', { method: 'POST', body: JSON.stringify(data) });
         resetLogForm();
         setMessage('logMessage', '日志创建成功');
-        state.logs = (await api('/api/logs')).data;
+        state.logs = (await apiCollection('/api/logs')).data;
         renderLogs();
         await refreshDashboard();
         await refreshReports();
@@ -12130,7 +12147,7 @@
         await api(path, { method, body: JSON.stringify(data) });
         resetKbForm();
         setMessage('kbMessage', id ? '知识条目修改成功' : '知识条目创建成功');
-        state.kb = (await api('/api/kb')).data;
+        state.kb = (await apiCollection('/api/kb')).data;
         renderKb();
         await refreshReports();
         switchSectionSubtab('kb', 'list');
@@ -12157,7 +12174,7 @@
         await api(path, { method, body: formData });
         resetDocumentForm();
         setMessage('documentMessage', id ? '资料修改成功' : '资料保存成功');
-        renderDocuments();
+        await reloadDocuments();
         switchSectionSubtab('documents', 'list');
       } catch (error) {
         setMessage('documentMessage', error.message, 'error');
@@ -12254,9 +12271,9 @@
     });
 
     ['change', 'input'].forEach(ev => {
-      document.getElementById('documentProjectFilter')?.addEventListener(ev, renderDocuments);
-      document.getElementById('documentTypeFilter')?.addEventListener(ev, renderDocuments);
-      document.getElementById('documentSearch')?.addEventListener(ev, renderDocuments);
+      document.getElementById('documentProjectFilter')?.addEventListener(ev, () => { state.documentPage = 1; renderDocuments(); });
+      document.getElementById('documentTypeFilter')?.addEventListener(ev, () => { state.documentPage = 1; renderDocuments(); });
+      document.getElementById('documentSearch')?.addEventListener(ev, () => { state.documentPage = 1; renderDocuments(); });
     });
     document.getElementById('documentPrevBtn')?.addEventListener('click', () => { state.documentPage = Math.max(1, (state.documentPage || 1) - 1); renderDocuments(); });
     document.getElementById('documentNextBtn')?.addEventListener('click', () => { state.documentPage = (state.documentPage || 1) + 1; renderDocuments(); });
