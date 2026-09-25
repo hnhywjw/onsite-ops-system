@@ -1113,10 +1113,13 @@ function runMaintenanceTasks(db) {
   const weekKey = formatWeekKey(currentDate);
 
   if (runtimeState.maintenance.lastAuditArchiveDate !== todayKey) {
-    const archivedLogs = (db.auditLogs || []).slice(500);
+    // 审计日志按追加顺序存储（最新在尾部）：保留最近的 500 条，把更早的历史归档到文件。
+    // 之前误用 slice(0, 500) 保留了最旧的记录、归档掉最新记录，会导致近期审计日志从接口消失。
+    const allAuditLogs = db.auditLogs || [];
+    const archivedLogs = allAuditLogs.slice(0, Math.max(0, allAuditLogs.length - 500));
     if (archivedLogs.length) {
       archiveJsonLines(auditArchiveDir, `${todayKey}.jsonl`, archivedLogs);
-      db.auditLogs = (db.auditLogs || []).slice(0, 500);
+      db.auditLogs = allAuditLogs.slice(-500);
       changed = true;
     }
     runtimeState.maintenance.lastAuditArchiveDate = todayKey;
@@ -7943,8 +7946,12 @@ const requestHandler = async (req, res) => {
         return json(res, 404, { message: '项目不存在' });
       }
       const body = await readBody(req);
-      project.name = body.name || project.name;
-      project.customerName = body.customerName || body.name || project.customerName;
+      const nextProjectName = String(body.name || '').trim();
+      if (!nextProjectName) return json(res, 400, { message: '项目名称不能为空' });
+      project.name = nextProjectName;
+      project.customerName = body.customerName !== undefined
+        ? (String(body.customerName || '').trim() || nextProjectName)
+        : (project.customerName || nextProjectName);
       project.projectStartDate = body.projectStartDate || '';
       project.projectEndDate = body.projectEndDate || '';
       project.notifyBefore = body.notifyBefore || '';
@@ -7961,7 +7968,7 @@ const requestHandler = async (req, res) => {
       const projectId = pathname.split('/')[3];
       // 通知属于过程性提醒，不构成业务关联；随项目删除级联清理，避免历史通知长期阻断项目删除。
       db.notifications = (db.notifications || []).filter(item => item.projectId !== projectId);
-      const projectRelationCollections = ['users','assets','logs','workReports','knowledgeBase','documents','inspectionPlans','inspectionExecutions','spareParts','sparePartMovements','changeRecords','incidentRecords','approvals','notifications','aiInspectionTargets','aiInspectionTasks','aiInspectionResults','configBackupPlans','configBackupRecords'];
+      const projectRelationCollections = ['users','assets','logs','workReports','knowledgeBase','documents','inspectionPlans','inspectionExecutions','spareParts','sparePartMovements','changeRecords','incidentRecords','approvals','notifications','aiInspectionTargets','aiInspectionTemplates','aiInspectionTasks','aiInspectionResults','configBackupPlans','configBackupRecords'];
       const relationNames = projectRelationCollections.filter(key => (db[key] || []).some(item => item.projectId === projectId));
       if (relationNames.length) {
         return json(res, 400, { message: `该项目存在关联数据(${relationNames.join(', ')})，请先清理后再删除` });
@@ -8202,7 +8209,7 @@ const requestHandler = async (req, res) => {
         ['资料', (db.documents || []), ['createdBy']],
         ['变更记录', (db.changeRecords || []), ['createdBy', 'approverId', 'customerId']],
         ['故障记录', (db.incidentRecords || []), ['createdBy']],
-        ['审批记录', (db.approvals || []), ['requestedBy', 'approverId', 'customerId']],
+        ['审批记录', (db.approvals || []), ['requestedBy', 'approvedBy', 'approverId', 'customerId']],
         ['备件流水', (db.sparePartMovements || []), ['operatorId']],
         ['巡检对象', (db.aiInspectionTargets || []), ['createdBy']],
         ['巡检模板', (db.aiInspectionTemplates || []), ['createdBy']],
@@ -8874,9 +8881,11 @@ const requestHandler = async (req, res) => {
       const user = requireEditor(req, res, db);
       if (!user) return;
       const body = await readBody(req);
+      const kbTitle = String(body.title || '').trim();
+      if (!kbTitle) return json(res, 400, { message: '知识条目标题不能为空' });
       const item = {
         id: id('kb'),
-        title: body.title || '',
+        title: kbTitle,
         content: body.content || '',
         category: body.category || '',
         tags: body.tags || '',
@@ -8901,7 +8910,11 @@ const requestHandler = async (req, res) => {
       if (!target) return json(res, 404, { message: '知识条目不存在' });
       if (!canDeleteOwnedRecord(user, target, target.createdBy || '')) return json(res, 403, { message: '仅支持修改自己创建的知识条目' });
       const body = await readBody(req);
-      if (body.title !== undefined) target.title = body.title;
+      if (body.title !== undefined) {
+        const nextKbTitle = String(body.title || '').trim();
+        if (!nextKbTitle) return json(res, 400, { message: '知识条目标题不能为空' });
+        target.title = nextKbTitle;
+      }
       if (body.content !== undefined) target.content = body.content;
       if (body.category !== undefined) target.category = body.category;
       if (body.tags !== undefined) target.tags = body.tags;
@@ -9433,7 +9446,9 @@ const requestHandler = async (req, res) => {
       if (!Number.isFinite(quantityValue) || quantityValue < 0 || !Number.isFinite(safeStockValue) || safeStockValue < 0) {
         return json(res, 400, { message: '库存数量与安全库存必须为非负数' });
       }
-      const item = { id: id('spare'), projectId, assetId, name: body.name || '', model: body.model || '', quantity: quantityValue, safeStock: safeStockValue, location: body.location || '', createdAt: now() };
+      const spareName = String(body.name || '').trim();
+      if (!spareName) return json(res, 400, { message: '备件名称不能为空' });
+      const item = { id: id('spare'), projectId, assetId, name: spareName, model: body.model || '', quantity: quantityValue, safeStock: safeStockValue, location: body.location || '', createdAt: now() };
       db.spareParts.push(item);
       appendAuditLog(db, user, 'create', 'sparePart', item.id, `创建备件 ${item.name}`, projectId);
       if (item.quantity <= item.safeStock) createNotification(db, projectId, '备件库存提醒', `${item.name} 库存达到安全阈值`, 'warning', 'inventory');
@@ -9462,7 +9477,11 @@ const requestHandler = async (req, res) => {
           if (!asset) return { status: 404, message: '关联资产不存在' };
           if (asset.projectId !== nextProjectId) return { status: 400, message: '关联资产不属于该项目' };
         }
-        if (body.name !== undefined) target.name = body.name;
+        if (body.name !== undefined) {
+          const nextSpareName = String(body.name || '').trim();
+          if (!nextSpareName) return { status: 400, message: '备件名称不能为空' };
+          target.name = nextSpareName;
+        }
         if (body.model !== undefined) target.model = body.model;
         if (body.quantity !== undefined) {
           const quantityValue = body.quantity === '' ? 0 : Number(body.quantity);
@@ -9719,7 +9738,9 @@ const requestHandler = async (req, res) => {
       if (!requireExistingProject(projectId, db)) return json(res, 400, { message: '关联项目不存在' });
       if (body.status !== undefined && !incidentStatusOptions.includes(String(body.status))) return json(res, 400, { message: '无效的故障处理状态' });
       if (body.slaStatus !== undefined && !incidentSlaStatusOptions.includes(String(body.slaStatus))) return json(res, 400, { message: '无效的 SLA 状态' });
-      const item = { id: id('incident'), projectId, assetId: body.assetId || '', title: body.title || '', faultType: body.faultType || '', severity: body.severity || '中', slaStatus: body.slaStatus || '正常', status: body.status || '处理中', description: body.description || '', occurredAt: body.occurredAt || '', resolution: body.resolution || '', createdBy: user.id, createdAt: now() };
+      const incidentTitle = String(body.title || '').trim();
+      if (!incidentTitle) return json(res, 400, { message: '故障标题不能为空' });
+      const item = { id: id('incident'), projectId, assetId: body.assetId || '', title: incidentTitle, faultType: body.faultType || '', severity: body.severity || '中', slaStatus: body.slaStatus || '正常', status: body.status || '处理中', description: body.description || '', occurredAt: body.occurredAt || '', resolution: body.resolution || '', createdBy: user.id, createdAt: now() };
       db.incidentRecords.push(item);
       appendAuditLog(db, user, 'create', 'incident', item.id, `登记故障 ${item.title}`, projectId);
       if (item.slaStatus === '超时') createNotification(db, projectId, 'SLA 超时提醒', `${item.title} 已超时`, 'error', 'incident');
@@ -9737,7 +9758,11 @@ const requestHandler = async (req, res) => {
       const body = await readBody(req);
       if (body.status !== undefined && !incidentStatusOptions.includes(String(body.status))) return json(res, 400, { message: '无效的故障处理状态' });
       if (body.slaStatus !== undefined && !incidentSlaStatusOptions.includes(String(body.slaStatus))) return json(res, 400, { message: '无效的 SLA 状态' });
-      if (body.title !== undefined) target.title = body.title;
+      if (body.title !== undefined) {
+        const nextIncidentTitle = String(body.title || '').trim();
+        if (!nextIncidentTitle) return json(res, 400, { message: '故障标题不能为空' });
+        target.title = nextIncidentTitle;
+      }
       if (body.faultType !== undefined) target.faultType = body.faultType;
       if (body.severity !== undefined) target.severity = body.severity;
       if (body.slaStatus !== undefined) target.slaStatus = body.slaStatus;
@@ -10586,8 +10611,10 @@ const requestHandler = async (req, res) => {
       if (!user) return;
       const body = await readBody(req);
       if (!requireExistingProject(body.projectId, db)) return json(res, 400, { message: '关联项目不存在' });
-      const notification = createNotification(db, body.projectId, body.title || '', body.content || '', body.level || 'info', body.category || 'manual');
-      appendAuditLog(db, user, 'create', 'notification', notification.id, `发送通知 ${body.title}`, body.projectId);
+      const notificationTitle = String(body.title || '').trim();
+      if (!notificationTitle) return json(res, 400, { message: '通知标题不能为空' });
+      const notification = createNotification(db, body.projectId, notificationTitle, body.content || '', body.level || 'info', body.category || 'manual');
+      appendAuditLog(db, user, 'create', 'notification', notification.id, `发送通知 ${notificationTitle}`, body.projectId);
       await writeDb(db);
       return json(res, 201, { ok: true });
     }
@@ -11687,6 +11714,11 @@ try {
   }
 } catch (_) {}
 
+server.on('error', (error) => {
+  console.error(`HTTP server error: ${error.message}`);
+  gracefulShutdown('server-error', 1);
+});
+
 server.listen(port, () => {
   console.log(`Server running at http://localhost:${port}`);
 });
@@ -12161,7 +12193,7 @@ runAutoBackup();
 const backupIntervalId = setInterval(runAutoBackup, 24 * 60 * 60 * 1000);
 
 let shuttingDown = false;
-function gracefulShutdown(signal) {
+function gracefulShutdown(signal, exitCode = 0) {
   if (shuttingDown) return;
   shuttingDown = true;
   console.error(`Received ${signal}, shutting down gracefully...`);
@@ -12180,11 +12212,11 @@ function gracefulShutdown(signal) {
       httpsServer.close(() => {
         console.error('HTTPS server closed');
         if (mysqlPool) { mysqlPool.end().catch(() => {}); }
-        process.exit(0);
+        process.exit(exitCode);
       });
     } else {
       if (mysqlPool) { mysqlPool.end().catch(() => {}); }
-      process.exit(0);
+      process.exit(exitCode);
     }
   });
   setTimeout(() => {
@@ -12198,7 +12230,7 @@ process.on('SIGINT', () => gracefulShutdown('SIGINT'));
 
 process.on('uncaughtException', (err) => {
   console.error('Uncaught exception, shutting down:', err);
-  gracefulShutdown('uncaughtException');
+  gracefulShutdown('uncaughtException', 1);
 });
 process.on('unhandledRejection', (reason) => {
   console.error('Unhandled rejection:', reason);
