@@ -2427,6 +2427,7 @@
               </div>
               <div>
                 <button class="secondary" id="topoSaveLayoutBtn" type="button" style="font-size:13px;padding:6px 12px;">保存拓扑</button>
+                <button class="secondary" id="topoResetLayoutBtn" type="button" style="font-size:13px;padding:6px 12px;">重置布局</button>
                 <button class="secondary" id="topoAddRelBtn" type="button" style="font-size:13px;padding:6px 12px;">添加连接</button>
                 <button class="secondary" id="topoRefreshBtn" type="button" style="font-size:13px;padding:6px 12px;margin-left:4px;">刷新</button>
                 <span id="topoLegend" style="margin-left:8px;font-size:12px;color:#666;">
@@ -5796,6 +5797,7 @@
       document.getElementById('assetBatchDeleteBtn')?.classList.toggle('hidden', !canEditData());
       document.getElementById('configBackupPlanForm')?.closest('.card')?.classList.toggle('hidden', !canEditData());
       document.getElementById('topoSaveLayoutBtn')?.classList.toggle('hidden', !canEditData());
+      document.getElementById('topoResetLayoutBtn')?.classList.toggle('hidden', !canEditData());
       document.getElementById('topoAddRelBtn')?.classList.toggle('hidden', !canEditData());
       const reportDimension = document.getElementById('reportDimension');
       if (reportDimension) {
@@ -5953,6 +5955,7 @@
         const statusTag = item.status === 'pending' ? '<span class="badge" style="background:#fef3c7;color:#92400e;">待审批</span>' : (item.status === 'rejected' ? '<span class="badge" style="background:#fee2e2;color:#991b1b;">已拒绝</span>' : (item.status === 'disabled' ? '<span class="badge" style="background:#e2e8f0;color:#475569;">已禁用</span>' : (item.status === 'active' ? '<span class="badge" style="background:#d1fae5;color:#065f46;">正常</span>' : '')));
         const adminActions = state.user.role === 'admin' ? [
           item.status === 'pending' ? `<button class="secondary" data-action="approve-user" data-id="${item.id}" type="button" style="background:#d1fae5;color:#065f46;">通过</button><button class="secondary" data-action="reject-user" data-id="${item.id}" type="button" style="background:#fee2e2;color:#991b1b;">拒绝</button>` : '',
+          item.status === 'rejected' ? `<button class="secondary" data-action="restore-user" data-id="${item.id}" type="button" style="background:#dbeafe;color:#1e40af;">恢复</button>` : '',
           `<button class="secondary" data-action="edit-user" data-id="${item.id}" type="button">修改</button>`,
           item.id !== state.user.id ? (item.status === 'disabled' ? `<button class="secondary" data-action="enable-user" data-id="${item.id}" type="button" style="background:#d1fae5;color:#065f46;">启用</button>` : `<button class="secondary" data-action="disable-user" data-id="${item.id}" type="button" style="background:#fef3c7;color:#92400e;">禁用</button>`) : '',
           `<button class="secondary" data-action="delete-user" data-id="${item.id}" type="button" style="background:#fee2e2;color:#dc2626;border-color:#fecaca;">删除</button>`
@@ -6044,6 +6047,19 @@
         showToast('拓扑布局已保存', 'success');
       } catch (e) {
         showToast(e.message || '保存失败', 'error');
+      }
+    }
+
+    async function resetTopoLayout() {
+      if (!canEditData()) return;
+      if (!await showConfirm('确认重置该项目的拓扑布局吗？节点将回到自动排列。')) return;
+      try {
+        await api('/api/assets/topology-layout', { method: 'DELETE' });
+        state.topoNodePositions = {};
+        showToast('拓扑布局已重置', 'success');
+        await renderTopology();
+      } catch (e) {
+        showToast(e.message || '重置失败', 'error');
       }
     }
 
@@ -6945,6 +6961,10 @@
 
     document.getElementById('topoSaveLayoutBtn').addEventListener('click', () => {
       saveTopoLayout();
+    });
+
+    document.getElementById('topoResetLayoutBtn').addEventListener('click', () => {
+      resetTopoLayout();
     });
 
     document.getElementById('topoRefreshBtn').addEventListener('click', () => renderTopology());
@@ -8605,6 +8625,27 @@
     async function rejectUser(id) {
       const result = await api(`/api/users/${id}/reject`, { method: 'PUT', body: '{}' });
       setMessages(['userMessage', 'userListMessage'], result.message || '已拒绝');
+      await loadBaseData();
+      renderUsers();
+    }
+
+    async function restoreUser(id) {
+      const target = state.users.find(item => item.id === id);
+      const choice = String(prompt('恢复该账号：\n1 = 恢复为待审批\n2 = 直接启用（需指定项目）', '1') || '').trim();
+      if (!choice) return;
+      if (choice === '2') {
+        const options = state.projects.map(item => `${item.name} | ${item.id}`).join('\n');
+        const projectId = String(prompt(`启用账号必须绑定项目，请输入项目 ID：\n${options}`, target?.projectId || '') || '').trim();
+        if (!projectId) {
+          setMessages(['userMessage', 'userListMessage'], '启用前必须指定有效项目');
+          return;
+        }
+        const result = await api(`/api/users/${id}/restore`, { method: 'PUT', body: JSON.stringify({ status: 'active', projectId }) });
+        setMessages(['userMessage', 'userListMessage'], result.message || '账号已启用');
+      } else {
+        const result = await api(`/api/users/${id}/restore`, { method: 'PUT', body: JSON.stringify({ status: 'pending' }) });
+        setMessages(['userMessage', 'userListMessage'], result.message || '账号已恢复为待审批');
+      }
       await loadBaseData();
       renderUsers();
     }
@@ -10820,6 +10861,9 @@
         }
         if (button.dataset.action === 'reject-user') {
           await rejectUser(button.dataset.id);
+        }
+        if (button.dataset.action === 'restore-user') {
+          await restoreUser(button.dataset.id);
         }
         if (button.dataset.action === 'disable-user') {
           await disableUser(button.dataset.id);

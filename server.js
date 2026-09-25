@@ -159,6 +159,8 @@ const allowedUserRoles = ['admin', 'engineer', 'viewer', 'auditor', 'customer'];
 const inspectionPlanDoneStatuses = ['已完成', '已执行', '异常待处理'];
 const incidentStatusOptions = ['处理中', '已恢复', '已关闭'];
 const incidentSlaStatusOptions = ['正常', '预警', '超时'];
+const incidentSeverityOptions = ['低', '中', '高'];
+const notificationLevelOptions = ['info', 'warning', 'error'];
 const upgradeSigningKeyEnv = String(process.env.UPGRADE_SIGNING_KEY || '').trim();
 const allowedBackupCommands = (process.env.CONFIG_BACKUP_ALLOWED_COMMANDS || 'show running-config,show startup-config,display current-configuration,cat /etc/os-release')
   .split(',')
@@ -1505,6 +1507,13 @@ const ASSET_MONITOR_TYPES = ['ping', 'tcp', 'snmp'];
 const ASSET_RESERVED_IDS = new Set(['import', 'cabinet-layout', 'topology-layout', 'topology', 'monitor-status']);
 const ASSET_IMPORT_MAX_ROWS = 500;
 
+// 资产类型为固定枚举，新增与修改必须共用同一套校验，避免写入列表外类型。
+function readAssetTypeField(rawType) {
+  const type = String(rawType || '').trim();
+  if (!ASSET_TYPE_OPTIONS.includes(type)) return { error: '资产类型无效' };
+  return { type };
+}
+
 function parseAssetIdFromPath(pathname) {
   const parts = String(pathname || '').split('/').filter(Boolean);
   if (parts.length !== 3 || parts[0] !== 'api' || parts[1] !== 'assets') return '';
@@ -2730,7 +2739,8 @@ function normalizeDb(raw = {}) {
     assets: (raw.assets || []).map(asset => ({
       id: asset.id || id('asset'),
       projectId: asset.projectId || '',
-      type: asset.type || '',
+      // 资产类型已收紧为固定枚举，历史遗留的非枚举值在归一化时回落默认类型。
+      type: ASSET_TYPE_OPTIONS.includes(asset.type) ? asset.type : '其它',
       name: asset.name || '',
       brand: asset.brand || '',
       model: asset.model || '',
@@ -3196,6 +3206,144 @@ function fillMissingSnapshotSecrets(raw, currentDb) {
   return nextDb;
 }
 
+// 导入/恢复的快照可能来自手工编辑或外部环境，引用与枚举不一定合法。
+// 这里只做清洗（非法引用置空、非法枚举回落默认值），不拒绝整份快照。
+function sanitizeImportedData(db) {
+  const projectIds = new Set((db.projects || []).map(item => item.id).filter(Boolean));
+  const userIds = new Set((db.users || []).map(item => item.id).filter(Boolean));
+  const assetIds = new Set((db.assets || []).map(item => item.id).filter(Boolean));
+  const planIds = new Set((db.inspectionPlans || []).map(item => item.id).filter(Boolean));
+  const sparePartIds = new Set((db.spareParts || []).map(item => item.id).filter(Boolean));
+  const targetIds = new Set((db.aiInspectionTargets || []).map(item => item.id).filter(Boolean));
+  const templateIds = new Set((db.aiInspectionTemplates || []).map(item => item.id).filter(Boolean));
+  const taskIds = new Set((db.aiInspectionTasks || []).map(item => item.id).filter(Boolean));
+  const approvalIds = new Set((db.approvals || []).map(item => item.id).filter(Boolean));
+  const cfgPlanIds = new Set((db.configBackupPlans || []).map(item => item.id).filter(Boolean));
+
+  const clearRef = (list, fields, idSet) => {
+    for (const item of list || []) {
+      if (!item || typeof item !== 'object') continue;
+      for (const field of fields) {
+        // 'system' 是内置巡检模板等系统内置数据的保留标识，不属于用户集合，不能按无效引用清空。
+        if (item[field] && item[field] !== 'system' && !idSet.has(item[field])) item[field] = '';
+      }
+    }
+  };
+  const coerceEnum = (list, field, options, fallback) => {
+    for (const item of list || []) {
+      if (!item || typeof item !== 'object') continue;
+      if (!options.includes(item[field])) item[field] = fallback;
+    }
+  };
+
+  clearRef(db.users, ['projectId'], projectIds);
+  coerceEnum(db.users, 'role', allowedUserRoles, 'engineer');
+  coerceEnum(db.users, 'status', ['active', 'pending', 'disabled', 'rejected'], 'active');
+
+  clearRef(db.assets, ['projectId'], projectIds);
+  coerceEnum(db.assets, 'type', ASSET_TYPE_OPTIONS, '其它');
+  coerceEnum(db.assets, 'monitorType', ASSET_MONITOR_TYPES, 'ping');
+
+  clearRef(db.assetRelations, ['sourceAssetId', 'targetAssetId'], assetIds);
+  clearRef(db.logs, ['userId'], userIds);
+  clearRef(db.logs, ['projectId'], projectIds);
+  clearRef(db.logs, ['assetId'], assetIds);
+
+  clearRef(db.inspectionPlans, ['projectId'], projectIds);
+  clearRef(db.inspectionPlans, ['assetId'], assetIds);
+  clearRef(db.inspectionPlans, ['createdBy'], userIds);
+  coerceEnum(db.inspectionPlans, 'status', ['待执行', '执行中', '已完成', '已执行', '异常待处理', '已停用'], '待执行');
+
+  clearRef(db.inspectionExecutions, ['planId'], planIds);
+  clearRef(db.inspectionExecutions, ['projectId'], projectIds);
+  clearRef(db.inspectionExecutions, ['assetId'], assetIds);
+  clearRef(db.inspectionExecutions, ['createdBy'], userIds);
+  coerceEnum(db.inspectionExecutions, 'result', ['正常', '异常'], '正常');
+
+  clearRef(db.spareParts, ['projectId'], projectIds);
+  clearRef(db.spareParts, ['assetId'], assetIds);
+  clearRef(db.sparePartMovements, ['sparePartId'], sparePartIds);
+  clearRef(db.sparePartMovements, ['projectId'], projectIds);
+  clearRef(db.sparePartMovements, ['assetId'], assetIds);
+  clearRef(db.sparePartMovements, ['operatorId'], userIds);
+  coerceEnum(db.sparePartMovements, 'type', ['inbound', 'outbound'], 'outbound');
+
+  clearRef(db.changeRecords, ['projectId'], projectIds);
+  clearRef(db.changeRecords, ['assetId'], assetIds);
+  clearRef(db.changeRecords, ['approverId', 'customerId', 'createdBy'], userIds);
+  clearRef(db.changeRecords, ['approvalId'], approvalIds);
+  coerceEnum(db.changeRecords, 'status', ['待运维审批', '待客户确认', '已通过', '已驳回'], '待运维审批');
+  coerceEnum(db.changeRecords, 'riskLevel', ['低', '中', '高'], '中');
+
+  clearRef(db.incidentRecords, ['projectId'], projectIds);
+  clearRef(db.incidentRecords, ['assetId'], assetIds);
+  clearRef(db.incidentRecords, ['createdBy'], userIds);
+  coerceEnum(db.incidentRecords, 'severity', incidentSeverityOptions, '中');
+  coerceEnum(db.incidentRecords, 'status', incidentStatusOptions, '处理中');
+  coerceEnum(db.incidentRecords, 'slaStatus', incidentSlaStatusOptions, '正常');
+
+  clearRef(db.approvals, ['projectId'], projectIds);
+  clearRef(db.approvals, ['requestedBy', 'approvedBy', 'approverId', 'customerId'], userIds);
+  coerceEnum(db.approvals, 'status', ['待运维审批', '待客户确认', '已通过', '已驳回'], '待运维审批');
+  coerceEnum(db.approvals, 'currentStage', ['approver', 'customer', 'completed'], 'approver');
+
+  clearRef(db.notifications, ['projectId'], projectIds);
+  coerceEnum(db.notifications, 'level', notificationLevelOptions, 'info');
+
+  clearRef(db.knowledgeBase, ['projectId'], projectIds);
+  clearRef(db.knowledgeBase, ['createdBy'], userIds);
+
+  clearRef(db.documents, ['projectId'], projectIds);
+  clearRef(db.documents, ['createdBy'], userIds);
+  coerceEnum(db.documents, 'type', DOCUMENT_TYPES, 'device');
+
+  clearRef(db.workReports, ['projectId'], projectIds);
+  clearRef(db.workReports, ['userId', 'reviewedBy'], userIds);
+
+  clearRef(db.aiInspectionTargets, ['projectId'], projectIds);
+  clearRef(db.aiInspectionTargets, ['assetId'], assetIds);
+  clearRef(db.aiInspectionTargets, ['createdBy'], userIds);
+  clearRef(db.aiInspectionTemplates, ['projectId'], projectIds);
+  clearRef(db.aiInspectionTemplates, ['createdBy'], userIds);
+  clearRef(db.aiInspectionTasks, ['projectId'], projectIds);
+  clearRef(db.aiInspectionTasks, ['targetId'], targetIds);
+  clearRef(db.aiInspectionTasks, ['templateId'], templateIds);
+  clearRef(db.aiInspectionTasks, ['createdBy'], userIds);
+  coerceEnum(db.aiInspectionTasks, 'status', ['待执行', '执行中', '已完成', '失败', '已停用'], '待执行');
+
+  clearRef(db.aiInspectionResults, ['projectId'], projectIds);
+  clearRef(db.aiInspectionResults, ['taskId'], taskIds);
+  clearRef(db.aiInspectionResults, ['targetId'], targetIds);
+  clearRef(db.aiInspectionResults, ['templateId'], templateIds);
+  coerceEnum(db.aiInspectionResults, 'level', ['正常', '关注', '异常', '严重'], '正常');
+
+  clearRef(db.configBackupPlans, ['projectId'], projectIds);
+  clearRef(db.configBackupPlans, ['targetId'], targetIds);
+  clearRef(db.configBackupPlans, ['createdBy'], userIds);
+  clearRef(db.configBackupRecords, ['planId'], cfgPlanIds);
+  clearRef(db.configBackupRecords, ['projectId'], projectIds);
+  clearRef(db.configBackupRecords, ['targetId'], targetIds);
+  clearRef(db.configBackupRecords, ['assetId'], assetIds);
+  clearRef(db.configBackupRecords, ['createdBy'], userIds);
+
+  clearRef(db.sessions, ['userId'], userIds);
+
+  if (db.topologyLayouts && db.topologyLayouts.positions && typeof db.topologyLayouts.positions === 'object') {
+    for (const projectId of Object.keys(db.topologyLayouts.positions)) {
+      if (!projectIds.has(projectId)) {
+        delete db.topologyLayouts.positions[projectId];
+        continue;
+      }
+      const positions = db.topologyLayouts.positions[projectId];
+      if (!positions || typeof positions !== 'object') continue;
+      for (const assetId of Object.keys(positions)) {
+        if (!assetIds.has(assetId)) delete positions[assetId];
+      }
+    }
+  }
+  return db;
+}
+
 function buildImportedDbPreservingCurrentSession(raw, currentUser, currentSessionToken, currentSession) {
   const nextDb = normalizeDb(raw);
   if (currentUser && !(nextDb.users || []).some(item => item.id === currentUser.id)) {
@@ -3208,6 +3356,7 @@ function buildImportedDbPreservingCurrentSession(raw, currentUser, currentSessio
     lastActivityAt: currentSession.lastActivityAt || now(),
     expiresAt: currentSession.expiresAt || new Date(Date.now() + sessionMaxAgeSeconds * 1000).toISOString()
   }] : [];
+  sanitizeImportedData(nextDb);
   return nextDb;
 }
 
@@ -8097,6 +8246,40 @@ const requestHandler = async (req, res) => {
       return json(res, 200, { message: '已拒绝该注册申请', user: sanitizeUser(target) });
     }
 
+    // 已拒绝账号此前是终态，误操作后无法纠正；允许管理员恢复为待审批或直接启用。
+    if (req.method === 'PUT' && pathname.endsWith('/restore') && pathname.startsWith('/api/users/')) {
+      const admin = requireAdmin(req, res, db);
+      if (!admin) return;
+      const targetUserId = pathname.split('/')[3];
+      const target = db.users.find(item => item.id === targetUserId);
+      if (!target) {
+        return json(res, 404, { message: '人员不存在' });
+      }
+      if (target.status !== 'rejected') {
+        return json(res, 400, { message: '仅已拒绝的账号需要恢复' });
+      }
+      const body = await readBody(req);
+      const nextStatus = body.status === undefined ? 'pending' : String(body.status);
+      if (nextStatus !== 'pending' && nextStatus !== 'active') {
+        return json(res, 400, { message: '恢复状态只能为待审批或启用' });
+      }
+      if (nextStatus === 'active') {
+        const nextRole = body.role === undefined ? target.role : String(body.role);
+        if (!allowedUserRoles.includes(nextRole)) {
+          return json(res, 400, { message: '无效的角色' });
+        }
+        if (!body.projectId || !requireExistingProject(String(body.projectId), db)) {
+          return json(res, 400, { message: '启用前必须指定有效项目' });
+        }
+        target.role = nextRole;
+        target.projectId = String(body.projectId);
+      }
+      target.status = nextStatus;
+      appendAuditLog(db, admin, 'update', 'user', target.id, `恢复已拒绝账号 ${target.name} 为${nextStatus === 'active' ? '启用' : '待审批'}`, target.projectId);
+      await writeDb(db);
+      return json(res, 200, { message: nextStatus === 'active' ? '账号已启用' : '账号已恢复为待审批', user: sanitizeUser(target) });
+    }
+
     if (req.method === 'PUT' && pathname.endsWith('/disable') && pathname.startsWith('/api/users/')) {
       const admin = requireAdmin(req, res, db);
       if (!admin) return;
@@ -8307,10 +8490,9 @@ const requestHandler = async (req, res) => {
       if (cabinetFields.error) return json(res, 400, { message: cabinetFields.error });
       const name = String(body.name || '').trim();
       if (!name) return json(res, 400, { message: '资产名称不能为空' });
-      const type = String(body.type || '').trim();
-      if (type && ASSET_TYPE_OPTIONS.length && !ASSET_TYPE_OPTIONS.includes(type) && type.length > 40) {
-        return json(res, 400, { message: '资产类型无效' });
-      }
+      const typeField = readAssetTypeField(body.type);
+      if (typeField.error) return json(res, 400, { message: typeField.error });
+      const type = typeField.type;
       const monitorFields = readMonitorFields(body);
       if (monitorFields.error) return json(res, 400, { message: monitorFields.error });
       if (monitorFields.monitorEnabled && monitorFields.monitorHost) {
@@ -8363,6 +8545,8 @@ const requestHandler = async (req, res) => {
         // Excel 数字单元格会被解析为 number，先做字符串归一化再 trim。
         const name = String(row.name ?? row['资产名称'] ?? '').trim();
         if (!name) { results.errors.push(`${rowLabel}: 资产名称为空`); results.skipped++; continue; }
+        const typeValue = String(row.type ?? row['资产类型'] ?? '').trim();
+        if (!ASSET_TYPE_OPTIONS.includes(typeValue)) { results.errors.push(`${rowLabel}: 资产类型无效`); results.skipped++; continue; }
         let projectId = user.projectId;
         const projectName = String(row.projectName ?? row['关联项目'] ?? '').trim();
         if (user.role === 'admin' && projectName) {
@@ -8425,7 +8609,7 @@ const requestHandler = async (req, res) => {
         const item = {
           id: id('asset'),
           projectId,
-          type: row.type || row['资产类型'] || '',
+          type: typeValue,
           name,
           brand: row.brand || row['品牌'] || '',
           model: row.model || row['规格型号'] || '',
@@ -8473,6 +8657,8 @@ const requestHandler = async (req, res) => {
       });
       if (cabinetFields.error) return json(res, 400, { message: cabinetFields.error });
       if (body.name !== undefined && !String(body.name || '').trim()) return json(res, 400, { message: '资产名称不能为空' });
+      const typeField = readAssetTypeField(body.type !== undefined ? body.type : target.type);
+      if (typeField.error) return json(res, 400, { message: typeField.error });
       const monitorFields = readMonitorFields(body, target);
       if (monitorFields.error) return json(res, 400, { message: monitorFields.error });
       if (monitorFields.monitorEnabled && monitorFields.monitorHost) {
@@ -8480,7 +8666,7 @@ const requestHandler = async (req, res) => {
         if (!gate.ok) return json(res, 400, { message: gate.message });
       }
       target.projectId = projectId;
-      target.type = body.type || target.type;
+      target.type = typeField.type;
       target.name = body.name !== undefined ? String(body.name).trim() : target.name;
       target.brand = body.brand || '';
       target.model = body.model || '';
@@ -8506,6 +8692,19 @@ const requestHandler = async (req, res) => {
       appendAuditLog(db, user, 'update', 'asset', target.id, `修改资产 ${target.name}`, projectId);
       await writeDb(db);
       return json(res, 200, sanitizeAssetForApi(target, user));
+    }
+
+    // 重置拓扑布局：删除该项目已保存的节点坐标，前端刷新后回到自动布局。
+    if (req.method === 'DELETE' && pathname === '/api/assets/topology-layout') {
+      const user = requireEditor(req, res, db);
+      if (!user) return;
+      const projectId = user.role === 'admin' ? (reqUrl.searchParams.get('projectId') || user.projectId) : user.projectId;
+      if (db.topologyLayouts && db.topologyLayouts.positions) {
+        delete db.topologyLayouts.positions[projectId];
+      }
+      appendAuditLog(db, user, 'delete', 'topologyLayout', projectId, '重置拓扑布局', projectId);
+      await writeDb(db);
+      return json(res, 200, { ok: true });
     }
 
     if (req.method === 'DELETE' && pathname.startsWith('/api/assets/')) {
@@ -9738,6 +9937,7 @@ const requestHandler = async (req, res) => {
       if (!requireExistingProject(projectId, db)) return json(res, 400, { message: '关联项目不存在' });
       if (body.status !== undefined && !incidentStatusOptions.includes(String(body.status))) return json(res, 400, { message: '无效的故障处理状态' });
       if (body.slaStatus !== undefined && !incidentSlaStatusOptions.includes(String(body.slaStatus))) return json(res, 400, { message: '无效的 SLA 状态' });
+      if (body.severity !== undefined && !incidentSeverityOptions.includes(String(body.severity))) return json(res, 400, { message: '无效的严重级别' });
       const incidentTitle = String(body.title || '').trim();
       if (!incidentTitle) return json(res, 400, { message: '故障标题不能为空' });
       const item = { id: id('incident'), projectId, assetId: body.assetId || '', title: incidentTitle, faultType: body.faultType || '', severity: body.severity || '中', slaStatus: body.slaStatus || '正常', status: body.status || '处理中', description: body.description || '', occurredAt: body.occurredAt || '', resolution: body.resolution || '', createdBy: user.id, createdAt: now() };
@@ -9758,6 +9958,7 @@ const requestHandler = async (req, res) => {
       const body = await readBody(req);
       if (body.status !== undefined && !incidentStatusOptions.includes(String(body.status))) return json(res, 400, { message: '无效的故障处理状态' });
       if (body.slaStatus !== undefined && !incidentSlaStatusOptions.includes(String(body.slaStatus))) return json(res, 400, { message: '无效的 SLA 状态' });
+      if (body.severity !== undefined && !incidentSeverityOptions.includes(String(body.severity))) return json(res, 400, { message: '无效的严重级别' });
       if (body.title !== undefined) {
         const nextIncidentTitle = String(body.title || '').trim();
         if (!nextIncidentTitle) return json(res, 400, { message: '故障标题不能为空' });
@@ -10613,7 +10814,9 @@ const requestHandler = async (req, res) => {
       if (!requireExistingProject(body.projectId, db)) return json(res, 400, { message: '关联项目不存在' });
       const notificationTitle = String(body.title || '').trim();
       if (!notificationTitle) return json(res, 400, { message: '通知标题不能为空' });
-      const notification = createNotification(db, body.projectId, notificationTitle, body.content || '', body.level || 'info', body.category || 'manual');
+      const notificationLevel = body.level === undefined ? 'info' : String(body.level);
+      if (!notificationLevelOptions.includes(notificationLevel)) return json(res, 400, { message: '无效的通知级别' });
+      const notification = createNotification(db, body.projectId, notificationTitle, body.content || '', notificationLevel, body.category || 'manual');
       appendAuditLog(db, user, 'create', 'notification', notification.id, `发送通知 ${notificationTitle}`, body.projectId);
       await writeDb(db);
       return json(res, 201, { ok: true });
@@ -12012,6 +12215,24 @@ setTimeout(() => runAssetMonitorScheduler(), 5000);
 const trafficMonitorState = { lastCounters: {}, rates: {}, portStatus: {} };
 const portStatusCache = {};
 
+// SNMP 采集以网络往返为主，串行执行会让单轮耗时随链路/资产数量线性增长。
+// 这里用固定并发上限的批次执行，既压住单轮耗时，也避免一次性打满对端设备。
+async function mapWithConcurrency(items, limit, mapper) {
+  const list = Array.from(items || []);
+  const results = new Array(list.length);
+  let cursor = 0;
+  const workerCount = Math.max(1, Math.min(limit, list.length));
+  const workers = Array.from({ length: workerCount }, async () => {
+    while (cursor < list.length) {
+      const index = cursor;
+      cursor += 1;
+      results[index] = await mapper(list[index], index);
+    }
+  });
+  await Promise.all(workers);
+  return results;
+}
+
 function buildTrafficSnapshotForUser(user, db) {
   const rates = trafficMonitorState.rates || {};
   const portStatus = trafficMonitorState.portStatus || {};
@@ -12090,10 +12311,10 @@ async function updateLinkPortStatuses() {
       }
     });
     const assetPortMaps = {};
-    for (const aid of uniqueAssetIds) {
+    await mapWithConcurrency(uniqueAssetIds, 6, async aid => {
       const asset = assets.find(a => a.id === aid);
       if (asset) assetPortMaps[aid] = await getAssetSnmpPortMap(asset);
-    }
+    });
     for (const rel of relations) {
       if (!rel.sourcePort && !rel.targetPort) continue;
       const srcMap = assetPortMaps[rel.sourceAssetId] || {};
@@ -12115,45 +12336,55 @@ async function runTrafficMonitorScheduler() {
     const relations = db.assetRelations || [];
     const assets = db.assets || [];
     const newRates = {};
-    for (const rel of relations) {
-      const srcAsset = assets.find(a => a.id === rel.sourceAssetId);
-      if (!srcAsset || !srcAsset.monitorHost || !srcAsset.snmpCommunity) continue;
+    const assetById = new Map(assets.map(a => [a.id, a]));
+    const samples = await mapWithConcurrency(relations, 8, async rel => {
+      const srcAsset = assetById.get(rel.sourceAssetId);
+      if (!srcAsset || !srcAsset.monitorHost || !srcAsset.snmpCommunity) return null;
       const host = String(srcAsset.monitorHost || '').trim();
       const community = String(srcAsset.snmpCommunity || '').trim();
-      if (!host || !validateHost(host) || !community) continue;
+      if (!host || !validateHost(host) || !community) return null;
       const port = parseInt(srcAsset.snmpPort || '161', 10);
       try {
-        const inVb = await snmpGetUdp(host, port, community, [1, 3, 6, 1, 2, 1, 31, 1, 1, 1, 6, 1], 2000);
-        const outVb = await snmpGetUdp(host, port, community, [1, 3, 6, 1, 2, 1, 31, 1, 1, 1, 10, 1], 2000);
-        const results = {
+        const [inVb, outVb] = await Promise.all([
+          snmpGetUdp(host, port, community, [1, 3, 6, 1, 2, 1, 31, 1, 1, 1, 6, 1], 2000),
+          snmpGetUdp(host, port, community, [1, 3, 6, 1, 2, 1, 31, 1, 1, 1, 10, 1], 2000)
+        ]);
+        return {
+          rel,
           inOctets: inVb && Number.isFinite(Number(inVb.value)) ? Number(inVb.value) : undefined,
-          outOctets: outVb && Number.isFinite(Number(outVb.value)) ? Number(outVb.value) : undefined
+          outOctets: outVb && Number.isFinite(Number(outVb.value)) ? Number(outVb.value) : undefined,
+          nowTs: Date.now()
         };
-        const key = rel.id;
-        const prev = trafficMonitorState.lastCounters[key] || {};
-        const nowTs = Date.now();
-        newRates[rel.sourceAssetId + '_' + (rel.sourcePort || '')] = { dir: 'out', rate: 0, timestamp: nowTs };
-        newRates[rel.targetAssetId + '_' + (rel.targetPort || '')] = { dir: 'in', rate: 0, timestamp: nowTs };
-        const dt = (nowTs - (prev.ts || nowTs)) / 1000;
-        if (dt > 0) {
-          if (results.inOctets !== undefined && prev.inOctets !== undefined) {
-            let inRate = ((results.inOctets - prev.inOctets) * 8) / dt;
-            if (inRate < 0) inRate = 0;
-            newRates[rel.targetAssetId + '_' + (rel.targetPort || '')].rate = Math.round(inRate);
-          }
-          if (results.outOctets !== undefined && prev.outOctets !== undefined) {
-            let outRate = ((results.outOctets - prev.outOctets) * 8) / dt;
-            if (outRate < 0) outRate = 0;
-            newRates[rel.sourceAssetId + '_' + (rel.sourcePort || '')].rate = Math.round(outRate);
-          }
+      } catch (_) { return null; }
+    });
+    // 并发采集后按原始顺序合并，保证同一资产+端口的并发写入结果与串行一致。
+    for (const sample of samples) {
+      if (!sample) continue;
+      const { rel, inOctets, outOctets, nowTs } = sample;
+      const prev = trafficMonitorState.lastCounters[rel.id] || {};
+      const srcKey = rel.sourceAssetId + '_' + (rel.sourcePort || '');
+      const tgtKey = rel.targetAssetId + '_' + (rel.targetPort || '');
+      newRates[srcKey] = { dir: 'out', rate: 0, timestamp: nowTs };
+      newRates[tgtKey] = { dir: 'in', rate: 0, timestamp: nowTs };
+      const dt = (nowTs - (prev.ts || nowTs)) / 1000;
+      if (dt > 0) {
+        if (inOctets !== undefined && prev.inOctets !== undefined) {
+          let inRate = ((inOctets - prev.inOctets) * 8) / dt;
+          if (inRate < 0) inRate = 0;
+          newRates[tgtKey].rate = Math.round(inRate);
         }
-        trafficMonitorState.lastCounters[key] = { inOctets: results.inOctets, outOctets: results.outOctets, ts: nowTs };
-      } catch (_) {}
+        if (outOctets !== undefined && prev.outOctets !== undefined) {
+          let outRate = ((outOctets - prev.outOctets) * 8) / dt;
+          if (outRate < 0) outRate = 0;
+          newRates[srcKey].rate = Math.round(outRate);
+        }
+      }
+      trafficMonitorState.lastCounters[rel.id] = { inOctets, outOctets, ts: nowTs };
     }
     trafficMonitorState.rates = newRates;
     await updateLinkPortStatuses();
     const projectIds = [...new Set(relations.map(r => {
-      const a = assets.find(x => x.id === r.sourceAssetId);
+      const a = assetById.get(r.sourceAssetId);
       return a ? a.projectId : null;
     }).filter(Boolean))];
     for (const pid of projectIds) {
