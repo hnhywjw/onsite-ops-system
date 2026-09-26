@@ -942,7 +942,8 @@ function normalizeSystemConfig(rawSystemConfig = {}) {
     loginRateLimitMaxAttempts: Number.isFinite(Number(rawSystemConfig.loginRateLimitMaxAttempts)) && Number(rawSystemConfig.loginRateLimitMaxAttempts) >= 1 ? Number(rawSystemConfig.loginRateLimitMaxAttempts) : loginRateLimitMaxAttempts,
     loginRateLimitWindowMinutes: Number.isFinite(Number(rawSystemConfig.loginRateLimitWindowMinutes)) && Number(rawSystemConfig.loginRateLimitWindowMinutes) >= 1 ? Number(rawSystemConfig.loginRateLimitWindowMinutes) : Math.round(loginRateLimitWindowMs / 60000),
     loginRateLimitLockMinutes: Number.isFinite(Number(rawSystemConfig.loginRateLimitLockMinutes)) && Number(rawSystemConfig.loginRateLimitLockMinutes) >= 1 ? Number(rawSystemConfig.loginRateLimitLockMinutes) : Math.round(loginRateLimitLockMs / 60000),
-    timezoneOffset: Number.isFinite(timezoneOffset) ? timezoneOffset : 480,
+    // 时区偏移限制在 UTC-12:00 ~ UTC+14:00（-720 ~ 840 分钟），避免异常值影响日期统计。
+    timezoneOffset: Number.isFinite(timezoneOffset) ? Math.min(840, Math.max(-720, Math.round(timezoneOffset))) : 480,
     dailyReportReminderHour: Number.isFinite(dailyReportReminderHour) ? Math.min(23, Math.max(0, Math.round(dailyReportReminderHour))) : defaultDailyReportReminderHour,
     weeklyReportReminderDays: Number.isFinite(weeklyReportReminderDays) ? Math.min(30, Math.max(0, Math.round(weeklyReportReminderDays))) : defaultWeeklyReportReminderDays,
     monthlyReportReminderDays: Number.isFinite(monthlyReportReminderDays) ? Math.min(31, Math.max(0, Math.round(monthlyReportReminderDays))) : defaultMonthlyReportReminderDays,
@@ -980,8 +981,17 @@ function normalizeRuntimeState(rawRuntimeState = {}) {
   const maintenance = rawRuntimeState.maintenance && typeof rawRuntimeState.maintenance === 'object'
     ? rawRuntimeState.maintenance
     : {};
+  // OIDC 授权状态会被写入 runtimeState 以便在回调阶段读取；归一化时必须保留，否则重载后被清空导致登录回调间歇失败。
+  const oidcState = rawRuntimeState.oidcState && typeof rawRuntimeState.oidcState === 'object' && !Array.isArray(rawRuntimeState.oidcState)
+    ? Object.fromEntries(Object.entries(rawRuntimeState.oidcState).map(([key, entry]) => [String(key), {
+      codeVerifier: String(entry?.codeVerifier || ''),
+      nonce: String(entry?.nonce || ''),
+      createdAt: Math.max(0, Number(entry?.createdAt || 0))
+    }]).filter(([, entry]) => entry.codeVerifier && entry.createdAt))
+    : {};
   return {
     loginRateLimits,
+    oidcState,
     maintenance: {
       lastAuditArchiveDate: String(maintenance.lastAuditArchiveDate || '').trim(),
       lastBackupCleanupWeek: String(maintenance.lastBackupCleanupWeek || '').trim(),
@@ -2760,6 +2770,8 @@ function normalizeDb(raw = {}) {
       monitorPort: asset.monitorPort || '',
       snmpCommunity: asset.snmpCommunity || '',
       snmpPort: asset.snmpPort || '161',
+      // createdBy 用于非管理员的所有权校验，归一化时必须保留，否则重启后普通工程师将永久无法修改/删除自己创建的资产。
+      createdBy: asset.createdBy || '',
       createdAt: asset.createdAt || now()
     })),
     assetRelations: (raw.assetRelations || []).map(rel => ({
@@ -2829,7 +2841,9 @@ function normalizeDb(raw = {}) {
       model: item.model || '',
       quantity: Number(item.quantity || 0),
       safeStock: Number(item.safeStock || 0),
+      unit: item.unit || '',
       location: item.location || '',
+      notes: item.notes || '',
       createdAt: item.createdAt || now()
     })),
     sparePartMovements: (raw.sparePartMovements || []).map(item => ({
@@ -2936,7 +2950,8 @@ function normalizeDb(raw = {}) {
       solution: item.solution || '',
       content: item.content || '',
       category: item.category || '',
-      tags: Array.isArray(item.tags) ? item.tags : [],
+      // tags 既可能来自接口的字符串，也可能来自历史数据/导入的数组，归一化时原样保留，避免被强制清空。
+      tags: Array.isArray(item.tags) ? item.tags : (item.tags || ''),
       createdBy: item.createdBy || '',
       projectId: item.projectId || userProjectMap.get(item.createdBy) || '',
       createdAt: item.createdAt || now()
@@ -3346,8 +3361,9 @@ function sanitizeImportedData(db) {
 
 function buildImportedDbPreservingCurrentSession(raw, currentUser, currentSessionToken, currentSession) {
   const nextDb = normalizeDb(raw);
-  if (currentUser && !(nextDb.users || []).some(item => item.id === currentUser.id)) {
-    nextDb.users = [...(nextDb.users || []), currentUser];
+  if (currentUser) {
+    // 导入快照可能含同 ID 但被停用/降权的账号，强制以当前登录账号覆盖，避免导入后把自己锁在系统外。
+    nextDb.users = [...(nextDb.users || []).filter(item => item.id !== currentUser.id), currentUser];
   }
   nextDb.sessions = currentSessionToken && currentSession && currentUser ? [{
     token: currentSessionToken,
@@ -5541,6 +5557,11 @@ function canDeleteOwnedRecord(user, item, creatorId) {
   if (user.role === 'admin') return true;
   if (item.projectId !== user.projectId) return false;
   return creatorId === user.id;
+}
+
+// 统计除指定账号外仍处于启用状态的管理员数量，用于保证系统至少保留一个可用管理员。
+function countActiveAdminsExcluding(db, excludeUserId) {
+  return (db.users || []).filter(item => item.role === 'admin' && item.status !== 'disabled' && item.id !== excludeUserId).length;
 }
 
 function canOperateInspectionRecord(user, item) {
@@ -8294,6 +8315,9 @@ const requestHandler = async (req, res) => {
       if (target.role === 'admin' && admin.id !== target.id) {
         return json(res, 403, { message: '不能禁用其他管理员账号' });
       }
+      if (target.role === 'admin' && countActiveAdminsExcluding(db, target.id) === 0) {
+        return json(res, 400, { message: '系统必须保留至少一个启用状态的管理员' });
+      }
       target.status = 'disabled';
       db.sessions = (db.sessions || []).filter(item => item.userId !== target.id);
       appendAuditLog(db, admin, 'update', 'user', target.id, `禁用账号 ${target.name}`, target.projectId);
@@ -8337,6 +8361,9 @@ const requestHandler = async (req, res) => {
       const nextRole = body.role ? String(body.role) : target.role;
       if (body.role && !allowedUserRoles.includes(nextRole)) {
         return json(res, 400, { message: '无效的角色' });
+      }
+      if (target.role === 'admin' && nextRole !== 'admin' && countActiveAdminsExcluding(db, target.id) === 0) {
+        return json(res, 400, { message: '系统必须保留至少一个启用状态的管理员' });
       }
       const nextProjectId = body.projectId || '';
       const roleOrProjectChanged = nextRole !== target.role || nextProjectId !== (target.projectId || '');
@@ -8668,18 +8695,19 @@ const requestHandler = async (req, res) => {
       target.projectId = projectId;
       target.type = typeField.type;
       target.name = body.name !== undefined ? String(body.name).trim() : target.name;
-      target.brand = body.brand || '';
-      target.model = body.model || '';
-      target.owner = body.owner || '';
-      target.version = body.version || '';
+      // 仅更新请求中显式提交的字段，避免未提交字段被空值覆盖。
+      target.brand = body.brand !== undefined ? body.brand : target.brand;
+      target.model = body.model !== undefined ? body.model : target.model;
+      target.owner = body.owner !== undefined ? body.owner : target.owner;
+      target.version = body.version !== undefined ? body.version : target.version;
       (db.aiInspectionTargets || []).forEach(item => {
         if (item.assetId === target.id) item.systemVersion = target.version;
       });
-      target.serialNumber = body.serialNumber || '';
-      target.status = body.status || '';
-      target.maintainExpiryDate = body.maintainExpiryDate || '';
+      target.serialNumber = body.serialNumber !== undefined ? body.serialNumber : target.serialNumber;
+      target.status = body.status !== undefined ? body.status : target.status;
+      target.maintainExpiryDate = body.maintainExpiryDate !== undefined ? body.maintainExpiryDate : target.maintainExpiryDate;
       target.installationLocation = body.installationLocation !== undefined ? body.installationLocation : target.installationLocation;
-      target.notes = body.notes || '';
+      target.notes = body.notes !== undefined ? body.notes : target.notes;
       target.cabinetName = cabinetFields.cabinetName;
       target.rackUnitStart = cabinetFields.rackUnitStart;
       target.rackUnitSize = cabinetFields.rackUnitSize;
@@ -9082,6 +9110,8 @@ const requestHandler = async (req, res) => {
       const body = await readBody(req);
       const kbTitle = String(body.title || '').trim();
       if (!kbTitle) return json(res, 400, { message: '知识条目标题不能为空' });
+      const kbProjectId = user.role === 'admin' ? (body.projectId || user.projectId) : user.projectId;
+      if (!requireExistingProject(kbProjectId, db)) return json(res, 400, { message: '关联项目不存在' });
       const item = {
         id: id('kb'),
         title: kbTitle,
@@ -9092,7 +9122,7 @@ const requestHandler = async (req, res) => {
         problem: body.problem || '',
         solution: body.solution || '',
         createdBy: user.id,
-        projectId: user.role === 'admin' ? (body.projectId || user.projectId) : user.projectId,
+        projectId: kbProjectId,
         createdAt: now()
       };
       db.knowledgeBase.push(item);
@@ -9120,7 +9150,10 @@ const requestHandler = async (req, res) => {
       if (body.keywords !== undefined) target.keywords = body.keywords;
       if (body.problem !== undefined) target.problem = body.problem;
       if (body.solution !== undefined) target.solution = body.solution;
-      if (user.role === 'admin' && body.projectId !== undefined) target.projectId = body.projectId;
+      if (user.role === 'admin' && body.projectId !== undefined) {
+        if (!requireExistingProject(body.projectId, db)) return json(res, 400, { message: '关联项目不存在' });
+        target.projectId = body.projectId;
+      }
       appendAuditLog(db, user, 'update', 'kb', kbId, `修改知识条目 ${target.title}`, target.projectId);
       await writeDb(db);
       return json(res, 200, target);
@@ -9290,6 +9323,11 @@ const requestHandler = async (req, res) => {
           fs.writeFileSync(target.attachmentPath, filePart.data);
           target.attachmentSize = filePart.data.length;
         }
+        // 与 JSON 分支保持一致：非设备类型资料必须存在附件。
+        if (newType !== 'device') {
+          const hasAttachment = !!(target.attachmentPath && fs.existsSync(target.attachmentPath));
+          if (!hasAttachment) return json(res, 400, { message: '非设备类型资料必须上传附件' });
+        }
         target.updatedAt = now();
         appendAuditLog(db, user, 'update', 'document', docId, `修改资料 ${target.title}`, target.projectId);
         await writeDb(db);
@@ -9304,7 +9342,11 @@ const requestHandler = async (req, res) => {
         const hasAttachment = !!(target.attachmentPath && fs.existsSync(target.attachmentPath));
         if (!hasAttachment) return json(res, 400, { message: '非设备类型资料必须上传附件，请使用附件上传方式提交' });
       }
-      if (body.title !== undefined) target.title = String(body.title || '').trim();
+      if (body.title !== undefined) {
+        const nextDocTitle = String(body.title || '').trim();
+        if (!nextDocTitle) return json(res, 400, { message: '资料名称不能为空' });
+        target.title = nextDocTitle;
+      }
       if (body.type !== undefined) target.type = newType;
       if (body.brand !== undefined) target.brand = body.brand;
       if (body.model !== undefined) target.model = body.model;
@@ -9647,7 +9689,7 @@ const requestHandler = async (req, res) => {
       }
       const spareName = String(body.name || '').trim();
       if (!spareName) return json(res, 400, { message: '备件名称不能为空' });
-      const item = { id: id('spare'), projectId, assetId, name: spareName, model: body.model || '', quantity: quantityValue, safeStock: safeStockValue, location: body.location || '', createdAt: now() };
+      const item = { id: id('spare'), projectId, assetId, name: spareName, model: body.model || '', quantity: quantityValue, safeStock: safeStockValue, unit: body.unit || '', location: body.location || '', notes: body.notes || '', createdAt: now() };
       db.spareParts.push(item);
       appendAuditLog(db, user, 'create', 'sparePart', item.id, `创建备件 ${item.name}`, projectId);
       if (item.quantity <= item.safeStock) createNotification(db, projectId, '备件库存提醒', `${item.name} 库存达到安全阈值`, 'warning', 'inventory');
@@ -9880,15 +9922,26 @@ const requestHandler = async (req, res) => {
         target.customerName = customer.name;
       }
       if (user.role === 'admin' && body.projectId !== undefined) target.projectId = body.projectId;
+      // 变更内容/审批人变更后同步到关联审批记录，避免审批端展示过期信息。
+      const linkedApproval = (db.approvals || []).find(a => a.relatedId === target.id && a.category === 'change');
+      if (linkedApproval) {
+        linkedApproval.title = target.title;
+        linkedApproval.content = target.content;
+        linkedApproval.approverId = target.approverId;
+        linkedApproval.customerId = target.customerId;
+      }
       if (wasRejected) {
         target.status = '待运维审批';
+        // 重新提交后清理上一轮驳回原因，避免终态残留误导审批人。
+        target.rejectionReason = '';
         const approver = (db.users || []).find(u => u.id === target.approverId);
         createNotification(db, target.projectId, '变更待审批', `${target.title} 已重新提交${oldStatus === '已驳回' ? '（原已驳回）' : ''}，待${approver ? approver.name : '审批人'}审批`, 'warning', 'approval');
-        const approval = (db.approvals || []).find(a => a.relatedId === target.id && a.category === 'change');
-        if (approval) {
-          approval.status = '待运维审批';
-          approval.currentStage = 'approver';
-          approval.updatedAt = now();
+        if (linkedApproval) {
+          linkedApproval.status = '待运维审批';
+          linkedApproval.currentStage = 'approver';
+          linkedApproval.approvedBy = '';
+          linkedApproval.rejectionReason = '';
+          linkedApproval.updatedAt = now();
         }
       }
       appendAuditLog(db, user, 'update', 'changeRecord', recordId, `修改变更记录 ${target.title}`, target.projectId);
@@ -10048,6 +10101,10 @@ const requestHandler = async (req, res) => {
       const item = (db.approvals || []).find(entry => entry.id === approvalId);
       if (!item) return json(res, 404, { message: '审批记录不存在' });
       if (!canDecideApproval(user, item)) return json(res, 403, { message: '当前账号无权处理该审批' });
+      // 已结束的审批不可再次决策，避免重复流转覆盖最终结果。
+      if (item.currentStage === 'completed' || item.status === '已通过' || item.status === '已驳回') {
+        return json(res, 400, { message: '该审批已结束，不能重复处理' });
+      }
       const body = await readBody(req);
       if (body.status === 'approved') {
         if (item.currentStage === 'approver') {
@@ -11610,6 +11667,17 @@ const requestHandler = async (req, res) => {
             return rejectUpgradeUpload(res, db, user, upgradeFilename, `升级包包含非法路径：${entry}`);
           }
         }
+        // 解压前识别符号链接/硬链接/特殊文件，避免链接被用于写出预期之外的文件。
+        const verboseList = execSync(`tar -tvzf "${tempArchive}"`, { timeout: 10000, encoding: 'utf8' }).split('\n');
+        for (const line of verboseList) {
+          if (!line) continue;
+          const typeChar = line.charAt(0);
+          if (typeChar === 'l' || typeChar === 'h' || typeChar === 'b' || typeChar === 'c' || typeChar === 'p') {
+            try { fs.unlinkSync(tempArchive); } catch (_) {}
+            cleanUpgradeDir(pendingDir);
+            return rejectUpgradeUpload(res, db, user, upgradeFilename, '升级包包含符号链接、硬链接或特殊文件，拒绝解压');
+          }
+        }
         execSync(`tar -xzf "${tempArchive}" -C "${pendingDir}"`, { timeout: 30000 });
       } catch (error) {
         try { fs.unlinkSync(tempArchive); } catch (_) {}
@@ -11919,7 +11987,10 @@ try {
 
 server.on('error', (error) => {
   console.error(`HTTP server error: ${error.message}`);
-  gracefulShutdown('server-error', 1);
+  // 仅在监听建立失败（如端口占用）时退出；运行期偶发错误不应直接终止服务。
+  if (!server.listening) {
+    gracefulShutdown('server-error', 1);
+  }
 });
 
 server.listen(port, () => {
