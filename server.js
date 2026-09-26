@@ -9618,11 +9618,9 @@ const requestHandler = async (req, res) => {
       if (body.nextDate !== undefined) target.nextDate = body.nextDate;
       const attachment = normalizeInspectionAttachment(body.attachment);
       if (attachment.fileName) target.attachment = attachment;
+      // 依据该计划下最新一条执行记录统一刷新状态，避免修改历史记录时错误覆盖计划当前状态。
       const plan = (db.inspectionPlans || []).find(item => item.id === target.planId);
-      if (plan) {
-        plan.status = target.result === '异常' ? '异常待处理' : '已执行';
-        if (target.nextDate) plan.nextDate = target.nextDate;
-      }
+      refreshInspectionPlanFromExecutions(db, target.planId);
       appendAuditLog(db, user, 'update', 'inspectionExecution', executionId, `修改巡检执行记录`, target.projectId || plan?.projectId || '');
       await writeDb(db);
       return json(res, 200, target);
@@ -9993,6 +9991,8 @@ const requestHandler = async (req, res) => {
       if (body.severity !== undefined && !incidentSeverityOptions.includes(String(body.severity))) return json(res, 400, { message: '无效的严重级别' });
       const incidentTitle = String(body.title || '').trim();
       if (!incidentTitle) return json(res, 400, { message: '故障标题不能为空' });
+      const incidentAsset = requireExistingAsset(body.assetId, db);
+      if (body.assetId && (!incidentAsset || incidentAsset.projectId !== projectId)) return json(res, 400, { message: '关联资产不存在或不属于当前项目' });
       const item = { id: id('incident'), projectId, assetId: body.assetId || '', title: incidentTitle, faultType: body.faultType || '', severity: body.severity || '中', slaStatus: body.slaStatus || '正常', status: body.status || '处理中', description: body.description || '', occurredAt: body.occurredAt || '', resolution: body.resolution || '', createdBy: user.id, createdAt: now() };
       db.incidentRecords.push(item);
       appendAuditLog(db, user, 'create', 'incident', item.id, `登记故障 ${item.title}`, projectId);
@@ -10024,8 +10024,14 @@ const requestHandler = async (req, res) => {
       if (body.description !== undefined) target.description = body.description;
       if (body.occurredAt !== undefined) target.occurredAt = body.occurredAt;
       if (body.resolution !== undefined) target.resolution = body.resolution;
-      if (body.assetId !== undefined) target.assetId = body.assetId;
       if (user.role === 'admin' && body.projectId !== undefined) target.projectId = body.projectId;
+      if (body.assetId !== undefined) {
+        if (body.assetId) {
+          const nextAsset = requireExistingAsset(body.assetId, db);
+          if (!nextAsset || nextAsset.projectId !== target.projectId) return json(res, 400, { message: '关联资产不存在或不属于当前项目' });
+        }
+        target.assetId = body.assetId;
+      }
       appendAuditLog(db, user, 'update', 'incident', incidentId, `修改故障记录 ${target.title}`, target.projectId);
       await writeDb(db);
       return json(res, 200, target);
