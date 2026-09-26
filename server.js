@@ -148,6 +148,8 @@ const importBodyLimitBytes = parseInt(process.env.IMPORT_BODY_LIMIT_BYTES, 10) |
 // 附件上传在内存中解析 multipart，故通过上限约束单请求内存占用（默认 10MB，可用环境变量调整）。
 const documentAttachmentLimitBytes = parseInt(process.env.DOCUMENT_ATTACHMENT_LIMIT_BYTES, 10) || 10 * 1024 * 1024;
 const documentAttachmentLimitMb = Math.round(documentAttachmentLimitBytes / (1024 * 1024));
+// 巡检执行附件以 base64 dataURL 内联在 JSON 中，体积约为原文件的 4/3，请求体上限需留足余量。
+const inspectionAttachmentBodyLimitBytes = 20 * 1024 * 1024;
 const allowFileDbFallback = process.env.ALLOW_FILE_DB_FALLBACK === 'true';
 const loginRateLimitWindowMs = parseInt(process.env.LOGIN_RATE_LIMIT_WINDOW_MS, 10) || 10 * 60 * 1000;
 const loginRateLimitLockMs = parseInt(process.env.LOGIN_RATE_LIMIT_LOCK_MS, 10) || 15 * 60 * 1000;
@@ -1164,15 +1166,17 @@ function runMaintenanceTasks(db) {
   if (runtimeState.maintenance.lastNotificationCleanupDate !== todayKey) {
     const notifications = db.notifications || [];
     // 通知可见范围：全部管理员 + 同项目成员。仅当所有可见用户都已读或已隐藏时才可归档。
-    const adminUserIds = (db.users || []).filter(item => item.role === 'admin').map(item => item.id);
+    // 已禁用/已驳回账号无法登录，不计入收件人，否则相关通知永远无法归档。
+    const canReceiveNotifications = item => item.status !== 'disabled' && item.status !== 'rejected';
+    const adminUserIds = (db.users || []).filter(item => item.role === 'admin' && canReceiveNotifications(item)).map(item => item.id);
     const projectUserIds = new Map();
     for (const item of db.users || []) {
       if (!item.projectId) continue;
+      if (!canReceiveNotifications(item)) continue;
       if (!projectUserIds.has(item.projectId)) projectUserIds.set(item.projectId, []);
       projectUserIds.get(item.projectId).push(item.id);
     }
     const isReadByAllRecipients = item => {
-      if (item.readAt) return true;
       const readBy = item.readBy && typeof item.readBy === 'object' ? item.readBy : {};
       const hiddenBy = item.hiddenBy && typeof item.hiddenBy === 'object' ? item.hiddenBy : {};
       const recipients = adminUserIds.concat(projectUserIds.get(item.projectId) || []);
@@ -1619,6 +1623,12 @@ function collectAssetDeleteBlockers(db, assetId) {
   pushIf((db.inspectionExecutions || []).filter(item => item.assetId === assetId).length, '条巡检执行记录引用了该资产');
   pushIf((db.incidentRecords || []).filter(item => item.assetId === assetId).length, '条故障记录引用了该资产');
   pushIf((db.logs || []).filter(item => item.assetId === assetId).length, '条运维日志引用了该资产');
+  // 智能巡检任务/结果与配置备份计划/记录通过巡检对象间接引用资产，需一并提示。
+  const linkedTargetIds = (db.aiInspectionTargets || []).filter(item => item.assetId === assetId).map(item => item.id);
+  pushIf((db.aiInspectionTasks || []).filter(item => linkedTargetIds.includes(item.targetId)).length, '个智能巡检任务引用了该资产的巡检对象');
+  pushIf((db.aiInspectionResults || []).filter(item => linkedTargetIds.includes(item.targetId)).length, '条智能巡检结果引用了该资产的巡检对象');
+  pushIf((db.configBackupPlans || []).filter(item => linkedTargetIds.includes(item.targetId)).length, '个配置备份计划引用了该资产的巡检对象');
+  pushIf((db.configBackupRecords || []).filter(item => linkedTargetIds.includes(item.targetId)).length, '条配置备份记录引用了该资产的巡检对象');
   return warnings;
 }
 
@@ -1627,7 +1637,8 @@ function cascadeDeleteAsset(db, assetId) {
   const removed = {
     assets: 0, relations: 0, targets: 0, spareParts: 0, sparePartMovements: 0,
     changeRecords: 0, approvals: 0, inspectionPlans: 0, inspectionExecutions: 0,
-    incidents: 0, logs: 0, notifications: 0
+    incidents: 0, logs: 0, notifications: 0, aiTasks: 0, aiResults: 0,
+    configBackupPlans: 0, configBackupRecords: 0
   };
   const beforeNotifications = (db.notifications || []).length;
 
@@ -1655,8 +1666,22 @@ function cascadeDeleteAsset(db, assetId) {
   removed.sparePartMovements = beforeMovements - db.sparePartMovements.length;
 
   const beforeTargets = (db.aiInspectionTargets || []).length;
+  const removedTargetIds = (db.aiInspectionTargets || []).filter(item => item.assetId === assetId).map(item => item.id);
   db.aiInspectionTargets = (db.aiInspectionTargets || []).filter(item => item.assetId !== assetId);
   removed.targets = beforeTargets - db.aiInspectionTargets.length;
+  // 巡检对象被删除后，其派生的智能巡检任务/结果与配置备份计划/记录会成为孤儿，需同步清理。
+  const beforeAiTasks = (db.aiInspectionTasks || []).length;
+  db.aiInspectionTasks = (db.aiInspectionTasks || []).filter(item => !removedTargetIds.includes(item.targetId));
+  const beforeAiResults = (db.aiInspectionResults || []).length;
+  db.aiInspectionResults = (db.aiInspectionResults || []).filter(item => !removedTargetIds.includes(item.targetId));
+  const beforeConfigPlans = (db.configBackupPlans || []).length;
+  db.configBackupPlans = (db.configBackupPlans || []).filter(item => !removedTargetIds.includes(item.targetId));
+  const beforeConfigRecords = (db.configBackupRecords || []).length;
+  db.configBackupRecords = (db.configBackupRecords || []).filter(item => !removedTargetIds.includes(item.targetId));
+  removed.aiTasks = beforeAiTasks - db.aiInspectionTasks.length;
+  removed.aiResults = beforeAiResults - db.aiInspectionResults.length;
+  removed.configBackupPlans = beforeConfigPlans - db.configBackupPlans.length;
+  removed.configBackupRecords = beforeConfigRecords - db.configBackupRecords.length;
 
   const beforePlans = (db.inspectionPlans || []).length;
   db.inspectionPlans = (db.inspectionPlans || []).filter(item => item.assetId !== assetId);
@@ -2870,6 +2895,7 @@ function normalizeDb(raw = {}) {
       assetId: log.assetId || '',
       date: log.date || '',
       event: log.event || '',
+      title: log.title || '',
       relatedTarget: log.relatedTarget || '',
       dispatcher: log.dispatcher || '',
       dispatchDepartment: log.dispatchDepartment || '',
@@ -3153,6 +3179,8 @@ function normalizeDb(raw = {}) {
       suggestion: item.suggestion || '',
       abnormalItems: Array.isArray(item.abnormalItems) ? item.abnormalItems.map(entry => String(entry || '')) : [],
       realData: (item.realData && typeof item.realData === 'object' && !Array.isArray(item.realData)) ? item.realData : {},
+      probeError: item.probeError || '',
+      createdBy: item.createdBy || '',
       createdAt: item.createdAt || now()
     })),
     configBackupPlans: (raw.configBackupPlans || []).map(item => ({
@@ -3574,15 +3602,14 @@ let fileDbNeedsSyncToMySql = false;
 
 function readDbInternalSync() {
   if (latestFileDbCache) return latestFileDbCache;
+  // 启动阶段同步读取（WebSocket 鉴权、自动备份等）可能早于异步 readDb() 完成 MySQL 加载。
+  // 此时按需读取本地文件作为临时快照，但不写入 latestFileDbCache，避免用陈旧的
+  // data/db.json 遮蔽 MySQL 中的权威数据（否则每次重启都会回滚到旧快照）。
   if (!fs.existsSync(dbPath)) {
-    const s = seed();
-    latestFileDbCache = s;
-    return s;
+    return seed();
   }
   const raw = JSON.parse(fs.readFileSync(dbPath, 'utf8'));
-  const normalized = normalizeDb(raw);
-  latestFileDbCache = normalized;
-  return normalized;
+  return normalizeDb(raw);
 }
 
 let mysqlResetMutex = Promise.resolve();
@@ -3626,6 +3653,7 @@ async function readDb() {
     await resetMySqlConnection();
     if (allowFileDbFallback) {
       const fallback = readDbFromFile();
+      rememberLiveDb(fallback);
       const fallbackBase = cloneDbSnapshot(fallback);
       fallback._seq = dbSequence;
       fallback._normalized = true;
@@ -4584,6 +4612,15 @@ function appendAuditLog(db, user, action, targetType, targetId, detail, projectI
     createdAt: now()
   });
   if (db.auditLogs.length > 10000) {
+    // 超限时先归档被裁剪的历史记录，避免审计数据被静默丢弃。
+    const overflow = db.auditLogs.slice(0, db.auditLogs.length - 5000);
+    if (overflow.length) {
+      try {
+        archiveJsonLines(auditArchiveDir, `overflow-${formatDateKey(new Date())}.jsonl`, overflow);
+      } catch (error) {
+        console.error('archive audit overflow failed', error.message);
+      }
+    }
     db.auditLogs = db.auditLogs.slice(-5000);
   }
 }
@@ -4838,7 +4875,8 @@ function checkWorkReportReminderNotifications(db) {
 
 function appendSystemAuditLog(db, action, targetType, targetId, detail, projectId = '') {
   db.auditLogs = db.auditLogs || [];
-  db.auditLogs.unshift({
+  // 审计日志统一追加到尾部（最新在尾），与 appendAuditLog 及维护归档逻辑保持一致。
+  db.auditLogs.push({
     id: id('audit'),
     projectId,
     action,
@@ -9410,18 +9448,32 @@ const requestHandler = async (req, res) => {
         if (getField('managementIp') !== undefined) target.managementIp = getField('managementIp');
         if (getField('managementPort') !== undefined) target.managementPort = getField('managementPort');
         if (getField('loginAccount') !== undefined) target.loginAccount = getField('loginAccount');
-        if (getField('loginPassword')) {
-          target.loginPasswordHash = hash(getField('loginPassword'));
-          const encKey = getField('accessPassword') || getField('_encryptionKey');
-          if (encKey) target.loginPasswordEncrypted = encryptLoginPassword(getField('loginPassword'), encKey);
+        const nextLoginPassword = getField('loginPassword');
+        const nextAccessPassword = getField('accessPassword');
+        const legacyAccessKey = getField('_encryptionKey');
+        if (nextLoginPassword) {
+          target.loginPasswordHash = hash(nextLoginPassword);
+          // 登录密码密文由访问密码派生密钥加密，优先使用本次提交的新访问密码。
+          const encKey = nextAccessPassword || legacyAccessKey;
+          if (encKey) target.loginPasswordEncrypted = encryptLoginPassword(nextLoginPassword, encKey);
         }
-        if (getField('accessPassword')) {
-          target.accessPasswordHash = hash(getField('accessPassword'));
-          if (getField('loginPassword')) {
-            target.loginPasswordEncrypted = encryptLoginPassword(getField('loginPassword'), getField('accessPassword'));
+        if (nextAccessPassword) {
+          target.accessPasswordHash = hash(nextAccessPassword);
+          if (nextLoginPassword) {
+            target.loginPasswordEncrypted = encryptLoginPassword(nextLoginPassword, nextAccessPassword);
+          } else if (target.loginPasswordEncrypted) {
+            // 仅修改访问密码时，用旧密钥解密后按新密码重新加密，避免登录密码永久不可恢复。
+            let plainLoginPassword = '';
+            try { plainLoginPassword = decryptLoginPassword(target.loginPasswordEncrypted, legacyAccessKey) || ''; } catch (_) { plainLoginPassword = ''; }
+            if (!plainLoginPassword) return json(res, 400, { message: '修改访问密码时请同时重新填写登录密码' });
+            target.loginPasswordEncrypted = encryptLoginPassword(plainLoginPassword, nextAccessPassword);
           }
         }
-        if (user.role === 'admin' && getField('projectId')) target.projectId = getField('projectId');
+        if (user.role === 'admin' && getField('projectId')) {
+          const nextDocumentProjectId = getField('projectId');
+          if (!requireExistingProject(nextDocumentProjectId, db)) return json(res, 400, { message: '关联项目不存在' });
+          target.projectId = nextDocumentProjectId;
+        }
         const newType = getField('type') || target.type;
         if (newType && !DOCUMENT_TYPES.includes(newType)) {
           return json(res, 400, { message: '无效的资料类型' });
@@ -9432,7 +9484,12 @@ const requestHandler = async (req, res) => {
           const docDir = path.join(documentsUploadDir, docId);
           fs.mkdirSync(docDir, { recursive: true });
           target.attachmentName = sanitizeUploadFilename(filePart.filename);
-          target.attachmentPath = resolveSafeChildPath(docDir, target.attachmentName);
+          const nextAttachmentPath = resolveSafeChildPath(docDir, target.attachmentName);
+          // 替换附件时删除旧文件，避免上传目录残留孤儿附件。
+          if (target.attachmentPath && target.attachmentPath !== nextAttachmentPath) {
+            try { fs.rmSync(target.attachmentPath, { force: true }); } catch (_) {}
+          }
+          target.attachmentPath = nextAttachmentPath;
           fs.writeFileSync(target.attachmentPath, filePart.data);
           target.attachmentSize = filePart.data.length;
         }
@@ -9444,7 +9501,9 @@ const requestHandler = async (req, res) => {
         target.updatedAt = now();
         appendAuditLog(db, user, 'update', 'document', docId, `修改资料 ${target.title}`, target.projectId);
         await writeDb(db);
-        return json(res, 200, sanitizeDocumentForApi(target, true));
+        // 与详情接口保持一致：受保护字段需通过访问密码校验（X-Document-Access-Token）后才可下发。
+        const revealProtectedOnUpdate = !target.accessPasswordHash || verifyDocumentAccessToken(readDocumentAccessToken(req), docId, user.id).ok;
+        return json(res, 200, sanitizeDocumentForApi(target, revealProtectedOnUpdate));
       }
       const body = await readBody(req);
       const newType = body.type !== undefined ? body.type : target.type;
@@ -9470,20 +9529,32 @@ const requestHandler = async (req, res) => {
       if (body.managementIp !== undefined) target.managementIp = body.managementIp;
       if (body.managementPort !== undefined) target.managementPort = body.managementPort;
       if (body.loginAccount !== undefined) target.loginAccount = body.loginAccount;
-      if (body.loginPassword !== undefined && body.loginPassword) {
+      if (body.loginPassword) {
         target.loginPasswordHash = hash(body.loginPassword);
         const encKey = body.accessPassword || body._encryptionKey;
         if (encKey) target.loginPasswordEncrypted = encryptLoginPassword(body.loginPassword, encKey);
       }
-      if (body.accessPassword !== undefined && body.accessPassword) {
+      if (body.accessPassword) {
         target.accessPasswordHash = hash(body.accessPassword);
-        if (body.loginPassword) target.loginPasswordEncrypted = encryptLoginPassword(body.loginPassword, body.accessPassword);
+        if (body.loginPassword) {
+          target.loginPasswordEncrypted = encryptLoginPassword(body.loginPassword, body.accessPassword);
+        } else if (target.loginPasswordEncrypted) {
+          // 与 multipart 分支一致：仅改访问密码时用旧密钥重新加密，失败则要求重填登录密码。
+          let plainLoginPassword = '';
+          try { plainLoginPassword = decryptLoginPassword(target.loginPasswordEncrypted, body._encryptionKey) || ''; } catch (_) { plainLoginPassword = ''; }
+          if (!plainLoginPassword) return json(res, 400, { message: '修改访问密码时请同时重新填写登录密码' });
+          target.loginPasswordEncrypted = encryptLoginPassword(plainLoginPassword, body.accessPassword);
+        }
       }
-      if (user.role === 'admin' && body.projectId !== undefined) target.projectId = body.projectId;
+      if (user.role === 'admin' && body.projectId !== undefined) {
+        if (!requireExistingProject(body.projectId, db)) return json(res, 400, { message: '关联项目不存在' });
+        target.projectId = body.projectId;
+      }
       target.updatedAt = now();
       appendAuditLog(db, user, 'update', 'document', docId, `修改资料 ${target.title}`, target.projectId);
       await writeDb(db);
-      return json(res, 200, sanitizeDocumentForApi(target, true));
+      const revealProtectedOnUpdate = !target.accessPasswordHash || verifyDocumentAccessToken(readDocumentAccessToken(req), docId, user.id).ok;
+      return json(res, 200, sanitizeDocumentForApi(target, revealProtectedOnUpdate));
     }
 
     if (req.method === 'DELETE' && pathname.startsWith('/api/documents/')) {
@@ -9617,7 +9688,13 @@ const requestHandler = async (req, res) => {
       if (!requireExistingProject(projectId, db)) return json(res, 400, { message: '关联项目不存在' });
       const asset = requireExistingAsset(body.assetId || '', db);
       if (body.assetId && (!asset || asset.projectId !== projectId)) return json(res, 400, { message: '关联资产不存在或归属不一致' });
-      const plan = { id: id('inspection'), projectId, assetId: body.assetId || '', title: body.title || '', cycle: body.cycle || 'monthly', nextDate: body.nextDate || '', owner: body.owner || user.name, status: body.status || '待执行', createdBy: user.id, createdAt: now() };
+      const planTitle = String(body.title || '').trim();
+      if (!planTitle) return json(res, 400, { message: '请输入巡检计划名称' });
+      const planCycle = String(body.cycle || 'monthly');
+      if (!['daily', 'weekly', 'monthly', 'quarterly'].includes(planCycle)) return json(res, 400, { message: '无效的巡检周期' });
+      const planStatus = String(body.status || '待执行');
+      if (!['待执行', '执行中', '已完成', '已执行', '异常待处理', '已停用'].includes(planStatus)) return json(res, 400, { message: '无效的巡检计划状态' });
+      const plan = { id: id('inspection'), projectId, assetId: body.assetId || '', title: planTitle, cycle: planCycle, nextDate: body.nextDate || '', owner: body.owner || user.name, status: planStatus, createdBy: user.id, createdAt: now() };
       db.inspectionPlans.push(plan);
       appendAuditLog(db, user, 'create', 'inspectionPlan', plan.id, `创建巡检计划 ${plan.title}`, projectId);
       await writeDb(db);
@@ -9643,7 +9720,10 @@ const requestHandler = async (req, res) => {
         if (!asset || asset.projectId !== newProjectId) return json(res, 400, { message: '关联资产不存在或归属不一致' });
         target.assetId = body.assetId;
       }
-      if (user.role === 'admin' && body.projectId !== undefined) target.projectId = body.projectId;
+      if (user.role === 'admin' && body.projectId !== undefined) {
+        if (!requireExistingProject(body.projectId, db)) return json(res, 400, { message: '关联项目不存在' });
+        target.projectId = body.projectId;
+      }
       appendAuditLog(db, user, 'update', 'inspectionPlan', planId, `修改巡检计划 ${target.title}`, target.projectId);
       await writeDb(db);
       return json(res, 200, target);
@@ -9660,6 +9740,8 @@ const requestHandler = async (req, res) => {
       const removedExecutionCount = (db.inspectionExecutions || []).filter(item => item.planId === planId).length;
       db.inspectionPlans.splice(index, 1);
       db.inspectionExecutions = (db.inspectionExecutions || []).filter(item => item.planId !== planId);
+      // 级联清理该计划产生的通知，避免通知中心残留指向已删除计划的记录。
+      removeNotificationsBySource(db, 'inspectionPlan', planId);
       appendAuditLog(db, user, 'delete', 'inspectionPlan', planId, `删除巡检计划 ${target.title}，同时移除 ${removedExecutionCount} 条执行记录`, target.projectId);
       await writeDb(db);
       return json(res, 200, { ok: true });
@@ -9678,12 +9760,13 @@ const requestHandler = async (req, res) => {
     if (req.method === 'POST' && pathname === '/api/inspection-executions') {
       const user = requireEditor(req, res, db);
       if (!user) return;
-      const body = await readBody(req);
+      const body = await readBody(req, inspectionAttachmentBodyLimitBytes);
       const plan = (db.inspectionPlans || []).find(item => item.id === body.planId);
       if (!plan) return json(res, 404, { message: '巡检计划不存在' });
       if (user.role !== 'admin' && plan.projectId !== user.projectId) {
         return json(res, 403, { message: '无权执行该巡检计划' });
       }
+      if (!['正常', '异常'].includes(String(body.result || '正常'))) return json(res, 400, { message: '无效的巡检结果' });
       const execution = {
         id: id('inspectionExec'),
         planId: plan.id,
@@ -9702,13 +9785,11 @@ const requestHandler = async (req, res) => {
       };
       db.inspectionExecutions = db.inspectionExecutions || [];
       db.inspectionExecutions.push(execution);
-      plan.status = execution.result === '异常' ? '异常待处理' : '已执行';
-      if (execution.nextDate) {
-        plan.nextDate = execution.nextDate;
-      }
+      // 统一按该计划下最新一条执行记录派生状态，避免补录历史记录时覆盖当前状态。
+      refreshInspectionPlanFromExecutions(db, plan.id);
       appendAuditLog(db, user, 'execute', 'inspectionPlan', plan.id, `执行巡检 ${plan.title}，结果 ${execution.result}`, plan.projectId);
       if (execution.result === '异常') {
-        createNotification(db, plan.projectId, '巡检异常提醒', `${plan.title} 巡检发现异常`, 'warning', 'inspection');
+        createNotification(db, plan.projectId, '巡检异常提醒', `${plan.title} 巡检发现异常`, 'warning', 'inspection', 'inspectionPlan', plan.id);
       }
       await writeDb(db);
       return json(res, 201, execution);
@@ -9721,7 +9802,8 @@ const requestHandler = async (req, res) => {
       const target = (db.inspectionExecutions || []).find(item => item.id === executionId);
       if (!target) return json(res, 404, { message: '巡检执行记录不存在' });
       if (!canManageInspectionRecord(user, target)) return json(res, 403, { message: '无权修改该巡检执行记录' });
-      const body = await readBody(req);
+      const body = await readBody(req, inspectionAttachmentBodyLimitBytes);
+      if (body.result !== undefined && !['正常', '异常'].includes(String(body.result))) return json(res, 400, { message: '无效的巡检结果' });
       if (body.executedAt !== undefined) target.executedAt = body.executedAt;
       if (body.executor !== undefined) target.executor = body.executor;
       if (body.result !== undefined) target.result = body.result;
@@ -9730,7 +9812,7 @@ const requestHandler = async (req, res) => {
       if (body.suggestion !== undefined) target.suggestion = body.suggestion;
       if (body.nextDate !== undefined) target.nextDate = body.nextDate;
       const attachment = normalizeInspectionAttachment(body.attachment);
-      if (attachment.fileName) target.attachment = attachment;
+      if (attachment && attachment.name) target.attachment = attachment;
       // 依据该计划下最新一条执行记录统一刷新状态，避免修改历史记录时错误覆盖计划当前状态。
       const plan = (db.inspectionPlans || []).find(item => item.id === target.planId);
       refreshInspectionPlanFromExecutions(db, target.planId);
@@ -10034,31 +10116,59 @@ const requestHandler = async (req, res) => {
       const wasRejected = target.status === '已驳回';
       const oldStatus = target.status;
       const body = await readBody(req);
+      // 管理员改项目时先校验项目存在，再按新项目归属校验关联资产/审批人/甲方客户。
+      const nextChangeProjectId = (user.role === 'admin' && body.projectId !== undefined) ? String(body.projectId || '').trim() : target.projectId;
+      const changeProjectChanged = nextChangeProjectId !== target.projectId;
+      if (changeProjectChanged) {
+        if (!requireExistingProject(nextChangeProjectId, db)) return json(res, 400, { message: '关联项目不存在' });
+        target.projectId = nextChangeProjectId;
+      }
       if (body.title !== undefined) target.title = String(body.title || '').trim() || target.title;
       if (body.content !== undefined) target.content = String(body.content || '').trim() || target.content;
       if (body.riskLevel !== undefined) target.riskLevel = body.riskLevel;
-      if (body.assetId !== undefined) target.assetId = body.assetId;
+      if (body.assetId !== undefined) {
+        if (body.assetId) {
+          const nextChangeAsset = requireExistingAsset(body.assetId, db);
+          if (!nextChangeAsset || nextChangeAsset.projectId !== target.projectId) return json(res, 400, { message: '关联资产不存在或不属于当前项目' });
+        }
+        target.assetId = body.assetId;
+      } else if (changeProjectChanged && target.assetId) {
+        const linkedAsset = requireExistingAsset(target.assetId, db);
+        if (!linkedAsset || linkedAsset.projectId !== target.projectId) target.assetId = '';
+      }
       if (body.approverId !== undefined) {
         const approver = requireExistingUser(body.approverId, db);
         if (!approver || !canViewProject(approver, target.projectId) || !['admin', 'engineer'].includes(approver.role)) return json(res, 400, { message: '审批人不存在或无权限审批当前项目' });
         if (approver.id === target.createdBy) return json(res, 400, { message: '不能指定提交人本人为审批人' });
         target.approverId = approver.id;
         target.approverName = approver.name;
+      } else if (changeProjectChanged && target.approverId) {
+        const approver = requireExistingUser(target.approverId, db);
+        if (!approver || !canViewProject(approver, target.projectId) || !['admin', 'engineer'].includes(approver.role)) {
+          target.approverId = '';
+          target.approverName = '';
+        }
       }
       if (body.customerId !== undefined) {
         const customer = requireExistingUser(body.customerId, db);
         if (!customer || customer.projectId !== target.projectId || customer.role !== 'customer') return json(res, 400, { message: '甲方客户不存在或不属于当前项目' });
         target.customerId = customer.id;
         target.customerName = customer.name;
+      } else if (changeProjectChanged && target.customerId) {
+        const customer = requireExistingUser(target.customerId, db);
+        if (!customer || customer.projectId !== target.projectId || customer.role !== 'customer') {
+          target.customerId = '';
+          target.customerName = '';
+        }
       }
-      if (user.role === 'admin' && body.projectId !== undefined) target.projectId = body.projectId;
-      // 变更内容/审批人变更后同步到关联审批记录，避免审批端展示过期信息。
+      // 变更内容/审批人/项目变更后同步到关联审批记录，避免审批端展示过期或跨项目信息。
       const linkedApproval = (db.approvals || []).find(a => a.relatedId === target.id && a.category === 'change');
       if (linkedApproval) {
         linkedApproval.title = target.title;
         linkedApproval.content = target.content;
         linkedApproval.approverId = target.approverId;
         linkedApproval.customerId = target.customerId;
+        linkedApproval.projectId = target.projectId;
       }
       if (wasRejected) {
         target.status = '待运维审批';
@@ -10159,7 +10269,15 @@ const requestHandler = async (req, res) => {
       if (body.description !== undefined) target.description = body.description;
       if (body.occurredAt !== undefined) target.occurredAt = body.occurredAt;
       if (body.resolution !== undefined) target.resolution = body.resolution;
-      if (user.role === 'admin' && body.projectId !== undefined) target.projectId = body.projectId;
+      if (user.role === 'admin' && body.projectId !== undefined) {
+        if (!requireExistingProject(body.projectId, db)) return json(res, 400, { message: '关联项目不存在' });
+        // 项目变更后原关联资产可能已不属于新项目，无法确认归属时清空。
+        if (target.assetId) {
+          const linkedIncidentAsset = requireExistingAsset(target.assetId, db);
+          if (!linkedIncidentAsset || linkedIncidentAsset.projectId !== body.projectId) target.assetId = '';
+        }
+        target.projectId = body.projectId;
+      }
       if (body.assetId !== undefined) {
         if (body.assetId) {
           const nextAsset = requireExistingAsset(body.assetId, db);
@@ -10411,7 +10529,11 @@ const requestHandler = async (req, res) => {
       const body = await readBody(req);
       const nextProjectId = user.role === 'admin' && body.projectId !== undefined ? body.projectId : target.projectId;
       if (!requireExistingProject(nextProjectId, db)) return json(res, 400, { message: '关联项目不存在' });
-      if (body.name !== undefined) target.name = String(body.name || '').trim();
+      if (body.name !== undefined) {
+        const nextTargetName = String(body.name || '').trim();
+        if (!nextTargetName) return json(res, 400, { message: '巡检对象名称不能为空' });
+        target.name = nextTargetName;
+      }
       if (body.category !== undefined) target.category = ['network', 'security'].includes(body.category) ? body.category : 'server';
       if (body.address !== undefined || body.managementAddress !== undefined) {
         const nextAddress = String(body.address || body.managementAddress || '').trim();
@@ -10441,18 +10563,26 @@ const requestHandler = async (req, res) => {
       if (body.credentialDomain !== undefined) {
         target.credentialDomain = String(body.credentialDomain || '').trim();
       }
-      if (body.password !== undefined) {
-        target.password = encryptCredential(String(body.password || ''));
+      // 回填的编辑表单不会携带原始凭据（接口只返回 has* 标记），空字符串表示"不修改"，
+      // 直接覆盖会导致已保存的密码/私钥/Token/Community 被加密空串清空。
+      if (body.password !== undefined && String(body.password) !== '') {
+        target.password = encryptCredential(String(body.password));
       }
-      if (body.privateKey !== undefined) {
-        target.privateKey = encryptCredential(String(body.privateKey || ''));
+      if (body.privateKey !== undefined && String(body.privateKey) !== '') {
+        target.privateKey = encryptCredential(String(body.privateKey));
       }
-      if (body.accessToken !== undefined) {
-        target.accessToken = encryptCredential(String(body.accessToken || ''));
+      if (body.accessToken !== undefined && String(body.accessToken) !== '') {
+        target.accessToken = encryptCredential(String(body.accessToken));
       }
-      if (body.community !== undefined) {
-        target.community = encryptCredential(String(body.community || ''));
+      if (body.community !== undefined && String(body.community) !== '') {
+        target.community = encryptCredential(String(body.community));
       }
+      // 切换认证方式后必须补齐对应的凭据，避免生成无法完成巡检的巡检对象。
+      if (['password', 'key'].includes(target.authType) && !target.account) return json(res, 400, { message: '当前认证方式需要填写接入账号' });
+      if (target.authType === 'password' && !target.password) return json(res, 400, { message: '当前认证方式需要填写接入密码' });
+      if (target.authType === 'key' && !target.privateKey) return json(res, 400, { message: '当前认证方式需要填写私钥内容' });
+      if (target.authType === 'token' && !target.accessToken) return json(res, 400, { message: '当前认证方式需要填写 Token' });
+      if (target.authType === 'community' && !target.community) return json(res, 400, { message: '当前认证方式需要填写 Community' });
       if (body.description !== undefined || body.notes !== undefined) {
         target.notes = String(body.description || body.notes || '').trim();
       }
@@ -10687,7 +10817,9 @@ const requestHandler = async (req, res) => {
         target.status = '已停用';
       } else if (body.status === '已启用') {
         target.status = '待执行';
-      } else if (body.executedAt !== undefined) {
+      }
+      // 执行时间与状态互不排斥，需独立处理，避免同时提交时执行时间被静默忽略。
+      if (body.executedAt !== undefined) {
         target.executedAt = String(body.executedAt || '').trim();
         const scheduledTime = parseAiInspectionScheduleTime(target.executedAt);
         const hasResult = (db.aiInspectionResults || []).find(item => item.taskId === taskId);
@@ -10985,6 +11117,10 @@ const requestHandler = async (req, res) => {
       const notification = (db.notifications || []).find(item => item.id === notificationId);
       if (!notification) return json(res, 404, { message: '通知不存在' });
       if (user.role !== 'admin' && notification.projectId !== user.projectId) return json(res, 403, { message: '无权处理该通知' });
+      // 与批量已读接口保持一致：已隐藏的通知不再回写已读状态。
+      if (notification.hiddenBy && notification.hiddenBy[user.id]) {
+        return json(res, 200, presentNotification(notification, user));
+      }
       markNotificationReadForUser(notification, user.id);
       await writeDb(db);
       return json(res, 200, presentNotification(notification, user));
@@ -11245,6 +11381,11 @@ const requestHandler = async (req, res) => {
       target.metricsSnapshot = buildWorkloadMetrics(db, { rangeStart: target.rangeStart, rangeEnd: target.rangeEnd, userId: target.userId, projectId: target.projectId });
       target.status = 'submitted';
       target.submittedAt = now();
+      // 退回后重新提交时清空上一轮审核信息，避免展示过期的审核人与审核意见。
+      target.reviewedBy = '';
+      target.reviewedAt = '';
+      target.reviewComment = '';
+      target.lockedAt = '';
       target.updatedAt = now();
       appendAuditLog(db, user, 'submit', 'workReport', target.id, '提交工作汇报', target.projectId);
       await writeDb(db);
@@ -12614,12 +12755,14 @@ async function runTrafficMonitorScheduler() {
 const trafficMonitorIntervalId = setInterval(runTrafficMonitorScheduler, 30000);
 setTimeout(() => runTrafficMonitorScheduler(), 15000);
 
-function runAutoBackup() {
+async function runAutoBackup() {
   try {
+    // 通过 readDb() 读取权威快照；readDbInternalSync() 在 MySQL 加载完成前只能拿到本地文件，
+    // 启动时直接调用会把陈旧文件内容写入自动备份。
+    const db = await readDb();
     const filename = `auto-backup-${now().replace(/[:.]/g, '-')}.json`;
     const filePath = path.join(backupDir, filename);
     if (!fs.existsSync(filePath)) {
-      const db = readDbInternalSync();
       if (db) {
         fs.writeFileSync(filePath, JSON.stringify(serializeDbSnapshot(db), null, 2));
       }
@@ -12634,7 +12777,7 @@ function runAutoBackup() {
     console.error('Auto backup failed:', e.message);
   }
 }
-runAutoBackup();
+runAutoBackup().catch(error => console.error('Auto backup failed:', error.message));
 const backupIntervalId = setInterval(runAutoBackup, 24 * 60 * 60 * 1000);
 
 let shuttingDown = false;

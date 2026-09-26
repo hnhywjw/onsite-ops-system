@@ -1949,7 +1949,7 @@
         <button data-tab="kb"><span class="nav-icon"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 19.5A2.5 2.5 0 0 1 6.5 17H20"></path><path d="M6.5 2H20v20H6.5A2.5 2.5 0 0 1 4 19.5v-15A2.5 2.5 0 0 1 6.5 2z"></path></svg></span><span class="nav-label">知识库</span></button>
         <button data-tab="documents"><span class="nav-icon"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M13 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V9z"></path><polyline points="13 2 13 9 20 9"></polyline><line x1="9" y1="13" x2="15" y2="13"></line><line x1="9" y1="17" x2="15" y2="17"></line></svg></span><span class="nav-label">资料管理</span></button>
         <button data-tab="reports"><span class="nav-icon"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 19h16"></path><path d="M7 16V9"></path><path d="M12 16V5"></path><path d="M17 16v-4"></path></svg></span><span class="nav-label">报表管理</span></button>
-        <button data-tab="system" data-admin-only="true"><span class="nav-icon"><svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="12" r="3"></circle><path d="M19.4 15a1.7 1.7 0 0 0 .34 1.87l.06.06a2 2 0 1 1-2.83 2.83l-.06-.06A1.7 1.7 0 0 0 15 19.4a1.7 1.7 0 0 0-1 .6 1.7 1.7 0 0 0-.4 1V21a2 2 0 1 1-4 0v-.09a1.7 1.7 0 0 0-.4-1 1.7 1.7 0 0 0-1-.6 1.7 1.7 0 0 0-1.87.34l-.06.06a2 2 0 1 1-2.83-2.83l.06-.06A1.7 1.7 0 0 0 4.6 15a1.7 1.7 0 0 0-.6-1 1.7 1.7 0 0 0-1-.4H3a2 2 0 1 1 0-4h.09a1.7 1.7 0 0 0 1-.4 1.7 1.7 0 0 0 .6-1 1.7 1.7 0 0 0-.34-1.87l-.06-.06a2 2 0 1 1 2.83-2.83l.06.06A1.7 1.7 0 0 0 9 4.6a1.7 1.7 0 0 0 1-.6 1.7 1.7 0 0 0 .4-1V3a2 2 0 1 1 4 0v.09a1.7 1.7 0 0 0 .4 1 1.7 1.7 0 0 0 1 .6 1.7 1.7 0 0 0 1.87-.34l.06-.06a2 2 0 1 1 2.83 2.83l-.06.06A1.7 1.7 0 0 0 19.4 9c.26.3.47.65.6 1 .09.33.13.67.1 1.01-.03.34-.13.68-.3.99-.16.32-.39.6-.66.84z"></path></svg></span><span class="nav-label">系统管理</span></button>
+        <button data-tab="system" data-admin-only="true" data-auditor-visible="true"><span class="nav-icon"><svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="12" r="3"></circle><path d="M19.4 15a1.7 1.7 0 0 0 .34 1.87l.06.06a2 2 0 1 1-2.83 2.83l-.06-.06A1.7 1.7 0 0 0 15 19.4a1.7 1.7 0 0 0-1 .6 1.7 1.7 0 0 0-.4 1V21a2 2 0 1 1-4 0v-.09a1.7 1.7 0 0 0-.4-1 1.7 1.7 0 0 0-1-.6 1.7 1.7 0 0 0-1.87.34l-.06.06a2 2 0 1 1-2.83-2.83l.06-.06A1.7 1.7 0 0 0 4.6 15a1.7 1.7 0 0 0-.6-1 1.7 1.7 0 0 0-1-.4H3a2 2 0 1 1 0-4h.09a1.7 1.7 0 0 0 1-.4 1.7 1.7 0 0 0 .6-1 1.7 1.7 0 0 0-.34-1.87l-.06-.06a2 2 0 1 1 2.83-2.83l.06.06A1.7 1.7 0 0 0 9 4.6a1.7 1.7 0 0 0 1-.6 1.7 1.7 0 0 0 .4-1V3a2 2 0 1 1 4 0v.09a1.7 1.7 0 0 0 .4 1 1.7 1.7 0 0 0 1 .6 1.7 1.7 0 0 0 1.87-.34l.06-.06a2 2 0 1 1 2.83 2.83l-.06.06A1.7 1.7 0 0 0 19.4 9c.26.3.47.65.6 1 .09.33.13.67.1 1.01-.03.34-.13.68-.3.99-.16.32-.39.6-.66.84z"></path></svg></span><span class="nav-label">系统管理</span></button>
         <hr class="nav-sep">
       </nav>
       <div style="display:flex;gap:8px;margin-top:12px;">
@@ -2937,7 +2937,7 @@
               <h4 style="margin-top:0;">趋势</h4>
               <div class="table-wrap">
                 <table>
-                  <thead><tr><th>周期</th><th>汇报数</th><th>已提交</th><th>已确认</th><th>已锁定</th><th>工时</th><th>待审核</th></tr></thead>
+                  <thead><tr><th>周期</th><th>汇报数</th><th>已提交</th><th>已确认</th><th>已锁定</th><th>工时</th><th>日志数</th><th>待审核</th></tr></thead>
                   <tbody id="workReportOverviewTrendTable"></tbody>
                 </table>
               </div>
@@ -3094,10 +3094,10 @@
           </div>
         </div>
         <div class="section-tabs" data-section="system">
-          <button class="active" data-subtab="serviceStatus" type="button">系统及服务状态</button>
-          <button data-subtab="workReportReminder" type="button">系统设置</button>
-          <button data-subtab="upgrade" type="button">系统升级与数据备份</button>
-          <button data-subtab="databaseInit" type="button">初始化数据库</button>
+          <button class="active" data-subtab="serviceStatus" data-admin-only="true" type="button">系统及服务状态</button>
+          <button data-subtab="workReportReminder" data-admin-only="true" type="button">系统设置</button>
+          <button data-subtab="upgrade" data-admin-only="true" type="button">系统升级与数据备份</button>
+          <button data-subtab="databaseInit" data-admin-only="true" type="button">初始化数据库</button>
           <button data-subtab="auditLog" type="button">操作日志</button>
         </div>
         <div class="subtab-panel hidden system-compact" data-section="system" data-subtab="upgrade">
@@ -3370,14 +3370,45 @@
               <option value="create">创建</option>
               <option value="update">修改</option>
               <option value="delete">删除</option>
+              <option value="submit">提交</option>
+              <option value="approved">确认</option>
+              <option value="returned">退回</option>
+              <option value="locked">锁定</option>
+              <option value="decision">审批</option>
+              <option value="execute">执行</option>
+              <option value="export">导出</option>
+              <option value="access">查看</option>
+              <option value="download">下载</option>
+              <option value="verify">验证</option>
+              <option value="import">导入</option>
+              <option value="backup">备份</option>
+              <option value="upload">上传</option>
+              <option value="upgrade">升级</option>
             </select>
             <select id="auditLogFilterTarget">
               <option value="">全部对象</option>
               <option value="project">项目</option>
               <option value="user">人员</option>
               <option value="asset">资产</option>
+              <option value="assetRelation">资产关系</option>
+              <option value="topologyLayout">拓扑布局</option>
+              <option value="document">资料</option>
+              <option value="knowledgeBase">知识库</option>
+              <option value="log">运维日志</option>
+              <option value="workReport">工作汇报</option>
+              <option value="inspectionPlan">巡检计划</option>
+              <option value="inspectionExecution">巡检执行</option>
+              <option value="sparePart">备件</option>
+              <option value="changeRecord">变更记录</option>
+              <option value="incident">故障记录</option>
+              <option value="approval">审批</option>
+              <option value="notification">通知</option>
+              <option value="aiInspectionTarget">巡检对象</option>
+              <option value="aiInspectionTemplate">巡检模板</option>
               <option value="aiInspectionTask">巡检任务</option>
               <option value="aiInspectionResult">巡检结果</option>
+              <option value="configBackupPlan">配置备份计划</option>
+              <option value="configBackupRecord">配置备份记录</option>
               <option value="system">系统</option>
             </select>
             <button class="secondary" id="auditLogExportCsv" type="button">导出CSV</button>
@@ -4549,9 +4580,10 @@
           <td>${esc(item.approvedCount || 0)}</td>
           <td>${esc(item.lockedCount || 0)}</td>
           <td>${esc(item.totalHours)}</td>
+          <td>${esc(item.logCount || 0)}</td>
           <td>${esc(item.pendingCount)}</td>
         </tr>
-      `).join('') || '<tr><td colspan="7">暂无趋势数据</td></tr>';
+      `).join('') || '<tr><td colspan="8">暂无趋势数据</td></tr>';
       const pendingTypeText = (result.pendingSummary?.byType || []).map(item => `${item.reportType === 'daily' ? '日报' : item.reportType === 'weekly' ? '周报' : '月报'} ${item.count}`).join(' ｜ ');
       const pendingUserText = (result.pendingSummary?.byUsers || []).map(item => `${item.name} ${item.pendingCount}`).join(' ｜ ');
       const pendingProjectText = (result.pendingSummary?.byProjects || []).map(item => `${item.name} ${item.pendingCount}`).join(' ｜ ');
@@ -5769,7 +5801,9 @@
       [...els.navTabs.querySelectorAll('button')].forEach(button => {
         const adminOnly = button.dataset.adminOnly === 'true';
         const customerHidden = button.dataset.customerHidden === 'true';
-        button.classList.toggle('hidden', (adminOnly && state.user.role !== 'admin') || (customerHidden && state.user.role === 'customer'));
+        const auditorVisible = button.dataset.auditorVisible === 'true';
+        const hiddenForRole = adminOnly && state.user.role !== 'admin' && !(auditorVisible && state.user.role === 'auditor');
+        button.classList.toggle('hidden', hiddenForRole || (customerHidden && state.user.role === 'customer'));
       });
       document.querySelectorAll('.section-tabs button[data-admin-only="true"]').forEach(button => {
         button.classList.toggle('hidden', state.user.role !== 'admin');
@@ -5847,6 +5881,9 @@
       if (section === 'assets' && subtab === 'cabinetLayout') {
         startCabinetMonitorPoll();
         loadCabinetLayout();
+      }
+      if (section === 'system' && subtab === 'auditLog') {
+        renderSystemAuditLogs();
       }
     }
 
@@ -8030,7 +8067,7 @@
     }
 
     function renderSystemAuditLogs() {
-      if (state.user?.role !== 'admin') return;
+      if (!['admin', 'auditor'].includes(state.user?.role)) return;
       const pageSize = 15;
       const filtered = getFilteredAuditLogs();
       const totalPages = Math.max(1, Math.ceil(filtered.length / pageSize));
@@ -9049,7 +9086,11 @@
     }
 
     async function refreshSystemManagement() {
-      if (state.user.role !== 'admin') return;
+      if (state.user.role !== 'admin') {
+        // 审计员仅能访问操作日志页签，其余系统接口仍为管理员专属。
+        renderSystemAuditLogs();
+        return;
+      }
       const [info, services, load] = await Promise.all([
         api('/api/system/info'),
         api('/api/system/services'),
@@ -9237,7 +9278,7 @@
     }
 
     async function loadBaseData(options = {}) {
-      const endpoints = BASE_DATA_ENDPOINTS.filter(ep => ep.key !== 'auditLogs' || state.user?.role === 'admin');
+      const endpoints = BASE_DATA_ENDPOINTS.filter(ep => ep.key !== 'auditLogs' || ['admin', 'auditor'].includes(state.user?.role));
       if (options.clearBeforeLoad) clearBaseDataState();
       await loadLogDictionaries();
       const results = await Promise.allSettled(endpoints.map(ep => apiCollection(ep.path, { silent: true })));
@@ -12301,10 +12342,9 @@
       formData.append('managementPort', mgmt.managementPort);
       formData.append('loginAccount', document.getElementById('edDocumentLoginAccount').value);
       const loginPwd = document.getElementById('edDocumentLoginPassword').value;
-      if (loginPwd) {
-        formData.append('loginPassword', loginPwd);
-        if (state.editDocumentAccessKey) formData.append('_encryptionKey', state.editDocumentAccessKey);
-      }
+      if (loginPwd) formData.append('loginPassword', loginPwd);
+      // 携带旧访问密钥，便于后端在仅修改访问密码时重加密已存的登录密码。
+      if (state.editDocumentAccessKey) formData.append('_encryptionKey', state.editDocumentAccessKey);
       const accessPwd = document.getElementById('edDocumentAccessPassword').value;
       if (accessPwd) formData.append('accessPassword', accessPwd);
       const file = document.getElementById('edDocumentAttachment').files[0];
