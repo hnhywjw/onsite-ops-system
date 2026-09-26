@@ -1594,6 +1594,16 @@ function readImportedMonitorFields(row = {}) {
   });
 }
 
+// 资产表单/接口的维保日期统一规范化并校验真实日期，避免写入 2026-13-45 之类无效值。
+function normalizeAssetDateField(value, fieldLabel) {
+  if (value === undefined || value === null || String(value).trim() === '') return { value: '' };
+  const match = String(value).trim().match(/^(\d{4})[-/](\d{1,2})[-/](\d{1,2})$/);
+  if (!match) return { error: `${fieldLabel}格式无效，请使用YYYY-MM-DD格式` };
+  const normalized = `${match[1]}-${match[2].padStart(2, '0')}-${match[3].padStart(2, '0')}`;
+  if (!parseDateOnly(normalized)) return { error: `${fieldLabel}不是有效日期` };
+  return { value: normalized };
+}
+
 function sanitizeTopologyPositions(raw) {
   if (!raw || typeof raw !== 'object' || Array.isArray(raw)) return { error: '布局数据格式无效' };
   const keys = Object.keys(raw);
@@ -8690,7 +8700,9 @@ const requestHandler = async (req, res) => {
           entry.asset.rackUnitSize = entry.rackUnitSize;
         }
       }
-      appendAuditLog(db, user, 'update', 'asset', '', `批量归位 ${planned.length} 台设备到 ${cabinetName}`, user.projectId);
+      // 管理员可跨项目归位，审计归属取设备实际所属项目；混合项目时留空，避免错误记到操作者项目。
+      const plannedProjectIds = [...new Set(planned.map(entry => entry.asset.projectId).filter(Boolean))];
+      appendAuditLog(db, user, 'update', 'asset', '', `批量归位 ${planned.length} 台设备到 ${cabinetName}`, plannedProjectIds.length === 1 ? plannedProjectIds[0] : '');
       await writeDb(db);
       return json(res, 200, { ok: true, updated: planned.length });
     }
@@ -8714,6 +8726,8 @@ const requestHandler = async (req, res) => {
         const gate = await resolveMonitorTargetAddress(monitorFields.monitorHost);
         if (!gate.ok) return json(res, 400, { message: gate.message });
       }
+      const maintainField = normalizeAssetDateField(body.maintainExpiryDate, '维保到期日');
+      if (maintainField.error) return json(res, 400, { message: maintainField.error });
       const item = {
         id: id('asset'),
         projectId,
@@ -8725,7 +8739,7 @@ const requestHandler = async (req, res) => {
         version: body.version || '',
         serialNumber: body.serialNumber || '',
         status: body.status || '',
-        maintainExpiryDate: body.maintainExpiryDate || '',
+        maintainExpiryDate: maintainField.value,
         installationLocation: body.installationLocation || '',
         notes: body.notes || '',
         cabinetName: cabinetFields.cabinetName,
@@ -8885,6 +8899,12 @@ const requestHandler = async (req, res) => {
         const gate = await resolveMonitorTargetAddress(monitorFields.monitorHost);
         if (!gate.ok) return json(res, 400, { message: gate.message });
       }
+      let nextMaintainExpiryDate = target.maintainExpiryDate;
+      if (body.maintainExpiryDate !== undefined) {
+        const maintainField = normalizeAssetDateField(body.maintainExpiryDate, '维保到期日');
+        if (maintainField.error) return json(res, 400, { message: maintainField.error });
+        nextMaintainExpiryDate = maintainField.value;
+      }
       const monitorChanged = ['monitorEnabled', 'monitorType', 'monitorHost', 'monitorPort', 'snmpCommunity', 'snmpPort']
         .some(field => monitorFields[field] !== target[field]);
       target.projectId = projectId;
@@ -8900,7 +8920,7 @@ const requestHandler = async (req, res) => {
       });
       target.serialNumber = body.serialNumber !== undefined ? body.serialNumber : target.serialNumber;
       target.status = body.status !== undefined ? body.status : target.status;
-      target.maintainExpiryDate = body.maintainExpiryDate !== undefined ? body.maintainExpiryDate : target.maintainExpiryDate;
+      target.maintainExpiryDate = nextMaintainExpiryDate;
       target.installationLocation = body.installationLocation !== undefined ? body.installationLocation : target.installationLocation;
       target.notes = body.notes !== undefined ? body.notes : target.notes;
       target.cabinetName = cabinetFields.cabinetName;
