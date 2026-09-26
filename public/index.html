@@ -7687,7 +7687,7 @@
       state.sparePartMovementPage = Math.min(Math.max(1, state.sparePartMovementPage || 1), spmTotalPages);
       const spmStart = (state.sparePartMovementPage - 1) * spmPageSize;
       const spmRows = sourceMovements.slice().sort((a, b) => b.createdAt.localeCompare(a.createdAt)).slice(spmStart, spmStart + spmPageSize);
-      document.getElementById('sparePartMovementTable').innerHTML = spmRows.map(item => `<tr><td>${esc(item.createdAt)}</td><td>${esc(state.spareParts.find(entry => entry.id === item.sparePartId)?.name || '-')}</td><td>${esc(item.type === 'inbound' ? '入库' : '消耗')}</td><td>${esc(item.quantity)}</td><td>${esc(item.reason || '-')}</td><td>${esc(item.operatorName || '-')}</td></tr>`).join('') || '<tr><td colspan="6">暂无记录</td></tr>';
+      document.getElementById('sparePartMovementTable').innerHTML = spmRows.map(item => `<tr><td>${esc(item.createdAt)}</td><td>${esc(state.spareParts.find(entry => entry.id === item.sparePartId)?.name || '-')}</td><td>${esc(item.type === 'inbound' ? '入库' : (item.type === 'adjust' ? '盘点调整' : '消耗'))}</td><td>${esc(item.quantity)}</td><td>${esc(item.reason || '-')}</td><td>${esc(item.operatorName || '-')}</td></tr>`).join('') || '<tr><td colspan="6">暂无记录</td></tr>';
       document.getElementById('sparePartMovementPageInfo').textContent = `第 ${state.sparePartMovementPage} / ${spmTotalPages} 页`;
       document.getElementById('sparePartMovementPrevBtn').disabled = state.sparePartMovementPage <= 1;
       document.getElementById('sparePartMovementNextBtn').disabled = state.sparePartMovementPage >= spmTotalPages;
@@ -8666,7 +8666,15 @@
 
     async function removeAsset(id) {
       if (!await showConfirm('确认删除该资产吗？')) return;
-      await api(`/api/assets/${id}`, { method: 'DELETE' });
+      try {
+        await api(`/api/assets/${id}`, { method: 'DELETE' });
+      } catch (error) {
+        // 存在关联数据时默认阻断，管理员可选择强制级联删除。
+        if (state.user?.role !== 'admin' || !String(error.message || '').includes('存在关联数据')) throw error;
+        const confirmed = await showConfirm('该资产存在关联数据，强制删除会一并移除这些关联记录，且不可恢复。确认强制删除吗？');
+        if (!confirmed) return;
+        await api(`/api/assets/${id}?cascade=1`, { method: 'DELETE' });
+      }
       setMessage('assetMessage', '资产已删除');
       await loadBaseData();
       openTabWithSubtab('assets', 'list');

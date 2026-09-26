@@ -1605,9 +1605,77 @@ function collectAssetDeleteBlockers(db, assetId) {
   pushIf((db.sparePartMovements || []).filter(item => item.assetId === assetId).length, '条备件出入库记录引用了该资产');
   pushIf((db.changeRecords || []).filter(item => item.assetId === assetId).length, '条变更记录引用了该资产');
   pushIf((db.inspectionPlans || []).filter(item => item.assetId === assetId).length, '条巡检计划引用了该资产');
+  pushIf((db.inspectionExecutions || []).filter(item => item.assetId === assetId).length, '条巡检执行记录引用了该资产');
   pushIf((db.incidentRecords || []).filter(item => item.assetId === assetId).length, '条故障记录引用了该资产');
   pushIf((db.logs || []).filter(item => item.assetId === assetId).length, '条运维日志引用了该资产');
   return warnings;
+}
+
+// 管理员强制删除资产时，级联清理所有直接引用该资产的记录及其派生通知，避免产生孤儿数据。
+function cascadeDeleteAsset(db, assetId) {
+  const removed = {
+    assets: 0, relations: 0, targets: 0, spareParts: 0, sparePartMovements: 0,
+    changeRecords: 0, approvals: 0, inspectionPlans: 0, inspectionExecutions: 0,
+    incidents: 0, logs: 0, notifications: 0
+  };
+  const beforeNotifications = (db.notifications || []).length;
+
+  const linkedChangeRecords = (db.changeRecords || []).filter(item => item.assetId === assetId);
+  const changeIds = linkedChangeRecords.map(item => item.id);
+  const changeApprovalIds = linkedChangeRecords.map(item => item.approvalId).filter(Boolean);
+  db.changeRecords = (db.changeRecords || []).filter(item => item.assetId !== assetId);
+  removed.changeRecords = changeIds.length;
+  const beforeApprovals = (db.approvals || []).length;
+  db.approvals = (db.approvals || []).filter(item => !changeApprovalIds.includes(item.id));
+  removed.approvals = beforeApprovals - db.approvals.length;
+  changeIds.forEach(id => removeNotificationsBySource(db, 'changeRecord', id));
+  changeApprovalIds.forEach(id => removeNotificationsBySource(db, 'approval', id));
+
+  const incidentIds = (db.incidentRecords || []).filter(item => item.assetId === assetId).map(item => item.id);
+  db.incidentRecords = (db.incidentRecords || []).filter(item => item.assetId !== assetId);
+  removed.incidents = incidentIds.length;
+  incidentIds.forEach(id => removeNotificationsBySource(db, 'incident', id));
+
+  const spareIds = (db.spareParts || []).filter(item => item.assetId === assetId).map(item => item.id);
+  db.spareParts = (db.spareParts || []).filter(item => item.assetId !== assetId);
+  removed.spareParts = spareIds.length;
+  const beforeMovements = (db.sparePartMovements || []).length;
+  db.sparePartMovements = (db.sparePartMovements || []).filter(item => item.assetId !== assetId && !spareIds.includes(item.sparePartId));
+  removed.sparePartMovements = beforeMovements - db.sparePartMovements.length;
+
+  const beforeTargets = (db.aiInspectionTargets || []).length;
+  db.aiInspectionTargets = (db.aiInspectionTargets || []).filter(item => item.assetId !== assetId);
+  removed.targets = beforeTargets - db.aiInspectionTargets.length;
+
+  const beforePlans = (db.inspectionPlans || []).length;
+  db.inspectionPlans = (db.inspectionPlans || []).filter(item => item.assetId !== assetId);
+  removed.inspectionPlans = beforePlans - db.inspectionPlans.length;
+
+  const beforeExecutions = (db.inspectionExecutions || []).length;
+  db.inspectionExecutions = (db.inspectionExecutions || []).filter(item => item.assetId !== assetId);
+  removed.inspectionExecutions = beforeExecutions - db.inspectionExecutions.length;
+
+  const beforeLogs = (db.logs || []).length;
+  db.logs = (db.logs || []).filter(item => item.assetId !== assetId);
+  removed.logs = beforeLogs - db.logs.length;
+
+  const beforeRelations = (db.assetRelations || []).length;
+  db.assetRelations = (db.assetRelations || []).filter(item => item.sourceAssetId !== assetId && item.targetAssetId !== assetId);
+  removed.relations = beforeRelations - db.assetRelations.length;
+
+  const beforeAssets = (db.assets || []).length;
+  db.assets = (db.assets || []).filter(item => item.id !== assetId);
+  removed.assets = beforeAssets - db.assets.length;
+
+  if (db.topologyLayouts && db.topologyLayouts.positions) {
+    for (const key of Object.keys(db.topologyLayouts.positions)) {
+      const positions = db.topologyLayouts.positions[key];
+      if (positions && positions[assetId]) delete positions[assetId];
+    }
+  }
+  delete snmpMetricCache[assetId];
+  removed.notifications = beforeNotifications - (db.notifications || []).length;
+  return removed;
 }
 
 function resolveCabinetName(asset) {
@@ -2851,7 +2919,7 @@ function normalizeDb(raw = {}) {
       sparePartId: item.sparePartId || '',
       projectId: item.projectId || '',
       assetId: item.assetId || '',
-      type: item.type === 'inbound' ? 'inbound' : 'outbound',
+      type: ['inbound', 'outbound', 'adjust'].includes(item.type) ? item.type : 'outbound',
       quantity: Number(item.quantity || 0),
       reason: item.reason || '',
       operatorId: item.operatorId || '',
@@ -2913,6 +2981,9 @@ function normalizeDb(raw = {}) {
       content: item.content || '',
       level: item.level || 'info',
       category: item.category || '',
+      // 来源类型/来源 ID 用于在删除业务记录时级联清理其通知。
+      sourceType: item.sourceType || '',
+      sourceId: item.sourceId || '',
       readAt: item.readAt || '',
       archivedAt: item.archivedAt || '',
       // 已读/隐藏按用户维度存储，必须随通知一起持久化，否则重启后状态丢失。
@@ -3896,6 +3967,9 @@ async function writeDb(db, options = {}) {
     for (const key of forcedDirtyKeys) {
       if (!dirtyKeys.includes(key)) dirtyKeys.push(key);
     }
+    // 记录发布前的内存状态与序号，落库失败时用于回滚。
+    const previousLiveDb = latestFileDbCache;
+    const previousSequence = dbSequence;
     dbSequence++;
     writeTarget._seq = dbSequence;
     rememberLiveDb(normalized);
@@ -3914,6 +3988,9 @@ async function writeDb(db, options = {}) {
         writeDbToFile(normalized);
         fileDbNeedsSyncToMySql = true;
       } else {
+        // 落库失败：回滚内存快照与序号，避免接口显示已保存但持久层没有该数据。
+        latestFileDbCache = previousLiveDb;
+        dbSequence = previousSequence;
         throw error;
       }
     }
@@ -4531,7 +4608,7 @@ async function rejectUpgradeUpload(res, db, user, filename, message, extra = {})
   return json(res, extra.status || 400, { message });
 }
 
-function createNotification(db, projectId, title, content, level = 'info', category = '') {
+function createNotification(db, projectId, title, content, level = 'info', category = '', sourceType = '', sourceId = '') {
   db.notifications = db.notifications || [];
   const notification = {
     id: id('notification'),
@@ -4540,12 +4617,22 @@ function createNotification(db, projectId, title, content, level = 'info', categ
     content,
     level,
     category,
+    sourceType,
+    sourceId,
     readAt: '',
     archivedAt: '',
     createdAt: now()
   };
       db.notifications.unshift(notification);
   return notification;
+}
+
+// 删除业务记录时同步清理其产生的通知，避免遗留指向已删除数据的空通知。
+function removeNotificationsBySource(db, sourceType, sourceId) {
+  if (!sourceType || !sourceId || !Array.isArray(db.notifications)) return 0;
+  const before = db.notifications.length;
+  db.notifications = db.notifications.filter(item => !(item.sourceType === sourceType && item.sourceId === sourceId));
+  return before - db.notifications.length;
 }
 
 function getActiveProjectEngineers(db, projectId) {
@@ -8676,6 +8763,10 @@ const requestHandler = async (req, res) => {
       if (user.role !== 'admin' && target.projectId !== user.projectId) return json(res, 403, { message: '无权修改该资产' });
       const body = await readBody(req);
       const projectId = user.role === 'admin' ? (body.projectId || target.projectId) : user.projectId;
+      // 资产不允许跨项目迁移，否则引用它的备件/巡检/变更/故障/日志会留在原项目形成跨项目脏引用。
+      if (user.role === 'admin' && body.projectId !== undefined && String(body.projectId) !== target.projectId) {
+        return json(res, 400, { message: '不支持变更资产所属项目' });
+      }
       if (!requireExistingProject(projectId, db)) return json(res, 400, { message: '关联项目不存在' });
       const cabinetFields = readCabinetFields({
         cabinetName: body.cabinetName !== undefined ? body.cabinetName : target.cabinetName,
@@ -8745,6 +8836,14 @@ const requestHandler = async (req, res) => {
       if (!canDeleteOwnedRecord(user, target, target.createdBy || '')) return json(res, 403, { message: '仅支持删除自己创建的资产' });
       const warnings = collectAssetDeleteBlockers(db, assetId);
       if (warnings.length) {
+        // 默认阻断，要求先清理关联数据；管理员可通过 cascade=1 强制级联删除。
+        const forceCascade = reqUrl.searchParams.get('cascade') === '1';
+        if (forceCascade && user.role === 'admin') {
+          const removed = cascadeDeleteAsset(db, assetId);
+          appendAuditLog(db, user, 'delete', 'asset', assetId, `强制删除资产 ${target.name}，级联移除 变更${removed.changeRecords}/审批${removed.approvals}/故障${removed.incidents}/备件${removed.spareParts}/流水${removed.sparePartMovements}/巡检计划${removed.inspectionPlans}/巡检执行${removed.inspectionExecutions}/巡检对象${removed.targets}/日志${removed.logs}/关联${removed.relations}`, target.projectId);
+          await writeDb(db);
+          return json(res, 200, { ok: true, removed });
+        }
         return json(res, 409, { message: '该资产存在关联数据: ' + warnings.join('; ') + '。请先删除关联数据后再删除资产。' });
       }
       db.assets.splice(index, 1);
@@ -9722,9 +9821,13 @@ const requestHandler = async (req, res) => {
           target.name = nextSpareName;
         }
         if (body.model !== undefined) target.model = body.model;
+        // 直接修改库存数量时补一条「盘点调整」流水，保证流水账与库存始终对得上。
+        let inventoryAdjusted = false;
+        let previousQuantity = target.quantity;
         if (body.quantity !== undefined) {
           const quantityValue = body.quantity === '' ? 0 : Number(body.quantity);
           if (!Number.isFinite(quantityValue) || quantityValue < 0) return { status: 400, message: '库存数量必须为非负数' };
+          if (quantityValue !== target.quantity) inventoryAdjusted = true;
           target.quantity = quantityValue;
         }
         if (body.safeStock !== undefined) {
@@ -9741,6 +9844,21 @@ const requestHandler = async (req, res) => {
         if (target.assetId) {
           const linkedAsset = (lockDb.assets || []).find(a => a.id === String(target.assetId));
           if (!linkedAsset || linkedAsset.projectId !== target.projectId) target.assetId = '';
+        }
+        if (inventoryAdjusted) {
+          lockDb.sparePartMovements = lockDb.sparePartMovements || [];
+          lockDb.sparePartMovements.push({
+            id: id('spareMove'),
+            sparePartId: target.id,
+            projectId: target.projectId,
+            assetId: target.assetId || '',
+            type: 'adjust',
+            quantity: Math.abs(target.quantity - previousQuantity),
+            reason: `盘点调整：${previousQuantity} → ${target.quantity}`,
+            operatorId: user.id,
+            operatorName: user.name,
+            createdAt: now()
+          });
         }
         appendAuditLog(lockDb, user, 'update', 'sparePart', sparePartId, `修改备件 ${target.name}`, target.projectId);
         await writeDb(lockDb);
@@ -9886,7 +10004,7 @@ const requestHandler = async (req, res) => {
       db.changeRecords.push(item);
       db.approvals.push(approval);
       appendAuditLog(db, user, 'create', 'changeRecord', item.id, `提交变更 ${item.title}`, projectId);
-      createNotification(db, projectId, '变更待审批', `${item.title} 已提交给 ${approver.name} 审批`, 'warning', 'approval');
+      createNotification(db, projectId, '变更待审批', `${item.title} 已提交给 ${approver.name} 审批`, 'warning', 'approval', 'changeRecord', item.id);
       await writeDb(db);
       return json(res, 201, item);
     }
@@ -9933,7 +10051,7 @@ const requestHandler = async (req, res) => {
         // 重新提交后清理上一轮驳回原因，避免终态残留误导审批人。
         target.rejectionReason = '';
         const approver = (db.users || []).find(u => u.id === target.approverId);
-        createNotification(db, target.projectId, '变更待审批', `${target.title} 已重新提交${oldStatus === '已驳回' ? '（原已驳回）' : ''}，待${approver ? approver.name : '审批人'}审批`, 'warning', 'approval');
+        createNotification(db, target.projectId, '变更待审批', `${target.title} 已重新提交${oldStatus === '已驳回' ? '（原已驳回）' : ''}，待${approver ? approver.name : '审批人'}审批`, 'warning', 'approval', 'changeRecord', target.id);
         if (linkedApproval) {
           linkedApproval.status = '待运维审批';
           linkedApproval.currentStage = 'approver';
@@ -9963,6 +10081,9 @@ const requestHandler = async (req, res) => {
           appendAuditLog(db, user, 'system', 'approval', target.approvalId, `变更记录 ${target.title} 删除时级联删除审批失败: ${error.message}`, target.projectId);
         }
       }
+      // 级联清理该变更及其审批产生的通知，避免遗留空通知。
+      removeNotificationsBySource(db, 'approval', target.approvalId);
+      removeNotificationsBySource(db, 'changeRecord', recordId);
       appendAuditLog(db, user, 'delete', 'changeRecord', recordId, `删除变更记录 ${target.title}`, target.projectId);
       await writeDb(db);
       return json(res, 200, { ok: true });
@@ -9996,7 +10117,7 @@ const requestHandler = async (req, res) => {
       const item = { id: id('incident'), projectId, assetId: body.assetId || '', title: incidentTitle, faultType: body.faultType || '', severity: body.severity || '中', slaStatus: body.slaStatus || '正常', status: body.status || '处理中', description: body.description || '', occurredAt: body.occurredAt || '', resolution: body.resolution || '', createdBy: user.id, createdAt: now() };
       db.incidentRecords.push(item);
       appendAuditLog(db, user, 'create', 'incident', item.id, `登记故障 ${item.title}`, projectId);
-      if (item.slaStatus === '超时') createNotification(db, projectId, 'SLA 超时提醒', `${item.title} 已超时`, 'error', 'incident');
+      if (item.slaStatus === '超时') createNotification(db, projectId, 'SLA 超时提醒', `${item.title} 已超时`, 'error', 'incident', 'incident', item.id);
       await writeDb(db);
       return json(res, 201, item);
     }
@@ -10046,6 +10167,7 @@ const requestHandler = async (req, res) => {
       const target = db.incidentRecords[index];
       if (!canDeleteOwnedRecord(user, target, target.createdBy || '')) return json(res, 403, { message: '仅支持删除自己创建的故障记录' });
       db.incidentRecords.splice(index, 1);
+      removeNotificationsBySource(db, 'incident', incidentId);
       appendAuditLog(db, user, 'delete', 'incident', incidentId, `删除故障记录 ${target.title}`, target.projectId);
       await writeDb(db);
       return json(res, 200, { ok: true });
@@ -10095,7 +10217,7 @@ const requestHandler = async (req, res) => {
       const item = { id: id('approval'), projectId, category: body.category || '', title: body.title || '', content: body.content || '', status: '待运维审批', requestedBy: user.id, approvedBy: '', approverId: approver.id, customerId: customer.id, currentStage: 'approver', relatedId, createdAt: now(), updatedAt: now() };
       db.approvals.push(item);
       appendAuditLog(db, user, 'create', 'approval', item.id, `提交审批 ${item.title}`, projectId);
-      createNotification(db, projectId, '审批待处理', `${item.title} 等待 ${approver.name} 审批`, 'warning', 'approval');
+      createNotification(db, projectId, '审批待处理', `${item.title} 等待 ${approver.name} 审批`, 'warning', 'approval', 'approval', item.id);
       await writeDb(db);
       return json(res, 201, item);
     }
@@ -10117,19 +10239,19 @@ const requestHandler = async (req, res) => {
           item.status = '待客户确认';
           item.currentStage = 'customer';
           item.approvedBy = user.id;
-          createNotification(db, item.projectId, '审批流转通知', `${item.title} 已通过运维审批，等待甲方客户确认`, 'warning', 'approval');
+          createNotification(db, item.projectId, '审批流转通知', `${item.title} 已通过运维审批，等待甲方客户确认`, 'warning', 'approval', 'approval', item.id);
         } else {
           item.status = '已通过';
           item.currentStage = 'completed';
           item.approvedBy = user.id;
-          createNotification(db, item.projectId, '审批结果通知', `${item.title} 已完成客户确认`, 'info', 'approval');
+          createNotification(db, item.projectId, '审批结果通知', `${item.title} 已完成客户确认`, 'info', 'approval', 'approval', item.id);
         }
       } else {
         item.status = '已驳回';
         item.currentStage = 'completed';
         item.approvedBy = user.id;
         item.rejectionReason = body.reason || '';
-        createNotification(db, item.projectId, '审批结果通知', `${item.title} 已驳回${item.rejectionReason ? '：' + item.rejectionReason : ''}`, 'warning', 'approval');
+        createNotification(db, item.projectId, '审批结果通知', `${item.title} 已驳回${item.rejectionReason ? '：' + item.rejectionReason : ''}`, 'warning', 'approval', 'approval', item.id);
       }
       item.updatedAt = now();
       if (body.relatedType === 'changeRecord' || item.category === 'change') {
@@ -10157,6 +10279,7 @@ const requestHandler = async (req, res) => {
         if (target.currentStage === 'completed') return json(res, 403, { message: '已完成的审批不能作废' });
       }
       db.approvals.splice(index, 1);
+      removeNotificationsBySource(db, 'approval', approvalId);
       appendAuditLog(db, user, 'delete', 'approval', target.id, `作废审批 ${target.title}`, target.projectId);
       await writeDb(db);
       return json(res, 200, { ok: true });
