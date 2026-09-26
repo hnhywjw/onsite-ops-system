@@ -1578,7 +1578,9 @@ function readImportedMonitorFields(row = {}) {
   const monitorTypeRaw = String(row.monitorType || row['监控方式'] || '').trim().toLowerCase();
   const monitorHost = String(row.monitorHost || row['监控地址/IP'] || row['监控地址'] || '').trim();
   const monitorPort = String(row.monitorPort || row['端口号'] || '').trim();
-  const snmpCommunity = String(row.snmpCommunity || row['SNMP团体字'] || '').trim();
+  let snmpCommunity = String(row.snmpCommunity || row['SNMP团体字'] || '').trim();
+  // 导出模板用「已配置」占位隐藏真实团体字，回导时按未提供处理，避免占位符覆盖真实值。
+  if (snmpCommunity === '已配置' || snmpCommunity === '未配置') snmpCommunity = '';
   const snmpPort = String(row.snmpPort || row['SNMP端口'] || '').trim();
   const monitorType = ASSET_MONITOR_TYPES.includes(monitorTypeRaw) ? monitorTypeRaw : 'ping';
   const monitorEnabled = ['true', '1', 'yes', '是', '启用'].includes(enabledRaw) || Boolean(monitorHost);
@@ -1696,8 +1698,12 @@ function cascadeDeleteAsset(db, assetId) {
   removed.logs = beforeLogs - db.logs.length;
 
   const beforeRelations = (db.assetRelations || []).length;
+  const removedRelationIds = (db.assetRelations || [])
+    .filter(item => item.sourceAssetId === assetId || item.targetAssetId === assetId)
+    .map(item => item.id);
   db.assetRelations = (db.assetRelations || []).filter(item => item.sourceAssetId !== assetId && item.targetAssetId !== assetId);
   removed.relations = beforeRelations - db.assetRelations.length;
+  removedRelationIds.forEach(invalidateRelationRuntimeState);
 
   const beforeAssets = (db.assets || []).length;
   db.assets = (db.assets || []).filter(item => item.id !== assetId);
@@ -1709,9 +1715,28 @@ function cascadeDeleteAsset(db, assetId) {
       if (positions && positions[assetId]) delete positions[assetId];
     }
   }
-  delete snmpMetricCache[assetId];
+  invalidateAssetRuntimeState(assetId);
   removed.notifications = beforeNotifications - (db.notifications || []).length;
   return removed;
+}
+
+// 资产/关系变更后清理运行态监控缓存，避免删除或改配置后仍展示旧主机、旧端口状态。
+function invalidateAssetRuntimeState(assetId) {
+  if (!assetId) return;
+  if (monitorRuntimeState.statuses) delete monitorRuntimeState.statuses[assetId];
+  delete snmpMetricCache[assetId];
+  delete portStatusCache[assetId];
+  const rates = trafficMonitorState.rates || {};
+  const prefix = `${assetId}_`;
+  for (const key of Object.keys(rates)) {
+    if (key === assetId || key.startsWith(prefix)) delete rates[key];
+  }
+}
+
+function invalidateRelationRuntimeState(relationId) {
+  if (!relationId) return;
+  delete trafficMonitorState.lastCounters[relationId];
+  if (trafficMonitorState.portStatus) delete trafficMonitorState.portStatus[relationId];
 }
 
 function resolveCabinetName(asset) {
@@ -5700,7 +5725,8 @@ function canDeleteOwnedRecord(user, item, creatorId) {
 
 // 统计除指定账号外仍处于启用状态的管理员数量，用于保证系统至少保留一个可用管理员。
 function countActiveAdminsExcluding(db, excludeUserId) {
-  return (db.users || []).filter(item => item.role === 'admin' && item.status !== 'disabled' && item.id !== excludeUserId).length;
+  // 只有状态为 active 的管理员才算「启用」，pending/rejected/disabled 均不构成可用管理员。
+  return (db.users || []).filter(item => item.role === 'admin' && item.status === 'active' && item.id !== excludeUserId).length;
 }
 
 function canOperateInspectionRecord(user, item) {
@@ -8325,10 +8351,21 @@ const requestHandler = async (req, res) => {
       if (!allowedUserRoles.includes(body.role)) {
         return json(res, 400, { message: '请选择有效的账号角色' });
       }
+      const username = String(body.username ?? '').trim();
+      if (!username) {
+        return json(res, 400, { message: '请输入账号' });
+      }
+      if (username.length > 64) {
+        return json(res, 400, { message: '账号长度不能超过 64 位' });
+      }
+      const name = String(body.name ?? '').trim();
+      if (!name) {
+        return json(res, 400, { message: '请输入姓名' });
+      }
       // 用户名唯一性检查与写入放入同一临界区，避免并发创建出重复账号。
       const outcome = await withDbMutationLock(async () => {
         const lockDb = await readDb();
-        if ((lockDb.users || []).some(item => item.username === body.username)) {
+        if ((lockDb.users || []).some(item => item.username === username)) {
           return { status: 400, message: '账号已存在' };
         }
         if (body.projectId && !requireExistingProject(body.projectId, lockDb)) {
@@ -8336,10 +8373,10 @@ const requestHandler = async (req, res) => {
         }
         const created = {
           id: id('user'),
-          username: body.username,
+          username,
           passwordHash: hash(body.password),
           role: body.role,
-          name: body.name,
+          name,
           phone: body.phone || '',
           idCard: body.idCard || '',
           email: body.email || '',
@@ -8448,8 +8485,9 @@ const requestHandler = async (req, res) => {
       if (!target) {
         return json(res, 404, { message: '人员不存在' });
       }
-      if (target.status === 'disabled') {
-        return json(res, 400, { message: '该账号已处于禁用状态' });
+      // 仅允许在 active <-> disabled 之间切换，避免 pending/rejected 通过禁用再启用绕过审批。
+      if (target.status !== 'active') {
+        return json(res, 400, { message: '仅启用状态的账号可以禁用' });
       }
       if (target.role === 'admin' && admin.id !== target.id) {
         return json(res, 403, { message: '不能禁用其他管理员账号' });
@@ -8490,31 +8528,42 @@ const requestHandler = async (req, res) => {
         return json(res, 404, { message: '人员不存在' });
       }
       const body = await readBody(req);
-      if (db.users.some(item => item.username === body.username && item.id !== targetUserId)) {
+      // 未提交的字段保持原值，避免局部更新（如仅改密码）静默清空手机号、项目等资料。
+      const nextUsername = body.username !== undefined ? String(body.username).trim() : target.username;
+      if (!nextUsername) {
+        return json(res, 400, { message: '请输入账号' });
+      }
+      if (nextUsername.length > 64) {
+        return json(res, 400, { message: '账号长度不能超过 64 位' });
+      }
+      if (db.users.some(item => item.username === nextUsername && item.id !== targetUserId)) {
         return json(res, 400, { message: '账号已存在' });
       }
-      if (body.projectId && !requireExistingProject(body.projectId, db)) {
+      if (body.name !== undefined && !String(body.name || '').trim()) {
+        return json(res, 400, { message: '请输入姓名' });
+      }
+      if (body.projectId !== undefined && body.projectId && !requireExistingProject(body.projectId, db)) {
         return json(res, 400, { message: '关联项目不存在' });
       }
-      target.username = body.username || target.username;
-      const nextRole = body.role ? String(body.role) : target.role;
-      if (body.role && !allowedUserRoles.includes(nextRole)) {
+      const nextRole = body.role !== undefined ? String(body.role) : target.role;
+      if (body.role !== undefined && !allowedUserRoles.includes(nextRole)) {
         return json(res, 400, { message: '无效的角色' });
       }
       if (target.role === 'admin' && nextRole !== 'admin' && countActiveAdminsExcluding(db, target.id) === 0) {
         return json(res, 400, { message: '系统必须保留至少一个启用状态的管理员' });
       }
-      const nextProjectId = body.projectId || '';
+      const nextProjectId = body.projectId !== undefined ? String(body.projectId || '') : (target.projectId || '');
       const roleOrProjectChanged = nextRole !== target.role || nextProjectId !== (target.projectId || '');
+      target.username = nextUsername;
       target.role = nextRole;
-      target.name = body.name || target.name;
-      target.phone = body.phone || '';
-      target.idCard = body.idCard || '';
-      target.email = body.email || '';
-      target.wechat = body.wechat || '';
+      target.name = body.name !== undefined ? String(body.name).trim() : target.name;
+      target.phone = body.phone !== undefined ? String(body.phone || '') : (target.phone || '');
+      target.idCard = body.idCard !== undefined ? String(body.idCard || '') : (target.idCard || '');
+      target.email = body.email !== undefined ? String(body.email || '') : (target.email || '');
+      target.wechat = body.wechat !== undefined ? String(body.wechat || '') : (target.wechat || '');
       target.projectId = nextProjectId;
-      target.startDate = body.startDate || '';
-      target.endDate = body.endDate || '';
+      target.startDate = body.startDate !== undefined ? String(body.startDate || '') : (target.startDate || '');
+      target.endDate = body.endDate !== undefined ? String(body.endDate || '') : (target.endDate || '');
       if (body.securityQuestion !== undefined) {
         target.securityQuestion = String(body.securityQuestion || '').trim();
       }
@@ -8731,7 +8780,7 @@ const requestHandler = async (req, res) => {
           if (typeof rawDate === 'number') {
             const excelEpoch = new Date(1899, 11, 30);
             const d = new Date(excelEpoch.getTime() + rawDate * 86400000);
-            maintainExpiryDate = d.toISOString().slice(0, 10);
+            if (!Number.isNaN(d.getTime())) maintainExpiryDate = d.toISOString().slice(0, 10);
           } else {
             const str = String(rawDate).trim();
             const m = str.match(/^(\d{4})[-/](\d{1,2})[-/](\d{1,2})/);
@@ -8740,13 +8789,14 @@ const requestHandler = async (req, res) => {
             } else if (/^\d{1,2}[\/\-]\d{1,2}[\/\-]\d{4}$/.test(str)) {
               const parts = str.split(/[\/\-]/);
               maintainExpiryDate = `${parts[2]}-${parts[0].padStart(2, '0')}-${parts[1].padStart(2, '0')}`;
-            } else {
-              results.errors.push(`${rowLabel}: 维保到期日格式无效"${str}"，请使用YYYY-MM-DD格式`);
             }
           }
-        }
-        if (rawDate != null && rawDate !== '' && !maintainExpiryDate && !results.errors.slice(-1)[0]?.includes('维保到期日')) {
-          results.errors.push(`${rowLabel}: 维保到期日格式无法识别，请使用YYYY-MM-DD格式`);
+          // 维保日期非法时跳过该行，避免写入空日期或 2026-13-45 之类的无效值。
+          if (!maintainExpiryDate || !parseDateOnly(maintainExpiryDate)) {
+            results.errors.push(`${rowLabel}: 维保到期日格式无效"${String(rawDate).trim()}"，请使用YYYY-MM-DD格式`);
+            results.skipped++;
+            continue;
+          }
         }
         const cabinetFields = readCabinetFields({
           cabinetName: row.cabinetName || row['机柜名称'] || '',
@@ -8835,6 +8885,8 @@ const requestHandler = async (req, res) => {
         const gate = await resolveMonitorTargetAddress(monitorFields.monitorHost);
         if (!gate.ok) return json(res, 400, { message: gate.message });
       }
+      const monitorChanged = ['monitorEnabled', 'monitorType', 'monitorHost', 'monitorPort', 'snmpCommunity', 'snmpPort']
+        .some(field => monitorFields[field] !== target[field]);
       target.projectId = projectId;
       target.type = typeField.type;
       target.name = body.name !== undefined ? String(body.name).trim() : target.name;
@@ -8860,6 +8912,7 @@ const requestHandler = async (req, res) => {
       target.monitorPort = monitorFields.monitorPort;
       target.snmpCommunity = monitorFields.snmpCommunity;
       target.snmpPort = monitorFields.snmpPort;
+      if (monitorChanged) invalidateAssetRuntimeState(target.id);
       appendAuditLog(db, user, 'update', 'asset', target.id, `修改资产 ${target.name}`, projectId);
       await writeDb(db);
       return json(res, 200, sanitizeAssetForApi(target, user));
@@ -8899,14 +8952,18 @@ const requestHandler = async (req, res) => {
         return json(res, 409, { message: '该资产存在关联数据: ' + warnings.join('; ') + '。请先删除关联数据后再删除资产。' });
       }
       db.assets.splice(index, 1);
+      const removedRelationIds = (db.assetRelations || [])
+        .filter(item => item.sourceAssetId === assetId || item.targetAssetId === assetId)
+        .map(item => item.id);
       db.assetRelations = (db.assetRelations || []).filter(item => item.sourceAssetId !== assetId && item.targetAssetId !== assetId);
+      removedRelationIds.forEach(invalidateRelationRuntimeState);
       if (db.topologyLayouts && db.topologyLayouts.positions) {
         for (const key of Object.keys(db.topologyLayouts.positions)) {
           const positions = db.topologyLayouts.positions[key];
           if (positions && positions[assetId]) delete positions[assetId];
         }
       }
-      delete snmpMetricCache[assetId];
+      invalidateAssetRuntimeState(assetId);
       appendAuditLog(db, user, 'delete', 'asset', assetId, `删除资产 ${target.name}`, target.projectId);
       await writeDb(db);
       return json(res, 200, { ok: true });
@@ -8972,6 +9029,7 @@ const requestHandler = async (req, res) => {
         if (!srcAsset || srcAsset.projectId !== user.projectId) return json(res, 403, { message: '无权操作此关系' });
       }
       db.assetRelations.splice(idx, 1);
+      invalidateRelationRuntimeState(relId);
       await writeDb(db);
       return json(res, 200, { ok: true });
     }
@@ -9010,6 +9068,7 @@ const requestHandler = async (req, res) => {
       if (body.label !== undefined) rel.label = body.label;
       if (hasSourceField) rel.sourceAssetId = String(body.sourceAssetId);
       if (hasTargetField) rel.targetAssetId = String(body.targetAssetId);
+      invalidateRelationRuntimeState(relId);
       await writeDb(db);
       return json(res, 200, { ok: true, relation: rel });
     }

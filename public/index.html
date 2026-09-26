@@ -5994,7 +5994,7 @@
           item.status === 'pending' ? `<button class="secondary" data-action="approve-user" data-id="${item.id}" type="button" style="background:#d1fae5;color:#065f46;">通过</button><button class="secondary" data-action="reject-user" data-id="${item.id}" type="button" style="background:#fee2e2;color:#991b1b;">拒绝</button>` : '',
           item.status === 'rejected' ? `<button class="secondary" data-action="restore-user" data-id="${item.id}" type="button" style="background:#dbeafe;color:#1e40af;">恢复</button>` : '',
           `<button class="secondary" data-action="edit-user" data-id="${item.id}" type="button">修改</button>`,
-          item.id !== state.user.id ? (item.status === 'disabled' ? `<button class="secondary" data-action="enable-user" data-id="${item.id}" type="button" style="background:#d1fae5;color:#065f46;">启用</button>` : `<button class="secondary" data-action="disable-user" data-id="${item.id}" type="button" style="background:#fef3c7;color:#92400e;">禁用</button>`) : '',
+          item.id !== state.user.id ? (item.status === 'disabled' ? `<button class="secondary" data-action="enable-user" data-id="${item.id}" type="button" style="background:#d1fae5;color:#065f46;">启用</button>` : (item.status === 'active' ? `<button class="secondary" data-action="disable-user" data-id="${item.id}" type="button" style="background:#fef3c7;color:#92400e;">禁用</button>` : '')) : '',
           `<button class="secondary" data-action="delete-user" data-id="${item.id}" type="button" style="background:#fee2e2;color:#dc2626;border-color:#fecaca;">删除</button>`
         ].filter(Boolean).join('') : '';
         return `
