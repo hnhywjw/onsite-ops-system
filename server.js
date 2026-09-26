@@ -154,6 +154,17 @@ const loginRateLimitLockMs = parseInt(process.env.LOGIN_RATE_LIMIT_LOCK_MS, 10) 
 const loginRateLimitMaxAttempts = parseInt(process.env.LOGIN_RATE_LIMIT_MAX_ATTEMPTS, 10) || 5;
 const webSocketHeartbeatIntervalMs = parseInt(process.env.WS_HEARTBEAT_INTERVAL_MS, 10) || 30000;
 const isProduction = process.env.NODE_ENV === 'production';
+// 仅用于验证写失败回滚：非生产环境下，若 FORCE_DB_WRITE_FAILURE_FILE 指向的文件存在，则落库尝试抛错。
+// 用文件而非计数，便于精确控制：创建文件即注入失败，移走文件即恢复，不受后台定时写库干扰。
+const forcedDbWriteFailureFile = isProduction ? '' : String(process.env.FORCE_DB_WRITE_FAILURE_FILE || '').trim();
+function shouldInjectDbWriteFailure() {
+  if (!forcedDbWriteFailureFile) return false;
+  try {
+    return fs.existsSync(forcedDbWriteFailureFile);
+  } catch (_) {
+    return false;
+  }
+}
 const allowedUserRoles = ['admin', 'engineer', 'viewer', 'auditor', 'customer'];
 // 巡检计划进入这些状态即视为本轮已处理，不再计入待办与逾期提醒。
 const inspectionPlanDoneStatuses = ['已完成', '已执行', '异常待处理'];
@@ -3976,6 +3987,9 @@ async function writeDb(db, options = {}) {
     try {
       await ensureMySqlReady();
       await syncFileDbToMySqlIfNeeded();
+      if (shouldInjectDbWriteFailure()) {
+        throw new Error('injected database write failure (FORCE_DB_WRITE_FAILURE_FILE)');
+      }
       if (dirtyKeys.length) {
         await writeNormalizedDbToMySql(normalized, dirtyKeys);
         dirtyKeys.forEach(key => clearCollectionDirtyFlags(normalized[key]));
