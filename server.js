@@ -1740,8 +1740,11 @@ function cascadeDeleteAsset(db, assetId) {
   removed.configBackupRecords = beforeConfigRecords - db.configBackupRecords.length;
 
   const beforePlans = (db.inspectionPlans || []).length;
+  const removedPlanIds = (db.inspectionPlans || []).filter(item => item.assetId === assetId).map(item => item.id);
   db.inspectionPlans = (db.inspectionPlans || []).filter(item => item.assetId !== assetId);
   removed.inspectionPlans = beforePlans - db.inspectionPlans.length;
+  // 巡检计划删除后同步清理其到期提醒通知，避免通知中心残留指向已删计划的记录。
+  removedPlanIds.forEach(id => removeNotificationsBySource(db, 'inspectionPlan', id));
 
   const beforeExecutions = (db.inspectionExecutions || []).length;
   db.inspectionExecutions = (db.inspectionExecutions || []).filter(item => item.assetId !== assetId);
@@ -8748,9 +8751,10 @@ const requestHandler = async (req, res) => {
       if (index === -1) {
         return json(res, 404, { message: '人员不存在' });
       }
+      const removedUser = db.users[index];
       db.users.splice(index, 1);
       db.sessions = (db.sessions || []).filter(item => item.userId !== targetUserId);
-      appendAuditLog(db, user, 'delete', 'user', targetUserId, '删除人员');
+      appendAuditLog(db, user, 'delete', 'user', targetUserId, `删除人员 ${removedUser.name || targetUserId}`, removedUser.projectId || '');
       await writeDb(db, { replaceCollections: ['sessions'] });
       return json(res, 200, { ok: true });
     }
@@ -9123,38 +9127,44 @@ const requestHandler = async (req, res) => {
       const user = requireEditor(req, res, db);
       if (!user) return;
       const assetId = parseAssetIdFromPath(pathname);
-      const index = db.assets.findIndex(item => item.id === assetId);
-      if (index === -1) return json(res, 404, { message: '资产不存在' });
-      const target = db.assets[index];
-      if (!canDeleteOwnedRecord(user, target, target.createdBy || '')) return json(res, 403, { message: '仅支持删除自己创建的资产' });
-      const warnings = collectAssetDeleteBlockers(db, assetId);
-      if (warnings.length) {
-        // 默认阻断，要求先清理关联数据；管理员可通过 cascade=1 强制级联删除。
-        const forceCascade = reqUrl.searchParams.get('cascade') === '1';
-        if (forceCascade && user.role === 'admin') {
-          const removed = cascadeDeleteAsset(db, assetId);
-          appendAuditLog(db, user, 'delete', 'asset', assetId, `强制删除资产 ${target.name}，级联移除 变更${removed.changeRecords}/审批${removed.approvals}/故障${removed.incidents}/备件${removed.spareParts}/流水${removed.sparePartMovements}/巡检计划${removed.inspectionPlans}/巡检执行${removed.inspectionExecutions}/巡检对象${removed.targets}/日志${removed.logs}/关联${removed.relations}`, target.projectId);
-          await writeDb(db);
-          return json(res, 200, { ok: true, removed });
+      const forceCascade = reqUrl.searchParams.get('cascade') === '1';
+      // 资产及派生关系/流水的校验与删除必须同一临界区完成，否则并发新增关联会产生孤儿引用。
+      const outcome = await withDbMutationLock(async () => {
+        const lockDb = await readDb();
+        const index = lockDb.assets.findIndex(item => item.id === assetId);
+        if (index === -1) return { status: 404, message: '资产不存在' };
+        const target = lockDb.assets[index];
+        if (!canDeleteOwnedRecord(user, target, target.createdBy || '')) return { status: 403, message: '仅支持删除自己创建的资产' };
+        const warnings = collectAssetDeleteBlockers(lockDb, assetId);
+        if (warnings.length) {
+          // 默认阻断，要求先清理关联数据；管理员可通过 cascade=1 强制级联删除。
+          if (forceCascade && user.role === 'admin') {
+            const removed = cascadeDeleteAsset(lockDb, assetId);
+            appendAuditLog(lockDb, user, 'delete', 'asset', assetId, `强制删除资产 ${target.name}，级联移除 变更${removed.changeRecords}/审批${removed.approvals}/故障${removed.incidents}/备件${removed.spareParts}/流水${removed.sparePartMovements}/巡检计划${removed.inspectionPlans}/巡检执行${removed.inspectionExecutions}/巡检对象${removed.targets}/日志${removed.logs}/关联${removed.relations}`, target.projectId);
+            await writeDb(lockDb);
+            return { status: 200, body: { ok: true, removed } };
+          }
+          return { status: 409, message: '该资产存在关联数据: ' + warnings.join('; ') + '。请先删除关联数据后再删除资产。' };
         }
-        return json(res, 409, { message: '该资产存在关联数据: ' + warnings.join('; ') + '。请先删除关联数据后再删除资产。' });
-      }
-      db.assets.splice(index, 1);
-      const removedRelationIds = (db.assetRelations || [])
-        .filter(item => item.sourceAssetId === assetId || item.targetAssetId === assetId)
-        .map(item => item.id);
-      db.assetRelations = (db.assetRelations || []).filter(item => item.sourceAssetId !== assetId && item.targetAssetId !== assetId);
-      removedRelationIds.forEach(invalidateRelationRuntimeState);
-      if (db.topologyLayouts && db.topologyLayouts.positions) {
-        for (const key of Object.keys(db.topologyLayouts.positions)) {
-          const positions = db.topologyLayouts.positions[key];
-          if (positions && positions[assetId]) delete positions[assetId];
+        lockDb.assets.splice(index, 1);
+        const removedRelationIds = (lockDb.assetRelations || [])
+          .filter(item => item.sourceAssetId === assetId || item.targetAssetId === assetId)
+          .map(item => item.id);
+        lockDb.assetRelations = (lockDb.assetRelations || []).filter(item => item.sourceAssetId !== assetId && item.targetAssetId !== assetId);
+        removedRelationIds.forEach(invalidateRelationRuntimeState);
+        if (lockDb.topologyLayouts && lockDb.topologyLayouts.positions) {
+          for (const key of Object.keys(lockDb.topologyLayouts.positions)) {
+            const positions = lockDb.topologyLayouts.positions[key];
+            if (positions && positions[assetId]) delete positions[assetId];
+          }
         }
-      }
-      invalidateAssetRuntimeState(assetId);
-      appendAuditLog(db, user, 'delete', 'asset', assetId, `删除资产 ${target.name}`, target.projectId);
-      await writeDb(db);
-      return json(res, 200, { ok: true });
+        invalidateAssetRuntimeState(assetId);
+        appendAuditLog(lockDb, user, 'delete', 'asset', assetId, `删除资产 ${target.name}`, target.projectId);
+        await writeDb(lockDb);
+        return { status: 200, body: { ok: true } };
+      });
+      if (outcome.status !== 200) return json(res, outcome.status, { message: outcome.message });
+      return json(res, 200, outcome.body);
     }
 
     if (req.method === 'POST' && pathname === '/api/asset-relations') {
@@ -10198,7 +10208,7 @@ const requestHandler = async (req, res) => {
         if (body.location !== undefined) target.location = body.location;
         if (body.notes !== undefined) target.notes = body.notes;
         if (body.assetId !== undefined) target.assetId = body.assetId;
-        if (user.role === 'admin' && body.projectId !== undefined) target.projectId = body.projectId;
+        if (user.role === 'admin' && body.projectId !== undefined) target.projectId = nextProjectId;
         // 项目变更后原关联资产可能已不属于该项目，无法确认归属时清空关联，避免跨项目脏引用。
         if (target.assetId) {
           const linkedAsset = (lockDb.assets || []).find(a => a.id === String(target.assetId));
@@ -10231,17 +10241,23 @@ const requestHandler = async (req, res) => {
       const user = requireEditor(req, res, db);
       if (!user) return;
       const sparePartId = pathname.split('/')[3];
-      const index = (db.spareParts || []).findIndex(item => item.id === sparePartId);
-      if (index === -1) return json(res, 404, { message: '备件不存在' });
-      const target = db.spareParts[index];
-      if (user.role !== 'admin' && target.projectId !== user.projectId) {
-        return json(res, 403, { message: '无权操作该备件' });
-      }
-      const removedMovementCount = (db.sparePartMovements || []).filter(item => item.sparePartId === sparePartId).length;
-      db.spareParts.splice(index, 1);
-      db.sparePartMovements = (db.sparePartMovements || []).filter(item => item.sparePartId !== sparePartId);
-      appendAuditLog(db, user, 'delete', 'sparePart', sparePartId, `删除备件 ${target.name}，同时移除 ${removedMovementCount} 条出入库流水`, target.projectId);
-      await writeDb(db);
+      // 备件与其出入库流水必须同一临界区内删除，否则并发出入库会留下指向已删备件的孤儿流水。
+      const outcome = await withDbMutationLock(async () => {
+        const lockDb = await readDb();
+        const index = (lockDb.spareParts || []).findIndex(item => item.id === sparePartId);
+        if (index === -1) return { status: 404, message: '备件不存在' };
+        const target = lockDb.spareParts[index];
+        if (user.role !== 'admin' && target.projectId !== user.projectId) {
+          return { status: 403, message: '无权操作该备件' };
+        }
+        const removedMovementCount = (lockDb.sparePartMovements || []).filter(item => item.sparePartId === sparePartId).length;
+        lockDb.spareParts.splice(index, 1);
+        lockDb.sparePartMovements = (lockDb.sparePartMovements || []).filter(item => item.sparePartId !== sparePartId);
+        appendAuditLog(lockDb, user, 'delete', 'sparePart', sparePartId, `删除备件 ${target.name}，同时移除 ${removedMovementCount} 条出入库流水`, target.projectId);
+        await writeDb(lockDb);
+        return { status: 200 };
+      });
+      if (outcome.status !== 200) return json(res, outcome.status, { message: outcome.message });
       return json(res, 200, { ok: true });
     }
 
@@ -10629,7 +10645,12 @@ const requestHandler = async (req, res) => {
         return json(res, 400, { message: '该审批已结束，不能重复处理' });
       }
       const body = await readBody(req);
-      if (body.status === 'approved') {
+      // 仅接受明确的通过/驳回决策，避免缺省或异常状态被误判为驳回。
+      const decision = String(body.status || '').trim();
+      if (!['approved', 'rejected'].includes(decision)) {
+        return json(res, 400, { message: '无效的审批决策' });
+      }
+      if (decision === 'approved') {
         if (item.currentStage === 'approver') {
           item.status = '待客户确认';
           item.currentStage = 'customer';
@@ -11513,59 +11534,65 @@ const requestHandler = async (req, res) => {
       const body = await readBody(req);
       const reportType = ['daily', 'weekly', 'monthly'].includes(body.reportType) ? body.reportType : 'daily';
       const targetUserId = user.role === 'admin' && body.userId ? String(body.userId) : user.id;
-      const targetUser = requireExistingUser(targetUserId, db);
-      if (!targetUser) return json(res, 404, { message: '汇报人员不存在' });
-      const projectId = user.role === 'admin' ? String(body.projectId || targetUser.projectId || '').trim() : user.projectId;
-      if (!projectId) return json(res, 400, { message: '请选择关联项目' });
-      if (!requireExistingProject(projectId, db)) return json(res, 400, { message: '关联项目不存在' });
-      if (user.role !== 'admin' && targetUserId !== user.id) return json(res, 403, { message: '仅支持创建本人的工作汇报' });
-      const periodMeta = getWorkReportPeriodMeta(reportType, body.anchorDate || body.rangeStart || formatDateKey(new Date()));
-      if (!periodMeta) return json(res, 400, { message: '无效的汇报周期' });
-      const existing = (db.workReports || []).find(item => item.userId === targetUserId && item.projectId === projectId && item.reportType === reportType && item.periodKey === periodMeta.periodKey);
-      if (existing && !canEditWorkReportContent(existing)) {
-        return json(res, 400, { message: existing.status === 'locked' ? '该周期汇报已锁定' : '该周期汇报已提交，仅退回后可修改' });
-      }
-      const metricsSnapshot = buildWorkloadMetrics(db, { rangeStart: periodMeta.rangeStart, rangeEnd: periodMeta.rangeEnd, userId: targetUserId, projectId });
-      const target = existing || {
-        id: id('workReport'),
-        reportType,
-        projectId,
-        userId: targetUserId,
-        periodKey: periodMeta.periodKey,
-        rangeStart: periodMeta.rangeStart,
-        rangeEnd: periodMeta.rangeEnd,
-        status: 'draft',
-        submittedAt: '',
-        reviewedAt: '',
-        reviewedBy: '',
-        reviewComment: '',
-        lockedAt: '',
-        createdAt: now(),
-        updatedAt: now()
-      };
-      target.reportType = reportType;
-      target.projectId = projectId;
-      target.userId = targetUserId;
-      target.periodKey = periodMeta.periodKey;
-      target.rangeStart = periodMeta.rangeStart;
-      target.rangeEnd = periodMeta.rangeEnd;
-      const reportSectionError = checkTextLength(body.summary, 5000, '工作摘要')
-        || checkTextLength(body.completedWork, 5000, '已完成工作')
-        || checkTextLength(body.pendingWork, 5000, '待办工作')
-        || checkTextLength(body.risks, 5000, '风险与问题')
-        || checkTextLength(body.nextPlan, 5000, '下一步计划');
-      if (reportSectionError) return json(res, 400, { message: reportSectionError });
-      target.summary = String(body.summary || target.summary || '').trim();
-      target.completedWork = String(body.completedWork || target.completedWork || '').trim();
-      target.pendingWork = String(body.pendingWork || target.pendingWork || '').trim();
-      target.risks = String(body.risks || target.risks || '').trim();
-      target.nextPlan = String(body.nextPlan || target.nextPlan || '').trim();
-      target.metricsSnapshot = metricsSnapshot;
-      target.updatedAt = now();
-      if (!existing) db.workReports.push(target);
-      appendAuditLog(db, user, existing ? 'update' : 'create', 'workReport', target.id, `${existing ? '更新' : '创建'}${reportType}工作汇报`, projectId);
-      await writeDb(db);
-      return json(res, 200, { message: existing ? '工作汇报已更新' : '工作汇报已创建', data: buildWorkReportResponse(db, target) });
+      // 周期唯一性校验、复用/新建与落库必须在同一临界区内完成，否则并发提交会产生同周期重复记录。
+      const outcome = await withDbMutationLock(async () => {
+        const lockDb = await readDb();
+        const targetUser = requireExistingUser(targetUserId, lockDb);
+        if (!targetUser) return { status: 404, message: '汇报人员不存在' };
+        const projectId = user.role === 'admin' ? String(body.projectId || targetUser.projectId || '').trim() : user.projectId;
+        if (!projectId) return { status: 400, message: '请选择关联项目' };
+        if (!requireExistingProject(projectId, lockDb)) return { status: 400, message: '关联项目不存在' };
+        if (user.role !== 'admin' && targetUserId !== user.id) return { status: 403, message: '仅支持创建本人的工作汇报' };
+        const periodMeta = getWorkReportPeriodMeta(reportType, body.anchorDate || body.rangeStart || formatDateKey(new Date()));
+        if (!periodMeta) return { status: 400, message: '无效的汇报周期' };
+        const existing = (lockDb.workReports || []).find(item => item.userId === targetUserId && item.projectId === projectId && item.reportType === reportType && item.periodKey === periodMeta.periodKey);
+        if (existing && !canEditWorkReportContent(existing)) {
+          return { status: 400, message: existing.status === 'locked' ? '该周期汇报已锁定' : '该周期汇报已提交，仅退回后可修改' };
+        }
+        const metricsSnapshot = buildWorkloadMetrics(lockDb, { rangeStart: periodMeta.rangeStart, rangeEnd: periodMeta.rangeEnd, userId: targetUserId, projectId });
+        const target = existing || {
+          id: id('workReport'),
+          reportType,
+          projectId,
+          userId: targetUserId,
+          periodKey: periodMeta.periodKey,
+          rangeStart: periodMeta.rangeStart,
+          rangeEnd: periodMeta.rangeEnd,
+          status: 'draft',
+          submittedAt: '',
+          reviewedAt: '',
+          reviewedBy: '',
+          reviewComment: '',
+          lockedAt: '',
+          createdAt: now(),
+          updatedAt: now()
+        };
+        target.reportType = reportType;
+        target.projectId = projectId;
+        target.userId = targetUserId;
+        target.periodKey = periodMeta.periodKey;
+        target.rangeStart = periodMeta.rangeStart;
+        target.rangeEnd = periodMeta.rangeEnd;
+        const reportSectionError = checkTextLength(body.summary, 5000, '工作摘要')
+          || checkTextLength(body.completedWork, 5000, '已完成工作')
+          || checkTextLength(body.pendingWork, 5000, '待办工作')
+          || checkTextLength(body.risks, 5000, '风险与问题')
+          || checkTextLength(body.nextPlan, 5000, '下一步计划');
+        if (reportSectionError) return { status: 400, message: reportSectionError };
+        target.summary = String(body.summary || target.summary || '').trim();
+        target.completedWork = String(body.completedWork || target.completedWork || '').trim();
+        target.pendingWork = String(body.pendingWork || target.pendingWork || '').trim();
+        target.risks = String(body.risks || target.risks || '').trim();
+        target.nextPlan = String(body.nextPlan || target.nextPlan || '').trim();
+        target.metricsSnapshot = metricsSnapshot;
+        target.updatedAt = now();
+        if (!existing) lockDb.workReports.push(target);
+        appendAuditLog(lockDb, user, existing ? 'update' : 'create', 'workReport', target.id, `${existing ? '更新' : '创建'}${reportType}工作汇报`, projectId);
+        await writeDb(lockDb);
+        return { status: 200, message: existing ? '工作汇报已更新' : '工作汇报已创建', data: buildWorkReportResponse(lockDb, target) };
+      });
+      if (outcome.status !== 200) return json(res, outcome.status, { message: outcome.message });
+      return json(res, 200, { message: outcome.message, data: outcome.data });
     }
 
     if (req.method === 'PUT' && pathname.startsWith('/api/work-reports/')) {
@@ -11787,10 +11814,24 @@ const requestHandler = async (req, res) => {
       if (safeBody.ssoDefaultProjectId !== undefined && String(safeBody.ssoDefaultProjectId).trim() && !requireExistingProject(String(safeBody.ssoDefaultProjectId).trim(), db)) {
         return json(res, 400, { message: 'SSO 默认项目不存在' });
       }
-      db.systemConfig = normalizeSystemConfig({ ...db.systemConfig, ...safeBody });
-      systemTimezoneOffsetMinutes = db.systemConfig.timezoneOffset;
-      refreshMonitorTargetPolicy(db.systemConfig);
-      await applyHttpsServerConfig(db.systemConfig);
+      const previousConfig = db.systemConfig;
+      const nextConfig = normalizeSystemConfig({ ...db.systemConfig, ...safeBody });
+      // 只有 HTTPS 相关设置变化时才重载监听，避免无关设置保存触发 HTTPS 服务重启。
+      const httpsChanged = safeBody.httpsLoginEnabled !== undefined || safeBody.httpsPort !== undefined;
+      db.systemConfig = nextConfig;
+      systemTimezoneOffsetMinutes = nextConfig.timezoneOffset;
+      refreshMonitorTargetPolicy(nextConfig);
+      if (httpsChanged) {
+        try {
+          await applyHttpsServerConfig(nextConfig);
+        } catch (error) {
+          // HTTPS 启动失败时回滚内存配置，避免内存状态与未落库的持久化状态不一致。
+          db.systemConfig = previousConfig;
+          systemTimezoneOffsetMinutes = previousConfig.timezoneOffset;
+          refreshMonitorTargetPolicy(previousConfig);
+          return json(res, 500, { message: `HTTPS 设置未生效：${error.message}` });
+        }
+      }
       appendAuditLog(db, user, 'update', 'system', '', `更新系统设置`);
       await writeDb(db);
       return json(res, 200, { message: '系统设置已保存', systemConfig: db.systemConfig });

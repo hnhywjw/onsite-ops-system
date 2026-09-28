@@ -4840,6 +4840,22 @@
       return state.user?.role === 'admin' || state.user?.role === 'engineer';
     }
 
+    // 与后端一致：管理员或同项目工程师可编辑项目范围内的记录（备件、资产等）。
+    function canEditProjectRecord(item) {
+      const user = state.user;
+      if (!user || !item) return false;
+      if (user.role === 'admin') return true;
+      return user.role === 'engineer' && Boolean(user.projectId) && item.projectId === user.projectId;
+    }
+
+    // 与后端一致：管理员或（同项目且为记录创建者）才可编辑/删除归属型记录。
+    function canMutateOwnedRecord(item, creatorKey) {
+      if (!canEditProjectRecord(item)) return false;
+      if (state.user.role === 'admin') return true;
+      const creator = creatorKey ? item[creatorKey] : '';
+      return Boolean(creator) && creator === state.user.id;
+    }
+
     function getAvailableReportDimension() {
       return state.user?.role === 'customer' ? 'project' : document.getElementById('reportDimension')?.value || 'user';
     }
@@ -7239,6 +7255,8 @@
       const pageItems = sourceAssets.slice(start, start + pageSize);
       document.getElementById('assetTable').innerHTML = pageItems.map(item => {
         const checked = (state.selectedAssetIds || []).includes(item.id) ? ' checked' : '';
+        const assetEditBtn = canEditProjectRecord(item) ? `<button class="secondary" data-action="edit-asset" data-id="${item.id}" type="button">修改</button>` : '';
+        const assetDeleteBtn = canMutateOwnedRecord(item, 'createdBy') ? `<button class="secondary" data-action="delete-asset" data-id="${item.id}" type="button" style="background:#fee2e2;color:#dc2626;border-color:#fecaca;">删除</button>` : '';
         return `
         <tr>
           <td style="text-align:center;"><input type="checkbox" class="asset-checkbox" data-id="${item.id}"${checked} /></td>
@@ -7255,7 +7273,7 @@
           <td>${esc(item.status === '运行中' ? '使用中' : (item.status || '-'))}</td>
           <td>${esc(item.owner || '-')}</td>
           <td title="${esc(item.notes || '')}">${esc(item.notes || '')}</td>
-          <td><div class="toolbar" style="white-space:nowrap;">${canEditData() ? `<button class="secondary" data-action="edit-asset" data-id="${item.id}" type="button">修改</button><button class="secondary" data-action="detail-asset" data-id="${item.id}" type="button">详情</button><button class="secondary" data-action="delete-asset" data-id="${item.id}" type="button" style="background:#fee2e2;color:#dc2626;border-color:#fecaca;">删除</button>` : `<button class="secondary" data-action="detail-asset" data-id="${item.id}" type="button">详情</button>`}</div></td>
+          <td><div class="toolbar" style="white-space:nowrap;">${assetEditBtn}<button class="secondary" data-action="detail-asset" data-id="${item.id}" type="button">详情</button>${assetDeleteBtn}</div></td>
         </tr>
         `;
       }).join('') || '<tr><td colspan="15">暂无数据</td></tr>';
@@ -7283,6 +7301,7 @@
         .map(item => {
           const expanded = state.expandedLogId === item.id;
           const checked = selectedSet.has(item.id) ? ' checked' : '';
+          const logMutate = canMutateOwnedRecord(item, 'userId');
           return `
             <tr>
               <td style="text-align:center;"><input type="checkbox" class="log-checkbox" data-id="${item.id}"${checked} /></td>
@@ -7291,7 +7310,7 @@
               <td>${esc(item.relatedTarget || '-')}</td>
               <td>${esc(item.conclusion)}</td>
                <td>${esc(item.durationHours)}</td>
-               <td><div class="toolbar"><button class="secondary" data-action="view-log-detail" data-id="${item.id}" type="button">${expanded ? '收起' : '详情'}</button>${canEditData() ? `<button class="secondary" data-action="edit-log" data-id="${item.id}" type="button">修改</button><button class="secondary" data-action="delete-log" data-id="${item.id}" type="button" style="background:#fee2e2;color:#dc2626;border-color:#fecaca;">删除</button>` : ''}</div></td>
+               <td><div class="toolbar"><button class="secondary" data-action="view-log-detail" data-id="${item.id}" type="button">${expanded ? '收起' : '详情'}</button>${logMutate ? `<button class="secondary" data-action="edit-log" data-id="${item.id}" type="button">修改</button><button class="secondary" data-action="delete-log" data-id="${item.id}" type="button" style="background:#fee2e2;color:#dc2626;border-color:#fecaca;">删除</button>` : ''}</div></td>
 
             </tr>
             ${expanded ? `<tr><td colspan="7"><div class="card" style="margin: 8px 0;"><div class="muted" style="margin-bottom: 8px;">工单详情</div><div class="grid-form" style="grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));"><div><div class="muted">派单时间</div><div>${esc(item.date || '-')}</div></div><div><div class="muted">派单部门</div><div>${esc(item.dispatchDepartment || '-')}</div></div><div><div class="muted">派单人</div><div>${esc(item.dispatcher || '-')}</div></div><div><div class="muted">工单类型</div><div>${esc(item.ticketType || '-')}</div></div><div><div class="muted">接单人</div><div>${esc(item.assignee || '-')}</div></div><div><div class="muted">关联项目</div><div>${esc(formatProjectDisplayById(item.projectId))}</div></div><div><div class="muted">关联资产</div><div>${esc(formatAssetName(item.assetId))}</div></div><div><div class="muted">工单位置</div><div>${esc(item.relatedTarget || '-')}</div></div><div><div class="muted">处理结果</div><div>${esc(item.result || '-')}</div></div><div><div class="muted">工单用时（小时）</div><div>${esc(item.durationHours)}</div></div></div><div class="muted" style="margin: 12px 0 8px;">工单内容</div><div style="white-space:pre-wrap;">${esc(item.event || '-')}</div><div class="muted" style="margin: 12px 0 8px;">处理过程</div><div style="white-space:pre-wrap;">${esc(item.process || '暂无处理过程')}</div><div class="muted" style="margin: 12px 0 8px;">结论</div><div style="white-space:pre-wrap;">${esc(item.conclusion || '-')}</div><div class="muted" style="margin: 12px 0 8px;">备注</div><div style="white-space:pre-wrap;">${esc(item.remark || '-')}</div></div></td></tr>` : ''}`;
@@ -7318,7 +7337,7 @@
         const expanded = state.expandedKbId === item.id;
         // 客户角色的列表接口会脱敏正文，展开时以详情接口返回的完整内容为准。
         const detail = expanded ? (state.kbDetails[item.id] || item) : item;
-        const kbActions = `<button class="secondary" data-action="detail-kb" data-id="${item.id}" type="button">${expanded ? '收起' : '详情'}</button>${canEditData() ? `<button class="secondary" data-action="edit-kb" data-id="${item.id}" type="button">修改</button><button class="secondary" data-action="delete-kb" data-id="${item.id}" type="button" style="background:#fee2e2;color:#dc2626;border-color:#fecaca;">删除</button>` : ''}`;
+        const kbActions = `<button class="secondary" data-action="detail-kb" data-id="${item.id}" type="button">${expanded ? '收起' : '详情'}</button>${canMutateOwnedRecord(item, 'createdBy') ? `<button class="secondary" data-action="edit-kb" data-id="${item.id}" type="button">修改</button><button class="secondary" data-action="delete-kb" data-id="${item.id}" type="button" style="background:#fee2e2;color:#dc2626;border-color:#fecaca;">删除</button>` : ''}`;
         const checked = (state.selectedKbIds || []).includes(item.id) ? ' checked' : '';
         return `
         <tr>
@@ -7392,7 +7411,7 @@
         state.documentPageRows = result.data || [];
         document.getElementById('documentTable').innerHTML = state.documentPageRows.map(item => {
           const typeLabels = { device: '设备管理信息', topology: '网络拓扑图', layout: '设备位置布局图', proposal: '项目方案', config: '配置文档', contract: '项目合同', acceptance: '项目验收报告' };
-          const displayActions = canEditData()
+          const displayActions = canMutateOwnedRecord(item, 'createdBy')
             ? `<button class="secondary" data-action="edit-document" data-id="${item.id}" type="button">修改</button><button class="secondary" data-action="delete-document" data-id="${item.id}" type="button" style="background:#fee2e2;color:#dc2626;border-color:#fecaca;">删除</button>`
             : '';
           const viewBtn = item.type === 'device'
@@ -7717,7 +7736,7 @@
       state.inspectionPlanPage = Math.min(Math.max(1, state.inspectionPlanPage || 1), inspectionPlanTotalPages);
       const inspectionPlanStart = (state.inspectionPlanPage - 1) * inspectionPlanPageSize;
       const inspectionPlanRows = sourceInspectionPlans.slice(inspectionPlanStart, inspectionPlanStart + inspectionPlanPageSize);
-      document.getElementById('inspectionPlanTable').innerHTML = inspectionPlanRows.map(item => `<tr><td>${esc(item.title)}</td><td>${esc(formatAssetName(item.assetId))}</td><td>${esc(item.cycle)}</td><td>${esc(item.nextDate || '-')}</td><td>${esc(item.owner || '-')}</td><td>${esc(item.status || '-')}</td><td><div class="toolbar">${canEditData() ? `<button class="secondary" data-action="edit-inspection-plan" data-id="${item.id}" type="button">修改</button><button class="secondary" data-action="delete-inspection-plan" data-id="${item.id}" type="button">删除</button>` : '-'}</div></td></tr>`).join('') || '<tr><td colspan="7">暂无数据</td></tr>';
+      document.getElementById('inspectionPlanTable').innerHTML = inspectionPlanRows.map(item => `<tr><td>${esc(item.title)}</td><td>${esc(formatAssetName(item.assetId))}</td><td>${esc(item.cycle)}</td><td>${esc(item.nextDate || '-')}</td><td>${esc(item.owner || '-')}</td><td>${esc(item.status || '-')}</td><td><div class="toolbar">${canMutateOwnedRecord(item, 'createdBy') ? `<button class="secondary" data-action="edit-inspection-plan" data-id="${item.id}" type="button">修改</button><button class="secondary" data-action="delete-inspection-plan" data-id="${item.id}" type="button">删除</button>` : '-'}</div></td></tr>`).join('') || '<tr><td colspan="7">暂无数据</td></tr>';
       document.getElementById('inspectionPlanPageInfo').textContent = `第 ${state.inspectionPlanPage} / ${inspectionPlanTotalPages} 页`;
       document.getElementById('inspectionPlanPrevBtn').disabled = state.inspectionPlanPage <= 1;
       document.getElementById('inspectionPlanNextBtn').disabled = state.inspectionPlanPage >= inspectionPlanTotalPages;
@@ -7727,7 +7746,7 @@
       state.inspectionExecutionPage = Math.min(Math.max(1, state.inspectionExecutionPage || 1), inspectionExecutionTotalPages);
       const inspectionExecutionStart = (state.inspectionExecutionPage - 1) * inspectionExecutionPageSize;
       const inspectionExecutionRows = sourceInspectionExecutions.slice().sort((a, b) => String(b.executedAt || b.createdAt || '').localeCompare(String(a.executedAt || a.createdAt || ''))).slice(inspectionExecutionStart, inspectionExecutionStart + inspectionExecutionPageSize);
-      document.getElementById('inspectionExecutionTable').innerHTML = inspectionExecutionRows.map(item => `<tr><td>${esc(state.inspectionPlans.find(plan => plan.id === item.planId)?.title || '-')}</td><td>${esc(item.executedAt || '-')}</td><td>${esc(item.executor || '-')}</td><td>${esc(item.checklist || '-')}</td><td>${esc(item.issue || '-')}</td><td>${esc(item.suggestion || '-')}</td><td>${esc(item.result || '-')}</td><td>${formatInspectionAttachment(item.attachment)}</td><td>${esc(item.nextDate || '-')}</td><td><div class="toolbar">${canEditData() ? `<button class="secondary" data-action="edit-inspection-execution" data-id="${item.id}" type="button">修改</button><button class="secondary" data-action="delete-inspection-execution" data-id="${item.id}" type="button">删除</button>` : '-'}</div></td></tr>`).join('') || '<tr><td colspan="10">暂无记录</td></tr>';
+      document.getElementById('inspectionExecutionTable').innerHTML = inspectionExecutionRows.map(item => `<tr><td>${esc(state.inspectionPlans.find(plan => plan.id === item.planId)?.title || '-')}</td><td>${esc(item.executedAt || '-')}</td><td>${esc(item.executor || '-')}</td><td>${esc(item.checklist || '-')}</td><td>${esc(item.issue || '-')}</td><td>${esc(item.suggestion || '-')}</td><td>${esc(item.result || '-')}</td><td>${formatInspectionAttachment(item.attachment)}</td><td>${esc(item.nextDate || '-')}</td><td><div class="toolbar">${canMutateOwnedRecord(item, 'createdBy') ? `<button class="secondary" data-action="edit-inspection-execution" data-id="${item.id}" type="button">修改</button><button class="secondary" data-action="delete-inspection-execution" data-id="${item.id}" type="button">删除</button>` : '-'}</div></td></tr>`).join('') || '<tr><td colspan="10">暂无记录</td></tr>';
       document.getElementById('inspectionExecutionPageInfo').textContent = `第 ${state.inspectionExecutionPage} / ${inspectionExecutionTotalPages} 页`;
       document.getElementById('inspectionExecutionPrevBtn').disabled = state.inspectionExecutionPage <= 1;
       document.getElementById('inspectionExecutionNextBtn').disabled = state.inspectionExecutionPage >= inspectionExecutionTotalPages;
@@ -7737,7 +7756,7 @@
       state.sparePartPage = Math.min(Math.max(1, state.sparePartPage || 1), sparePartTotalPages);
       const sparePartStart = (state.sparePartPage - 1) * sparePartPageSize;
       const sparePartRows = sourceSpareParts.slice(sparePartStart, sparePartStart + sparePartPageSize);
-      document.getElementById('sparePartTable').innerHTML = sparePartRows.map(item => `<tr><td>${esc(item.name)}</td><td>${esc(item.model || '-')}</td><td>${esc(item.quantity)}</td><td>${esc(item.safeStock)}</td><td>${esc(item.location || '-')}</td><td><div class="toolbar">${canEditData() ? `<button class="secondary" data-action="edit-spare-part" data-id="${item.id}" type="button">修改</button><button class="secondary" data-action="restock-spare" data-id="${item.id}" type="button">入库</button><button class="secondary" data-action="consume-spare" data-id="${item.id}" type="button">出库</button><button class="secondary" data-action="delete-spare-part" data-id="${item.id}" type="button" style="background:#fee2e2;color:#dc2626;border-color:#fecaca;">删除</button>` : '-'}</div></td></tr>`).join('') || '<tr><td colspan="6">暂无数据</td></tr>';
+      document.getElementById('sparePartTable').innerHTML = sparePartRows.map(item => `<tr><td>${esc(item.name)}</td><td>${esc(item.model || '-')}</td><td>${esc(item.quantity)}</td><td>${esc(item.safeStock)}</td><td>${esc(item.location || '-')}</td><td><div class="toolbar">${canEditProjectRecord(item) ? `<button class="secondary" data-action="edit-spare-part" data-id="${item.id}" type="button">修改</button><button class="secondary" data-action="restock-spare" data-id="${item.id}" type="button">入库</button><button class="secondary" data-action="consume-spare" data-id="${item.id}" type="button">出库</button><button class="secondary" data-action="delete-spare-part" data-id="${item.id}" type="button" style="background:#fee2e2;color:#dc2626;border-color:#fecaca;">删除</button>` : '-'}</div></td></tr>`).join('') || '<tr><td colspan="6">暂无数据</td></tr>';
       document.getElementById('sparePartPageInfo').textContent = `第 ${state.sparePartPage} / ${sparePartTotalPages} 页`;
       document.getElementById('sparePartPrevBtn').disabled = state.sparePartPage <= 1;
       document.getElementById('sparePartNextBtn').disabled = state.sparePartPage >= sparePartTotalPages;
@@ -7747,7 +7766,7 @@
       state.changeRecordPage = Math.min(Math.max(1, state.changeRecordPage || 1), changeTotalPages);
       const changeStart = (state.changeRecordPage - 1) * changePageSize;
       const changeRows = sourceChangeRecords.slice().sort((a, b) => b.createdAt.localeCompare(a.createdAt)).slice(changeStart, changeStart + changePageSize);
-      document.getElementById('changeRecordTable').innerHTML = changeRows.map(item => `<tr><td>${esc(item.title)}</td><td>${esc(item.content || '-')}</td><td>${esc(item.riskLevel)}</td><td>${esc(formatUserName(item.approverId))}</td><td>${esc(item.customerName || formatUserName(item.customerId))}</td><td>${item.status === '已驳回' && item.rejectionReason ? `<div>${esc(item.status)}</div><div class="muted" style="font-size:11px;margin-top:2px;">${esc(item.rejectionReason)}</div>` : esc(item.status)}</td><td>${esc(formatAssetName(item.assetId))}</td><td>${esc(formatProjectDisplayById(item.projectId))}</td><td><div class="toolbar">${canEditData() ? `${(item.status === '待运维审批' || item.status === '已驳回') ? `<button class="secondary" data-action="edit-change-record" data-id="${item.id}" type="button">修改</button>` : ''}<button class="secondary" data-action="delete-change-record" data-id="${item.id}" type="button">删除</button>` : '-'}</div></td></tr>`).join('') || '<tr><td colspan="9">暂无数据</td></tr>';
+      document.getElementById('changeRecordTable').innerHTML = changeRows.map(item => `<tr><td>${esc(item.title)}</td><td>${esc(item.content || '-')}</td><td>${esc(item.riskLevel)}</td><td>${esc(formatUserName(item.approverId))}</td><td>${esc(item.customerName || formatUserName(item.customerId))}</td><td>${item.status === '已驳回' && item.rejectionReason ? `<div>${esc(item.status)}</div><div class="muted" style="font-size:11px;margin-top:2px;">${esc(item.rejectionReason)}</div>` : esc(item.status)}</td><td>${esc(formatAssetName(item.assetId))}</td><td>${esc(formatProjectDisplayById(item.projectId))}</td><td><div class="toolbar">${canMutateOwnedRecord(item, 'createdBy') ? `${(item.status === '待运维审批' || item.status === '已驳回') ? `<button class="secondary" data-action="edit-change-record" data-id="${item.id}" type="button">修改</button>` : ''}<button class="secondary" data-action="delete-change-record" data-id="${item.id}" type="button">删除</button>` : '-'}</div></td></tr>`).join('') || '<tr><td colspan="9">暂无数据</td></tr>';
       document.getElementById('changeRecordPageInfo').textContent = `第 ${state.changeRecordPage} / ${changeTotalPages} 页`;
       document.getElementById('changeRecordPrevBtn').disabled = state.changeRecordPage <= 1;
       document.getElementById('changeRecordNextBtn').disabled = state.changeRecordPage >= changeTotalPages;
@@ -7757,7 +7776,7 @@
       state.incidentPage = Math.min(Math.max(1, state.incidentPage || 1), incidentTotalPages);
       const incidentStart = (state.incidentPage - 1) * incidentPageSize;
       const incidentRows = sourceIncidents.slice().sort((a, b) => b.occurredAt.localeCompare(a.occurredAt)).slice(incidentStart, incidentStart + incidentPageSize);
-      document.getElementById('incidentTable').innerHTML = incidentRows.map(item => `<tr><td>${esc(item.title)}</td><td>${esc(item.faultType || '-')}</td><td>${esc(item.severity || '-')}</td><td>${esc(item.slaStatus)}</td><td>${esc(item.status)}</td><td>${esc(item.resolution || '-')}</td><td>${esc(item.occurredAt || '-')}</td><td>${esc(formatProjectDisplayById(item.projectId))}</td><td><div class="toolbar">${canEditData() ? `<button class="secondary" data-action="edit-incident" data-id="${item.id}" type="button">修改</button><button class="secondary" data-action="delete-incident" data-id="${item.id}" type="button">删除</button>` : '-'}</div></td></tr>`).join('') || '<tr><td colspan="9">暂无数据</td></tr>';
+      document.getElementById('incidentTable').innerHTML = incidentRows.map(item => `<tr><td>${esc(item.title)}</td><td>${esc(item.faultType || '-')}</td><td>${esc(item.severity || '-')}</td><td>${esc(item.slaStatus)}</td><td>${esc(item.status)}</td><td>${esc(item.resolution || '-')}</td><td>${esc(item.occurredAt || '-')}</td><td>${esc(formatProjectDisplayById(item.projectId))}</td><td><div class="toolbar">${canMutateOwnedRecord(item, 'createdBy') ? `<button class="secondary" data-action="edit-incident" data-id="${item.id}" type="button">修改</button><button class="secondary" data-action="delete-incident" data-id="${item.id}" type="button">删除</button>` : '-'}</div></td></tr>`).join('') || '<tr><td colspan="9">暂无数据</td></tr>';
       document.getElementById('incidentPageInfo').textContent = `第 ${state.incidentPage} / ${incidentTotalPages} 页`;
       document.getElementById('incidentPrevBtn').disabled = state.incidentPage <= 1;
       document.getElementById('incidentNextBtn').disabled = state.incidentPage >= incidentTotalPages;
@@ -7796,7 +7815,7 @@
       state.aiInspectionTargetPage = Math.min(Math.max(1, state.aiInspectionTargetPage || 1), targetTotalPages);
       const targetStart = (state.aiInspectionTargetPage - 1) * targetPageSize;
       const targetRows = targetRowsAll.slice(targetStart, targetStart + targetPageSize);
-      document.getElementById('aiInspectionTargetTable').innerHTML = targetRows.map(item => `<tr><td>${esc(item.name)}</td><td>${esc(getAiInspectionCategoryLabel(item.category))}</td><td>${esc(item.address)}</td><td title="认证方式：${item.authType}">${esc(getAiInspectionProtocolLabel(item.protocol))}${item.port ? `:${esc(item.port)}` : ''}</td><td>${esc(item.systemVersion || '-')}</td><td>${esc(formatProjectDisplayById(item.projectId))}</td><td>${esc(item.createdAt || '-')}</td><td><div class="toolbar">${canEditData() ? `<button class="secondary" data-action="edit-ai-target" data-id="${item.id}" type="button">修改</button><button class="secondary" data-action="delete-ai-target" data-id="${item.id}" type="button">删除</button>` : '-'}</div></td></tr>`).join('') || '<tr><td colspan="8">暂无数据</td></tr>';
+      document.getElementById('aiInspectionTargetTable').innerHTML = targetRows.map(item => `<tr><td>${esc(item.name)}</td><td>${esc(getAiInspectionCategoryLabel(item.category))}</td><td>${esc(item.address)}</td><td title="认证方式：${item.authType}">${esc(getAiInspectionProtocolLabel(item.protocol))}${item.port ? `:${esc(item.port)}` : ''}</td><td>${esc(item.systemVersion || '-')}</td><td>${esc(formatProjectDisplayById(item.projectId))}</td><td>${esc(item.createdAt || '-')}</td><td><div class="toolbar">${canMutateOwnedRecord(item, 'createdBy') ? `<button class="secondary" data-action="edit-ai-target" data-id="${item.id}" type="button">修改</button><button class="secondary" data-action="delete-ai-target" data-id="${item.id}" type="button">删除</button>` : '-'}</div></td></tr>`).join('') || '<tr><td colspan="8">暂无数据</td></tr>';
       document.getElementById('aiInspectionTargetPageInfo').textContent = `第 ${state.aiInspectionTargetPage} / ${targetTotalPages} 页`;
       document.getElementById('aiInspectionTargetPrevBtn').disabled = state.aiInspectionTargetPage <= 1;
       document.getElementById('aiInspectionTargetNextBtn').disabled = state.aiInspectionTargetPage >= targetTotalPages;
@@ -7815,7 +7834,7 @@
       state.aiInspectionTemplatePage = Math.min(Math.max(1, state.aiInspectionTemplatePage || 1), templateTotalPages);
       const templateStart = (state.aiInspectionTemplatePage - 1) * templatePageSize;
       const templateRows = templateRowsAll.slice(templateStart, templateStart + templatePageSize);
-      document.getElementById('aiInspectionTemplateTable').innerHTML = templateRows.map(item => `<tr><td>${esc(item.name)}${item.createdBy === 'system' ? '（内置模板）' : ''}</td><td>${esc(getAiInspectionCategoryLabel(item.category))}</td><td>${esc(item.metrics?.length || 0)}</td><td>${esc(item.createdAt || '-')}</td><td><div class="toolbar">${canEditData() ? `<button class="secondary" data-action="edit-ai-template" data-id="${item.id}" type="button">修改</button>${item.createdBy !== 'system' ? `<button class="secondary" data-action="delete-ai-template" data-id="${item.id}" type="button" style="background:#fee2e2;color:#dc2626;border-color:#fecaca;">删除</button>` : ''}` : '-'}</div></td></tr>`).join('') || '<tr><td colspan="5">暂无数据</td></tr>';
+      document.getElementById('aiInspectionTemplateTable').innerHTML = templateRows.map(item => `<tr><td>${esc(item.name)}${item.createdBy === 'system' ? '（内置模板）' : ''}</td><td>${esc(getAiInspectionCategoryLabel(item.category))}</td><td>${esc(item.metrics?.length || 0)}</td><td>${esc(item.createdAt || '-')}</td><td><div class="toolbar">${canMutateOwnedRecord(item, 'createdBy') ? `<button class="secondary" data-action="edit-ai-template" data-id="${item.id}" type="button">修改</button>${item.createdBy !== 'system' ? `<button class="secondary" data-action="delete-ai-template" data-id="${item.id}" type="button" style="background:#fee2e2;color:#dc2626;border-color:#fecaca;">删除</button>` : ''}` : '-'}</div></td></tr>`).join('') || '<tr><td colspan="5">暂无数据</td></tr>';
       document.getElementById('aiInspectionTemplatePageInfo').textContent = `第 ${state.aiInspectionTemplatePage} / ${templateTotalPages} 页`;
       document.getElementById('aiInspectionTemplatePrevBtn').disabled = state.aiInspectionTemplatePage <= 1;
       document.getElementById('aiInspectionTemplateNextBtn').disabled = state.aiInspectionTemplatePage >= templateTotalPages;
@@ -7837,21 +7856,27 @@
       document.getElementById('aiInspectionTaskTable').innerHTML = taskRows.map(item => {
         const actions = [];
         if (canEditData()) {
-          actions.push(`<button class="secondary" data-action="edit-ai-task" data-id="${item.id}" type="button">修改</button>`);
-          if (item.status !== '已停用') {
+          const canManageTask = canMutateOwnedRecord(item, 'createdBy');
+          const canOperateTask = canEditProjectRecord(item);
+          if (canManageTask) {
+            actions.push(`<button class="secondary" data-action="edit-ai-task" data-id="${item.id}" type="button">修改</button>`);
+          }
+          if (canOperateTask && item.status !== '已停用') {
             actions.push(`<button class="secondary" data-action="execute-ai-task" data-id="${item.id}" type="button">手动执行</button>`);
           }
-          if (item.cycle && item.status !== '已停用') {
+          if (canManageTask && item.cycle && item.status !== '已停用') {
             actions.push(`<button class="secondary" data-action="suspend-ai-task" data-id="${item.id}" type="button">停用</button>`);
           }
-          if (item.status === '已停用') {
+          if (canManageTask && item.status === '已停用') {
             actions.push(`<button class="secondary" data-action="resume-ai-task" data-id="${item.id}" type="button">启用</button>`);
           }
           const taskResultId = item.latestResultId || (state.aiInspectionResults || []).find(r => r.taskId === item.id && !r.probeError)?.id;
           if (item.status === '已完成' && taskResultId) {
             actions.push(`<button class="secondary" data-action="view-ai-report" data-id="${taskResultId}" type="button">查看报告</button>`);
           }
-          actions.push(`<button class="secondary" data-action="delete-ai-task" data-id="${item.id}" type="button">删除</button>`);
+          if (canManageTask) {
+            actions.push(`<button class="secondary" data-action="delete-ai-task" data-id="${item.id}" type="button">删除</button>`);
+          }
         }
         const cycleLabel = { daily: '每日', weekly: '每周', monthly: '每月', quarterly: '每季度' }[item.cycle] || (item.cycle ? item.cycle : '单次');
         return `<tr><td>${esc(item.title)}</td><td>${esc(state.aiInspectionTargets.find(target => target.id === item.targetId)?.name || '-')}</td><td>${esc(item.executor || '-')}</td><td>${esc(cycleLabel)}</td><td>${esc(item.executedAt || '-')}</td><td>${esc(item.status || '-')}</td><td>${esc(item.createdAt || '-')}</td><td><div class="toolbar">${actions.length ? actions.join('') : '-'}</div></td></tr>`;
@@ -7865,11 +7890,13 @@
       state.aiInspectionResultPage = Math.min(Math.max(1, state.aiInspectionResultPage || 1), resultTotalPages);
       document.getElementById('aiInspectionResultTable').innerHTML = resultRows.map(item => {
         const resultActions = [];
-        if (canEditData()) {
+        if (canEditProjectRecord(item)) {
           if (!item.probeError) {
             resultActions.push(`<button class="secondary" data-action="view-ai-report" data-id="${item.id}" type="button">查看报告</button>`);
           }
-          resultActions.push(`<button class="secondary" data-action="delete-ai-result" data-id="${item.id}" type="button">删除</button>`);
+          if (canMutateOwnedRecord(item, 'createdBy')) {
+            resultActions.push(`<button class="secondary" data-action="delete-ai-result" data-id="${item.id}" type="button">删除</button>`);
+          }
         }
         const abnormalText = (item.abnormalItems || []).map(a => typeof a === 'object' ? `${esc(a.label)}: ${esc(a.description || a.value || '')}` : esc(a)).join('<br />') || '-';
         return `<tr><td>${esc(state.aiInspectionTargets.find(target => target.id === item.targetId)?.name || '-')}</td><td>${esc(item.score)}</td><td>${esc(item.level)}</td><td>${esc(item.summary || '-')}</td><td>${esc(item.risk || '-')}</td><td>${esc(item.suggestion || '-')}</td><td>${abnormalText}</td><td>${esc(item.createdAt || '-')}</td><td><div class="toolbar">${resultActions.length ? resultActions.join('') : '-'}</div></td></tr>`;
@@ -7884,7 +7911,7 @@
       document.getElementById('aiInspectionReportTable').innerHTML = reportRows.map(item => {
         const task = state.aiInspectionTasks.find(entry => entry.id === item.taskId);
         const target = state.aiInspectionTargets.find(entry => entry.id === item.targetId);
-        return `<tr><td>${esc(target?.name || '-')}</td><td>${esc(task?.title || '-')}</td><td>${esc(task?.executedAt || item.createdAt || '-')}</td><td>${esc(item.level)}</td><td>${esc(item.score)}</td><td>${esc(item.createdAt || '-')}</td><td><button class="secondary" onclick="downloadReport('/api/reports/ai-inspection/results/${item.id}/html','${esc(item.id)}_report.html')">下载HTML报告</button> <button class="secondary" onclick="downloadReport('/api/reports/ai-inspection/results/${item.id}/pptx','${esc(item.id)}_report.pptx')">下载PPT报告</button>${canEditData() ? ` <button class="secondary" data-action="delete-ai-result" data-id="${item.id}" type="button">删除</button>` : ''}</td></tr>`;
+        return `<tr><td>${esc(target?.name || '-')}</td><td>${esc(task?.title || '-')}</td><td>${esc(task?.executedAt || item.createdAt || '-')}</td><td>${esc(item.level)}</td><td>${esc(item.score)}</td><td>${esc(item.createdAt || '-')}</td><td><button class="secondary" onclick="downloadReport('/api/reports/ai-inspection/results/${item.id}/html','${esc(item.id)}_report.html')">下载HTML报告</button> <button class="secondary" onclick="downloadReport('/api/reports/ai-inspection/results/${item.id}/pptx','${esc(item.id)}_report.pptx')">下载PPT报告</button>${canMutateOwnedRecord(item, 'createdBy') ? ` <button class="secondary" data-action="delete-ai-result" data-id="${item.id}" type="button">删除</button>` : ''}</td></tr>`;
       }).join('') || '<tr><td colspan="7">暂无可导出的巡检报告</td></tr>';
       document.getElementById('aiInspectionReportPageInfo').textContent = `第 ${state.aiInspectionReportPage} / ${reportTotalPages} 页`;
       document.getElementById('aiInspectionReportPrevBtn').disabled = state.aiInspectionReportPage <= 1;
@@ -7899,9 +7926,15 @@
       const backupPlanRows = backupPlanRowsAll.slice(backupPlanStart, backupPlanStart + backupPlanPageSize);
       document.getElementById('configBackupPlanTable').innerHTML = backupPlanRows.map(item => {
         const target = state.aiInspectionTargets.find(entry => entry.id === item.targetId);
-        const actions = canEditData()
-          ? `<button class="secondary" data-action="execute-config-backup" data-id="${item.id}" type="button">立即备份</button>${item.status === '已停用' ? `<button class="secondary" data-action="resume-config-backup" data-id="${item.id}" type="button">启用</button>` : `<button class="secondary" data-action="suspend-config-backup" data-id="${item.id}" type="button">停用</button>`}<button class="secondary" data-action="delete-config-backup" data-id="${item.id}" type="button">删除</button>`
-          : '-';
+        const planActions = [];
+        if (canEditProjectRecord(item)) {
+          planActions.push(`<button class="secondary" data-action="execute-config-backup" data-id="${item.id}" type="button">立即备份</button>`);
+        }
+        if (canMutateOwnedRecord(item, 'createdBy')) {
+          planActions.push(item.status === '已停用' ? `<button class="secondary" data-action="resume-config-backup" data-id="${item.id}" type="button">启用</button>` : `<button class="secondary" data-action="suspend-config-backup" data-id="${item.id}" type="button">停用</button>`);
+          planActions.push(`<button class="secondary" data-action="delete-config-backup" data-id="${item.id}" type="button">删除</button>`);
+        }
+        const actions = planActions.length ? planActions.join('') : '-';
         return `<tr><td>${esc(item.name || '-')}</td><td>${esc(target?.name || '-')}</td><td>${esc(cycleLabels[item.cycle] || item.cycle || '-')}</td><td>${esc(item.executedAt || '-')}</td><td>${esc(item.status || '-')}</td><td>${esc(item.lastStatus || '-')}</td><td><div class="toolbar">${actions}</div></td></tr>`;
       }).join('') || '<tr><td colspan="7">暂无配置备份计划</td></tr>';
       document.getElementById('configBackupPlanPageInfo').textContent = `第 ${state.configBackupPlanPage} / ${backupPlanTotalPages} 页`;
@@ -7919,9 +7952,9 @@
         const asset = state.assets.find(entry => entry.id === item.assetId);
         const isSelected = state.configBackupDiffBaseId === item.id;
         const actions = [
-          canEditData() && item.status === '成功' ? `<button class="secondary" data-action="download-config-backup-record" data-id="${item.id}" data-filename="${esc(item.filename || 'config-backup.txt')}" type="button">下载</button>` : '',
-          canEditData() && item.status === '成功' ? `<button class="secondary" data-action="diff-config-backup-record" data-id="${item.id}" type="button" style="${isSelected ? 'background:#dbeafe;color:#1d4ed8;border-color:#93c5fd;' : ''}">${isSelected ? '对比 (已选A)' : '对比'}</button>` : '',
-          canEditData() ? `<button class="secondary" data-action="delete-config-backup-record" data-id="${item.id}" type="button">删除</button>` : ''
+          canEditProjectRecord(item) && item.status === '成功' ? `<button class="secondary" data-action="download-config-backup-record" data-id="${item.id}" data-filename="${esc(item.filename || 'config-backup.txt')}" type="button">下载</button>` : '',
+          canEditProjectRecord(item) && item.status === '成功' ? `<button class="secondary" data-action="diff-config-backup-record" data-id="${item.id}" type="button" style="${isSelected ? 'background:#dbeafe;color:#1d4ed8;border-color:#93c5fd;' : ''}">${isSelected ? '对比 (已选A)' : '对比'}</button>` : '',
+          canMutateOwnedRecord(item, 'createdBy') ? `<button class="secondary" data-action="delete-config-backup-record" data-id="${item.id}" type="button">删除</button>` : ''
         ].filter(Boolean).join(' ') || '-';
         return `<tr><td>${esc(target?.name || '-')}</td><td>${esc(asset?.name || '-')}</td><td>${esc(item.filename || '-')}</td><td>${esc(formatBackupSize(item.size))}</td><td>${esc(item.status || '-')}</td><td>${esc(item.message || '-')}</td><td>${esc(item.createdAt || '-')}</td><td><div class="toolbar">${actions}</div></td></tr>`;
       }).join('') || '<tr><td colspan="8">暂无配置备份记录</td></tr>';
