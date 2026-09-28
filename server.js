@@ -1148,6 +1148,41 @@ function pruneArchiveFiles(dirPath, retentionDays) {
   }
 }
 
+// 审计归档查询：仅允许读取归档目录下的 .jsonl 文件，避免路径穿越访问任意文件。
+function listAuditArchiveFiles() {
+  if (!fs.existsSync(auditArchiveDir)) return [];
+  return fs.readdirSync(auditArchiveDir)
+    .filter(name => name.endsWith('.jsonl'))
+    .map(name => {
+      const stat = fs.statSync(path.join(auditArchiveDir, name));
+      return { name, size: stat.size, modifiedAt: new Date(stat.mtimeMs).toISOString() };
+    })
+    .sort((a, b) => b.name.localeCompare(a.name));
+}
+
+const auditArchiveMaxReadBytes = 64 * 1024 * 1024;
+
+function resolveAuditArchiveFile(name) {
+  const requested = String(name || '').trim();
+  const base = path.basename(requested);
+  if (!base || base !== requested || !base.endsWith('.jsonl')) return '';
+  const filePath = path.join(auditArchiveDir, base);
+  if (!fs.existsSync(filePath) || !fs.statSync(filePath).isFile()) return '';
+  return filePath;
+}
+
+function readAuditArchiveEntries(filePath) {
+  const entries = [];
+  for (const line of fs.readFileSync(filePath, 'utf8').split('\n')) {
+    const trimmed = line.trim();
+    if (!trimmed) continue;
+    try {
+      entries.push(JSON.parse(trimmed));
+    } catch (_) {}
+  }
+  return entries;
+}
+
 function cleanupLoginAttemptStoreFromDb(db) {
   const store = getLoginRateLimitStateStore(db);
   const { windowMs, lockMs } = getLoginRateLimitConfig(db);
@@ -6446,6 +6481,10 @@ function canSubmitWorkReport(report) {
   return report.status === 'draft' || report.status === 'returned';
 }
 
+function reportTypeLabel(reportType) {
+  return reportType === 'weekly' ? '周报' : reportType === 'monthly' ? '月报' : '日报';
+}
+
 function canAccessWorkReport(user, report) {
   if (user.role === 'admin') return true;
   if (user.role === 'customer') {
@@ -10476,6 +10515,10 @@ const requestHandler = async (req, res) => {
       if (index === -1) return json(res, 404, { message: '变更记录不存在' });
       const target = db.changeRecords[index];
       if (!canDeleteOwnedRecord(user, target, target.createdBy || '')) return json(res, 403, { message: '仅支持删除自己创建的变更记录' });
+      // 变更记录进入审批流转后仅管理员可删除，创建者仅能删除尚未进入审批或已被驳回的记录。
+      if (user.role !== 'admin' && !['待运维审批', '已驳回'].includes(target.status)) {
+        return json(res, 403, { message: '该变更记录已进入审批流程，仅管理员可删除' });
+      }
       db.changeRecords.splice(index, 1);
       if (target.approvalId) {
         try {
@@ -11454,6 +11497,38 @@ const requestHandler = async (req, res) => {
       return json(res, 200, paginateResult(sorted, query));
     }
 
+    if (req.method === 'GET' && pathname === '/api/audit-logs/archive') {
+      const user = requireAuditReader(req, res, db);
+      if (!user) return;
+      return json(res, 200, { data: listAuditArchiveFiles() });
+    }
+
+    if (req.method === 'GET' && pathname === '/api/audit-logs/archive/entries') {
+      const user = requireAuditReader(req, res, db);
+      if (!user) return;
+      const filePath = resolveAuditArchiveFile(reqUrl.searchParams.get('file') || '');
+      if (!filePath) return json(res, 400, { message: '无效的归档文件' });
+      if (fs.statSync(filePath).size > auditArchiveMaxReadBytes) return json(res, 413, { message: '归档文件过大，无法在线查询' });
+      let entries = readAuditArchiveEntries(filePath);
+      // 非管理员仅能查看本项目或无项目归属的历史审计记录，与在线审计日志接口保持一致。
+      if (user.role !== 'admin') {
+        entries = entries.filter(item => !item.projectId || item.projectId === user.projectId);
+      }
+      const action = reqUrl.searchParams.get('action') || '';
+      if (action) entries = entries.filter(item => item.action === action);
+      const targetType = reqUrl.searchParams.get('targetType') || '';
+      if (targetType) entries = entries.filter(item => item.targetType === targetType);
+      const keyword = (reqUrl.searchParams.get('search') || '').trim().toLowerCase();
+      if (keyword) {
+        entries = entries.filter(item => ['operatorName', 'action', 'targetType', 'targetId', 'detail']
+          .some(key => String(item[key] || '').toLowerCase().includes(keyword)));
+      }
+      const query = Object.fromEntries(reqUrl.searchParams);
+      if (!query.sortDirection) query.sortDirection = 'desc';
+      const sorted = parseSortQuery(query, entries, 'createdAt');
+      return json(res, 200, paginateResult(sorted, query));
+    }
+
     if (req.method === 'GET' && pathname === '/api/work-reports') {
       const user = requireAuth(req, res, db);
       if (!user) return;
@@ -11690,6 +11765,8 @@ const requestHandler = async (req, res) => {
       target.lockedAt = '';
       target.updatedAt = now();
       appendAuditLog(db, user, 'submit', 'workReport', target.id, '提交工作汇报', target.projectId);
+      const submitReporter = (db.users || []).find(item => item.id === target.userId);
+      createNotification(db, target.projectId, '工作汇报待审核', `${submitReporter ? submitReporter.name : '成员'} 已提交${reportTypeLabel(target.reportType)}，请及时审核`, 'info', 'work-report', 'workReport', target.id);
       await writeDb(db);
       return json(res, 200, { message: '工作汇报已提交', data: buildWorkReportResponse(db, target) });
     }
@@ -11722,6 +11799,12 @@ const requestHandler = async (req, res) => {
         target.lockedAt = '';
       }
       appendAuditLog(db, user, action, 'workReport', target.id, `工作汇报${action === 'approved' ? '已确认' : action === 'returned' ? '已退回' : '已锁定'}`, target.projectId);
+      if (action === 'approved' || action === 'returned') {
+        const notifyContent = action === 'approved'
+          ? `您的${reportTypeLabel(target.reportType)}已通过审核`
+          : `您的${reportTypeLabel(target.reportType)}已被退回${target.reviewComment ? `：${target.reviewComment}` : ''}`;
+        createNotification(db, target.projectId, action === 'approved' ? '工作汇报已确认' : '工作汇报已退回', notifyContent, action === 'approved' ? 'info' : 'warning', 'work-report', 'workReport', target.id);
+      }
       await writeDb(db);
       return json(res, 200, { message: action === 'approved' ? '工作汇报已确认' : action === 'returned' ? '工作汇报已退回' : '工作汇报已锁定', data: buildWorkReportResponse(db, target) });
     }

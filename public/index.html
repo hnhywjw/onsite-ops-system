@@ -3438,12 +3438,27 @@
               <option value="system">系统</option>
             </select>
             <button class="secondary" id="auditLogExportCsv" type="button">导出CSV</button>
+            <button class="secondary" id="auditArchiveToggle" type="button">归档查询</button>
           </div>
           <div class="table-wrap"><table><thead><tr><th>时间</th><th>操作人</th><th>动作</th><th>对象</th><th>详情</th></tr></thead><tbody id="systemAuditLogTable"></tbody></table></div>
           <div class="pagination-bar">
             <button class="secondary" id="systemAuditPrevBtn" type="button">上一页</button>
             <span id="systemAuditPageInfo">第 1 / 1 页</span>
             <button class="secondary" id="systemAuditNextBtn" type="button">下一页</button>
+          </div>
+          <div id="auditArchivePanel" class="hidden" style="margin-top:16px;border-top:1px solid #e5e7eb;padding-top:12px;">
+            <h4 style="margin:0 0 8px;">历史归档查询</h4>
+            <div class="toolbar audit-log-toolbar" style="margin-bottom:12px;flex-wrap:wrap;">
+              <select id="auditArchiveFileSelect"></select>
+              <input id="auditArchiveSearch" type="text" placeholder="搜索归档日志..." />
+              <button class="secondary" id="auditArchiveLoadBtn" type="button">查询归档</button>
+            </div>
+            <div class="table-wrap"><table><thead><tr><th>时间</th><th>操作人</th><th>动作</th><th>对象</th><th>详情</th></tr></thead><tbody id="auditArchiveTable"></tbody></table></div>
+            <div class="pagination-bar">
+              <button class="secondary" id="auditArchivePrevBtn" type="button">上一页</button>
+              <span id="auditArchivePageInfo">第 1 / 1 页</span>
+              <button class="secondary" id="auditArchiveNextBtn" type="button">下一页</button>
+            </div>
           </div>
           </div>
         </div>
@@ -3521,6 +3536,9 @@
       systemLoadTimer: null,
       idleLogoutTimer: null,
       auditLogPage: 1,
+      auditArchivePage: 1,
+      auditArchiveTotalPages: 1,
+      auditArchiveFiles: [],
       inspectionExecutionPage: 1,
       changeRecordPage: 1,
       logPage: 1,
@@ -8167,6 +8185,65 @@
       document.getElementById('systemAuditNextBtn').disabled = state.auditLogPage >= totalPages;
     }
 
+    function renderAuditArchiveRows(rows) {
+      document.getElementById('auditArchiveTable').innerHTML = rows.map(item => `<tr><td>${esc(item.createdAt)}</td><td>${esc(item.operatorName || '-')}</td><td>${esc(item.action)}</td><td>${esc(item.targetType)}</td><td>${esc(item.detail || '-')}</td></tr>`).join('') || '<tr><td colspan="5">暂无匹配记录</td></tr>';
+    }
+
+    async function loadAuditArchiveEntries(page = 1) {
+      const file = document.getElementById('auditArchiveFileSelect').value;
+      if (!file) {
+        renderAuditArchiveRows([]);
+        document.getElementById('auditArchivePageInfo').textContent = '第 1 / 1 页';
+        document.getElementById('auditArchivePrevBtn').disabled = true;
+        document.getElementById('auditArchiveNextBtn').disabled = true;
+        return;
+      }
+      document.getElementById('auditArchiveTable').innerHTML = '<tr><td colspan="5">加载中...</td></tr>';
+      try {
+        const result = await api(withQuery('/api/audit-logs/archive/entries', {
+          file,
+          page: String(Math.max(1, page)),
+          pageSize: '15',
+          search: document.getElementById('auditArchiveSearch').value.trim(),
+          action: document.getElementById('auditLogFilterAction').value,
+          targetType: document.getElementById('auditLogFilterTarget').value
+        }));
+        state.auditArchivePage = Number(result?.page || page);
+        state.auditArchiveTotalPages = Math.max(1, Number(result?.totalPages || 1));
+        renderAuditArchiveRows(Array.isArray(result?.data) ? result.data : []);
+        document.getElementById('auditArchivePageInfo').textContent = `第 ${state.auditArchivePage} / ${state.auditArchiveTotalPages} 页`;
+        document.getElementById('auditArchivePrevBtn').disabled = state.auditArchivePage <= 1;
+        document.getElementById('auditArchiveNextBtn').disabled = state.auditArchivePage >= state.auditArchiveTotalPages;
+      } catch (error) {
+        document.getElementById('auditArchiveTable').innerHTML = `<tr><td colspan="5">${esc(error.message || '归档查询失败')}</td></tr>`;
+      }
+    }
+
+    async function loadAuditArchiveFiles() {
+      const select = document.getElementById('auditArchiveFileSelect');
+      select.innerHTML = '<option value="">加载中...</option>';
+      try {
+        const result = await api('/api/audit-logs/archive');
+        const files = Array.isArray(result?.data) ? result.data : [];
+        state.auditArchiveFiles = files;
+        select.innerHTML = files.length
+          ? files.map(file => `<option value="${esc(file.name)}">${esc(file.name)}（${(Number(file.size || 0) / 1024).toFixed(1)} KB）</option>`).join('')
+          : '<option value="">暂无归档文件</option>';
+        await loadAuditArchiveEntries(1);
+      } catch (error) {
+        select.innerHTML = '<option value="">加载失败</option>';
+        document.getElementById('auditArchiveTable').innerHTML = `<tr><td colspan="5">${esc(error.message || '加载归档列表失败')}</td></tr>`;
+      }
+    }
+
+    async function toggleAuditArchivePanel() {
+      const panel = document.getElementById('auditArchivePanel');
+      const willShow = panel.classList.contains('hidden');
+      panel.classList.toggle('hidden', !willShow);
+      document.getElementById('auditArchiveToggle').textContent = willShow ? '收起归档' : '归档查询';
+      if (willShow) await loadAuditArchiveFiles();
+    }
+
 
     function resetProjectForm() {
       const form = document.getElementById('projectForm');
@@ -11955,6 +12032,24 @@
       a.click();
       URL.revokeObjectURL(url);
     });
+    document.getElementById('auditArchiveToggle').addEventListener('click', () => {
+      toggleAuditArchivePanel();
+    });
+    document.getElementById('auditArchiveLoadBtn').addEventListener('click', () => {
+      loadAuditArchiveEntries(1);
+    });
+    document.getElementById('auditArchiveFileSelect').addEventListener('change', () => {
+      loadAuditArchiveEntries(1);
+    });
+    document.getElementById('auditArchiveSearch').addEventListener('input', () => {
+      loadAuditArchiveEntries(1);
+    });
+    document.getElementById('auditArchivePrevBtn').addEventListener('click', () => {
+      loadAuditArchiveEntries(Math.max(1, (state.auditArchivePage || 1) - 1));
+    });
+    document.getElementById('auditArchiveNextBtn').addEventListener('click', () => {
+      loadAuditArchiveEntries((state.auditArchivePage || 1) + 1);
+    });
 
     document.getElementById('sparePartTable').addEventListener('click', async event => {
       const button = event.target.closest('button[data-action]');
@@ -12235,16 +12330,33 @@
     document.getElementById('assetBatchDeleteBtn').addEventListener('click', async () => {
       const ids = state.selectedAssetIds || [];
       if (!ids.length) { showToast('请先勾选要删除的资产'); return; }
-      if (!await showConfirm(`确认删除选中的 ${ids.length} 条资产吗？`)) return;
+      const assetById = new Map((state.assets || []).map(item => [item.id, item]));
+      // 批量删除仅作用于本人（或管理员）可删的资产，其余勾选项跳过并提示。
+      const deletableIds = ids.filter(id => canMutateOwnedRecord(assetById.get(id), 'createdBy'));
+      const skippedCount = ids.length - deletableIds.length;
+      if (!deletableIds.length) {
+        setMessage('assetMessage', `勾选的 ${ids.length} 条资产均非本人创建，无权批量删除`);
+        return;
+      }
+      const confirmText = skippedCount
+        ? `确认删除本人创建并可删除的 ${deletableIds.length} 条资产吗？另有 ${skippedCount} 条非本人创建的资产将被跳过。`
+        : `确认删除选中的 ${deletableIds.length} 条资产吗？`;
+      if (!await showConfirm(confirmText)) return;
       let count = 0;
-      for (const id of ids) {
+      let failed = 0;
+      for (const id of deletableIds) {
         try {
           await api(`/api/assets/${id}`, { method: 'DELETE' });
           count++;
-        } catch (e) {}
+        } catch (e) {
+          failed++;
+        }
       }
       state.selectedAssetIds = [];
-      setMessage('assetMessage', `已删除 ${count} 条资产`);
+      const parts = [`已删除 ${count} 条资产`];
+      if (skippedCount) parts.push(`跳过 ${skippedCount} 条非本人创建的资产`);
+      if (failed) parts.push(`${failed} 条删除失败`);
+      setMessage('assetMessage', parts.join('，'));
       await loadBaseData();
       switchSectionSubtab('assets', 'list');
     });
