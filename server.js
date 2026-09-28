@@ -3508,7 +3508,8 @@ function sanitizeImportedData(db) {
   clearRef(db.sparePartMovements, ['projectId'], projectIds);
   clearRef(db.sparePartMovements, ['assetId'], assetIds);
   clearRef(db.sparePartMovements, ['operatorId'], userIds);
-  coerceEnum(db.sparePartMovements, 'type', ['inbound', 'outbound'], 'outbound');
+  // 'adjust' 是盘点调整流水，响应组装与前端均按独立类型渲染，导入清洗时不能回落为 'outbound'，否则流水语义被篡改。
+  coerceEnum(db.sparePartMovements, 'type', ['inbound', 'outbound', 'adjust'], 'outbound');
 
   clearRef(db.changeRecords, ['projectId'], projectIds);
   clearRef(db.changeRecords, ['assetId'], assetIds);
