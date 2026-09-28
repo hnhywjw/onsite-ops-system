@@ -5439,7 +5439,8 @@ async function executeAiInspectionTask(db, task, options = {}) {
     };
     db.aiInspectionResults = db.aiInspectionResults || [];
     db.aiInspectionResults.push(result);
-    task.status = '已完成';
+    // 周期任务执行后必须回到「待执行」，否则调度器（跳过「已完成」）会永久不再执行该周期任务。
+    task.status = task.cycle ? '待执行' : '已完成';
     task.completedAt = result.createdAt;
     if (task.cycle) {
       advanceAiTaskNextExecution(task);
