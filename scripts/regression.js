@@ -315,31 +315,48 @@ async function main() {
   assert(Number(admin.data.systemConfig?.webIdleLogoutMinutes) >= 1, '登录响应未返回控制台超时配置');
   let cookie = admin.cookie;
   assert(String(admin.headers['set-cookie'] || '').includes('SameSite=Lax'), '登录 Cookie 应为 SameSite=Lax');
+  const forgotMissingCaptcha = await request('/api/captcha');
   const forgotMissing = await request('/api/forgot-password/reset', {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ username: 'no-such-user', securityAnswer: 'x', newPassword: 'Newpass1!' })
+    body: JSON.stringify({ username: 'no-such-user', securityAnswer: 'x', newPassword: 'Newpass1!', captchaToken: forgotMissingCaptcha.data.token, captcha: decodeCaptchaFromSvg(forgotMissingCaptcha.data) })
   });
+  const forgotWrongCaptcha = await request('/api/captcha');
   const forgotWrong = await request('/api/forgot-password/reset', {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ username: 'admin', securityAnswer: 'wrong-answer', newPassword: 'Newpass1!' })
+    body: JSON.stringify({ username: 'admin', securityAnswer: 'wrong-answer', newPassword: 'Newpass1!', captchaToken: forgotWrongCaptcha.data.token, captcha: decodeCaptchaFromSvg(forgotWrongCaptcha.data) })
   });
   assert(forgotMissing.status === 200 && forgotWrong.status === 200, '忘记密码失败应返回 200');
   assert(forgotMissing.data.reset !== true && forgotWrong.data.reset !== true, '忘记密码失败不应标记 reset');
   assert(forgotMissing.data.message === forgotWrong.data.message, '忘记密码失败响应应一致');
+  const forgotResetNoCaptcha = await request('/api/forgot-password/reset', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ username: 'admin', securityAnswer: 'wrong-answer', newPassword: 'Newpass1!' })
+  });
+  assert(forgotResetNoCaptcha.status === 401, '忘记密码重置缺少验证码应被拒绝');
+  const forgotVerifyMissingCaptcha = await request('/api/captcha');
   const forgotVerifyMissing = await request('/api/forgot-password/verify', {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ username: 'no-such-user' })
+    body: JSON.stringify({ username: 'no-such-user', captchaToken: forgotVerifyMissingCaptcha.data.token, captcha: decodeCaptchaFromSvg(forgotVerifyMissingCaptcha.data) })
   });
+  const forgotVerifyExistingCaptcha = await request('/api/captcha');
   const forgotVerifyExisting = await request('/api/forgot-password/verify', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ username: 'admin', captchaToken: forgotVerifyExistingCaptcha.data.token, captcha: decodeCaptchaFromSvg(forgotVerifyExistingCaptcha.data) })
+  });
+  assert(forgotVerifyMissing.status === 200 && forgotVerifyExisting.status === 200, '忘记密码验证应返回 200');
+  assert(Boolean(forgotVerifyMissing.data.ticket) && Boolean(forgotVerifyExisting.data.ticket), '忘记密码验证应签发票据');
+  assert(forgotVerifyMissing.data.question === forgotVerifyExisting.data.question, '忘记密码验证响应应一致');
+  const forgotVerifyNoCaptcha = await request('/api/forgot-password/verify', {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({ username: 'admin' })
   });
-  assert(forgotVerifyMissing.status === 200 && forgotVerifyExisting.status === 200, '忘记密码验证应返回 200');
-  assert(forgotVerifyMissing.data.question === forgotVerifyExisting.data.question, '忘记密码验证响应应一致');
+  assert(forgotVerifyNoCaptcha.status === 401, '忘记密码验证缺少验证码应被拒绝');
   const exported = await request('/api/system/export', {
     method: 'POST',
     headers: { cookie, 'Content-Type': 'application/json' },
@@ -1280,7 +1297,8 @@ async function main() {
   assert(deleteCascadeProject.status === 200, `带通知的项目应可删除: ${deleteCascadeProject.status} ${JSON.stringify(deleteCascadeProject.data)}`);
 
   const reminderTriggerOffset = getTimezoneOffsetForHour(String(health.data.checkedAt || ''), 12);
-  const reminderTriggerSettings = await updateSystemSettings(cookie, { timezoneOffset: reminderTriggerOffset, dailyReportReminderHour: 11 });
+  // 周报提醒阈值放宽到 7 天，保证周一（距周日 6 天）运行时仍能覆盖周报截止提醒分支。
+  const reminderTriggerSettings = await updateSystemSettings(cookie, { timezoneOffset: reminderTriggerOffset, dailyReportReminderHour: 11, weeklyReportReminderDays: 7 });
   assert(reminderTriggerSettings.status === 200, '保存提醒触发时区设置失败');
 
   const serverNow = String(health.data.checkedAt || '');

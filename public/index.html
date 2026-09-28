@@ -1157,8 +1157,8 @@
           <input name="password" id="loginPassword" type="password" placeholder="请输入密码" required />
         </div>
         <div style="display:flex; justify-content:space-between; margin-bottom:12px;">
-          <a class="forgot-link" href="#" onclick="openModal('forgotPwdModal'); return false;">忘记密码</a>
-          <a class="forgot-link" href="#" onclick="openRegisterModal(); return false;">注册账号</a>
+          <a class="forgot-link" href="#" onclick="openForgotPwdModal(); return false;">忘记密码</a>
+          <a class="forgot-link hidden" id="registerLink" href="#" onclick="openRegisterModal(); return false;">注册账号</a>
         </div>
         <div class="captcha-row" style="justify-content:flex-start;">
           <div class="input-group" style="width:114px; height:38px; margin-bottom:0; flex-shrink:0;">
@@ -1238,6 +1238,11 @@
       <div id="forgotPwdStep1">
         <label>请输入您的账号</label>
         <input id="forgotUsername" placeholder="请输入账号" />
+        <label style="margin-top:12px;">图形验证码</label>
+        <div class="captcha-row">
+          <input id="forgotCaptchaInput" placeholder="验证码" maxlength="4" autocomplete="off" style="text-transform:uppercase; letter-spacing:4px; text-align:center;" />
+          <div id="forgotCaptchaImg" role="img" aria-label="验证码" title="点击刷新">加载中</div>
+        </div>
         <div id="forgotPwdError1" class="modal-error"></div>
         <div class="btn-row">
           <button class="secondary" onclick="closeModal('forgotPwdModal')">取消</button>
@@ -1245,10 +1250,16 @@
         </div>
       </div>
       <div id="forgotPwdStep2" class="hidden">
+        <input id="forgotTicket" type="hidden" />
         <label id="forgotQuestionLabel"></label>
         <input id="forgotSecurityAnswer" placeholder="请输入答案" />
         <label style="margin-top:12px;">新密码（至少8位，须包含字母、数字和特殊字符）</label>
         <input id="forgotNewPassword" type="password" placeholder="请输入新密码" />
+        <label style="margin-top:12px;">图形验证码</label>
+        <div class="captcha-row">
+          <input id="forgotResetCaptchaInput" placeholder="验证码" maxlength="4" autocomplete="off" style="text-transform:uppercase; letter-spacing:4px; text-align:center;" />
+          <div id="forgotResetCaptchaImg" role="img" aria-label="验证码" title="点击刷新">加载中</div>
+        </div>
         <div id="forgotPwdError2" class="modal-error"></div>
         <div class="btn-row">
           <button class="secondary" onclick="closeModal('forgotPwdModal')">取消</button>
@@ -1320,6 +1331,7 @@
           角色
           <select id="edRole">
             <option value="engineer">运维人员</option>
+            <option value="auditor">审计员</option>
             <option value="customer">甲方客户</option>
             <option value="admin">管理员</option>
           </select>
@@ -1400,6 +1412,10 @@
       <label style="display:block;margin-bottom:8px;">起始U位（留空则只改机柜，保持原U位）
         <input id="cabinetLayoutBatchStart" type="number" min="1" max="48" placeholder="1-48" />
       </label>
+      <label style="display:flex;align-items:center;gap:8px;margin-bottom:8px;font-size:13px;">
+        <input id="cabinetLayoutBatchAllowOverlap" type="checkbox" style="width:auto;" />
+        <span>允许与机柜内已有设备 U 位重叠</span>
+      </label>
       <div style="max-height:220px;overflow-y:auto;border:1px solid var(--line);border-radius:8px;padding:8px;">
         <div id="cabinetLayoutBatchList"></div>
       </div>
@@ -1462,6 +1478,7 @@
         <label>监控地址/IP<input id="edAssetMonitorHost" placeholder="例：192.168.1.1" /></label>
         <label id="edAssetMonitorPortLabel" style="display:none;">端口号<input id="edAssetMonitorPort" type="number" placeholder="例：80" /></label>
         <label id="edAssetSnmpCommunityLabel" style="display:none;">SNMP 团体字<input id="edAssetSnmpCommunity" placeholder="选填，留空保持原值" /></label>
+        <label id="edAssetSnmpClearLabel" style="display:none;flex-direction:row;align-items:center;gap:8px;"><input id="edAssetSnmpClear" type="checkbox" style="width:auto;" />清除已保存的团体字</label>
         <label id="edAssetSnmpPortLabel" style="display:none;">SNMP 端口<input id="edAssetSnmpPort" type="number" placeholder="默认: 161" /></label>
       </div>
       <div id="assetEditMessage" style="margin:8px 0;font-size:13px;"></div>
@@ -2130,6 +2147,7 @@
                 <select name="role" required>
                   <option value="">请选择角色</option>
                   <option value="engineer">运维人员</option>
+                  <option value="auditor">审计员</option>
                   <option value="customer">甲方客户</option>
                   <option value="admin">管理员</option>
                 </select>
@@ -3247,6 +3265,14 @@
                 </select>
               </label>
               <label style="margin-top:14px; max-width: 320px;">
+                <span>SSO 自动通过白名单（账号/邮箱，逗号或换行分隔）</span>
+                <textarea id="ssoAutoApproveAllowlist" rows="4" placeholder="zhangsan&#10;lisi@example.com"></textarea>
+              </label>
+              <label style="margin-top:14px; max-width: 320px;">
+                <span>SSO 默认项目（白名单账号自动绑定）</span>
+                <select id="ssoDefaultProjectId"></select>
+              </label>
+              <label style="margin-top:14px; max-width: 320px;">
                 <span>管理员密码（修改登录安全设置必填）</span>
                 <input id="systemSettingsPassword" type="password" placeholder="请输入当前管理员密码" autocomplete="current-password" />
               </label>
@@ -4002,9 +4028,16 @@
       els.loginView.classList.remove('hidden');
       els.appView.classList.add('hidden');
       refreshCaptcha();
+      applyRegistrationVisibility();
       if (localStorage.getItem('rememberedUsername')) {
         document.getElementById('loginUsername').value = localStorage.getItem('rememberedUsername') || '';
       }
+    }
+
+    function applyRegistrationVisibility() {
+      const link = document.getElementById('registerLink');
+      if (!link) return;
+      link.classList.toggle('hidden', state.systemConfig?.allowRegistration !== true);
     }
 
     function showAppView() {
@@ -4796,7 +4829,7 @@
     }
 
     function roleLabel(role) {
-      return role === 'admin' ? '管理员' : role === 'customer' ? '甲方客户' : '运维人员';
+      return role === 'admin' ? '管理员' : role === 'customer' ? '甲方客户' : role === 'auditor' ? '审计员' : '运维人员';
     }
 
     function formatApprovalCategory(category) {
@@ -6351,7 +6384,16 @@
     function updateCabinetLayoutMonitorHint(monitoring) {
       const hint = document.getElementById('cabinetLayoutMonitorHint');
       if (!hint) return;
-      hint.classList.toggle('hidden', Boolean(monitoring.lastRunAt));
+      const lastRunAt = monitoring.lastRunAt;
+      if (lastRunAt) {
+        const parsed = new Date(lastRunAt);
+        hint.textContent = Number.isNaN(parsed.getTime())
+          ? `监控数据最后采集：${lastRunAt}`
+          : `监控数据最后采集：${parsed.toLocaleString()}`;
+      } else {
+        hint.textContent = '监控数据采集中，页面会自动刷新';
+      }
+      hint.classList.remove('hidden');
     }
 
     let cabinetLayoutFilterSignature = '';
@@ -6453,6 +6495,7 @@
       }).join('');
       document.getElementById('cabinetLayoutBatchCabinet').value = '';
       document.getElementById('cabinetLayoutBatchStart').value = '';
+      document.getElementById('cabinetLayoutBatchAllowOverlap').checked = false;
       msg.textContent = '';
       msg.className = 'message';
       openModal('cabinetLayoutBatchModal');
@@ -6469,6 +6512,7 @@
       if (startRaw && !/^\d+$/.test(startRaw)) return fail('起始U位须为 1-48 的整数');
       const payload = { cabinetName, updates: ids.map(id => ({ assetId: id })) };
       if (startRaw) payload.rackUnitStart = Number(startRaw);
+      if (document.getElementById('cabinetLayoutBatchAllowOverlap').checked) payload.allowOverlap = true;
       msg.textContent = '提交中…';
       msg.className = 'message';
       try {
@@ -7964,6 +8008,16 @@
       if (projectInactiveDaysInput) projectInactiveDaysInput.value = String(Number(state.systemConfig?.projectInactiveDays ?? 7));
       const monitorTargetAllowlistInput = document.getElementById('monitorTargetAllowlist');
       if (monitorTargetAllowlistInput) monitorTargetAllowlistInput.value = String(state.systemConfig?.monitorTargetAllowlist || '');
+      const ssoAllowlistInput = document.getElementById('ssoAutoApproveAllowlist');
+      if (ssoAllowlistInput) ssoAllowlistInput.value = String(state.systemConfig?.ssoAutoApproveAllowlist || '');
+      const ssoDefaultProjectSelect = document.getElementById('ssoDefaultProjectId');
+      if (ssoDefaultProjectSelect) {
+        const currentProjectId = String(state.systemConfig?.ssoDefaultProjectId || '');
+        ssoDefaultProjectSelect.innerHTML = '<option value="">未设置</option>' + (state.projects || [])
+          .map(project => `<option value="${project.id}">${esc(formatProjectDisplay(project))}</option>`)
+          .join('');
+        ssoDefaultProjectSelect.value = currentProjectId;
+      }
       const tzSelect = document.getElementById('systemTimezone');
       if (tzSelect) {
         const tzOffset = Number(state.systemConfig?.timezoneOffset);
@@ -8349,6 +8403,7 @@
       const snmpInput = document.getElementById('edAssetSnmpCommunity');
       snmpInput.value = '';
       snmpInput.placeholder = asset.hasSnmpCommunity ? '已配置，留空保持原值' : '选填';
+      document.getElementById('edAssetSnmpClear').checked = false;
       document.getElementById('edAssetSnmpPort').value = asset.snmpPort || '161';
       toggleEdMonitorPort();
       fillSelect('edAssetProjectId', state.projects);
@@ -9379,12 +9434,12 @@
       try {
         if (!skipSession) {
           const session = await api('/api/session');
+          state.systemConfig = session.systemConfig || state.systemConfig;
           if (!session.user) {
             showLoginView();
             return;
           }
           state.user = session.user;
-          state.systemConfig = session.systemConfig || state.systemConfig;
         }
         renderNav();
         showAppView();
@@ -9583,32 +9638,70 @@
       });
     }
 
+    async function refreshForgotCaptcha() {
+      try {
+        const result = await api('/api/captcha');
+        state.forgotCaptchaToken = result.token || '';
+        state.forgotCaptchaCsrf = result.csrfToken || '';
+        paintCaptcha(document.getElementById('forgotCaptchaImg'), result.svg);
+        document.getElementById('forgotCaptchaInput').value = '';
+      } catch (_) {}
+    }
+
+    async function refreshForgotResetCaptcha() {
+      try {
+        const result = await api('/api/captcha');
+        state.forgotResetCaptchaToken = result.token || '';
+        state.forgotResetCaptchaCsrf = result.csrfToken || '';
+        paintCaptcha(document.getElementById('forgotResetCaptchaImg'), result.svg);
+        document.getElementById('forgotResetCaptchaInput').value = '';
+      } catch (_) {}
+    }
+
+    function openForgotPwdModal() {
+      resetForgotPwdModal();
+      openModal('forgotPwdModal');
+      refreshForgotCaptcha();
+    }
+
+    document.getElementById('forgotCaptchaImg').addEventListener('click', refreshForgotCaptcha);
+    document.getElementById('forgotResetCaptchaImg').addEventListener('click', refreshForgotResetCaptcha);
+
     async function forgotPwdVerify() {
       const username = document.getElementById('forgotUsername').value.trim();
+      const captcha = document.getElementById('forgotCaptchaInput').value.trim();
       if (!username) { document.getElementById('forgotPwdError1').textContent = '请输入账号'; return; }
+      if (!captcha) { document.getElementById('forgotPwdError1').textContent = '请输入图形验证码'; return; }
       document.getElementById('forgotPwdError1').textContent = '';
       try {
-        const result = await api('/api/forgot-password/verify', { method: 'POST', body: JSON.stringify({ username }) });
+        const result = await api('/api/forgot-password/verify', { method: 'POST', body: JSON.stringify({ username, captcha, captchaToken: state.forgotCaptchaToken }) });
+        document.getElementById('forgotTicket').value = result.ticket || '';
         document.getElementById('forgotQuestionLabel').textContent = result.question || '请输入您设置的安全问题答案';
         document.getElementById('forgotPwdStep1').classList.add('hidden');
         document.getElementById('forgotPwdStep2').classList.remove('hidden');
+        refreshForgotResetCaptcha();
       } catch (error) {
         document.getElementById('forgotPwdError1').textContent = error.message;
+        refreshForgotCaptcha();
       }
     }
 
     async function forgotPwdReset() {
       const username = document.getElementById('forgotUsername').value.trim();
+      const ticket = document.getElementById('forgotTicket').value;
+      const captcha = document.getElementById('forgotResetCaptchaInput').value.trim();
       const securityAnswer = document.getElementById('forgotSecurityAnswer').value;
       const newPassword = document.getElementById('forgotNewPassword').value;
       document.getElementById('forgotPwdError2').textContent = '';
       if (!securityAnswer) { document.getElementById('forgotPwdError2').textContent = '请输入安全问题答案'; return; }
       if (!newPassword) { document.getElementById('forgotPwdError2').textContent = '请输入新密码'; return; }
       if (newPassword.length < 8 || !/[a-zA-Z]/.test(newPassword) || !/\d/.test(newPassword) || !/[^a-zA-Z0-9]/.test(newPassword)) { document.getElementById('forgotPwdError2').textContent = '密码至少8位，需包含字母、数字和特殊字符'; return; }
+      if (!captcha) { document.getElementById('forgotPwdError2').textContent = '请输入图形验证码'; return; }
       try {
-        const result = await api('/api/forgot-password/reset', { method: 'POST', body: JSON.stringify({ username, securityAnswer, newPassword }) });
+        const result = await api('/api/forgot-password/reset', { method: 'POST', body: JSON.stringify({ username, ticket, securityAnswer, newPassword, captcha, captchaToken: state.forgotResetCaptchaToken }) });
         if (!result.reset) {
           document.getElementById('forgotPwdError2').textContent = result.message || '如验证信息正确，密码将被重置';
+          refreshForgotResetCaptcha();
           return;
         }
         closeModal('forgotPwdModal');
@@ -9616,13 +9709,17 @@
         resetForgotPwdModal();
       } catch (error) {
         document.getElementById('forgotPwdError2').textContent = error.message;
+        refreshForgotResetCaptcha();
       }
     }
 
     function resetForgotPwdModal() {
       document.getElementById('forgotUsername').value = '';
+      document.getElementById('forgotCaptchaInput').value = '';
+      document.getElementById('forgotTicket').value = '';
       document.getElementById('forgotSecurityAnswer').value = '';
       document.getElementById('forgotNewPassword').value = '';
+      document.getElementById('forgotResetCaptchaInput').value = '';
       document.getElementById('forgotPwdError1').textContent = '';
       document.getElementById('forgotPwdError2').textContent = '';
       document.getElementById('forgotPwdStep1').classList.remove('hidden');
@@ -10534,6 +10631,7 @@
         monitorHost: document.getElementById('edAssetMonitorHost').value.trim(),
         monitorPort: document.getElementById('edAssetMonitorPort').value.trim(),
         snmpCommunity: document.getElementById('edAssetSnmpCommunity').value.trim(),
+        clearSnmpCommunity: document.getElementById('edAssetSnmpClear').checked,
         snmpPort: document.getElementById('edAssetSnmpPort').value.trim()
       };
       if (!data.name) { document.getElementById('assetEditMessage').textContent = '资产名称不能为空'; document.getElementById('assetEditMessage').className = 'message error'; return; }
@@ -11570,6 +11668,8 @@
         settingsPasswordInput?.focus();
         return;
       }
+      const ssoAllowlistInput = document.getElementById('ssoAutoApproveAllowlist');
+      const ssoDefaultProjectSelect = document.getElementById('ssoDefaultProjectId');
       const button = event.currentTarget;
       const originalText = button.textContent;
       button.disabled = true;
@@ -11584,6 +11684,8 @@
             loginRateLimitWindowMinutes: rateWindowValue,
             loginRateLimitLockMinutes: rateLockValue,
             timezoneOffset: tzValue,
+            ssoAutoApproveAllowlist: ssoAllowlistInput ? ssoAllowlistInput.value : '',
+            ssoDefaultProjectId: ssoDefaultProjectSelect ? ssoDefaultProjectSelect.value : '',
             password: settingsPassword
           })
         });
@@ -12009,8 +12111,11 @@
         const result = await api('/api/assets/import', { method: 'POST', body: JSON.stringify({ assets: rows }) });
         let msg = `导入完成：成功 ${result.created} 条`;
         if (result.skipped) msg += `，跳过 ${result.skipped} 条`;
-        if (result.errors.length) msg += '\n' + result.errors.join('\n');
-        setMessage('assetMessage', msg, result.errors.length ? 'error' : '');
+        const errors = result.errors || [];
+        const warnings = result.warnings || [];
+        if (errors.length) msg += '\n' + errors.join('\n');
+        if (warnings.length) msg += '\n' + warnings.join('\n');
+        setMessage('assetMessage', msg, errors.length ? 'error' : (warnings.length ? 'warning' : ''));
         await loadBaseData();
         switchSectionSubtab('assets', 'list');
       } catch (err) {
@@ -12120,7 +12225,9 @@
     function toggleEdMonitorPort() {
       const type = document.getElementById('edAssetMonitorType').value;
       document.getElementById('edAssetMonitorPortLabel').style.display = type === 'tcp' ? '' : 'none';
-      document.getElementById('edAssetSnmpCommunityLabel').style.display = type === 'snmp' ? '' : 'none';
+      const showSnmp = type === 'snmp' ? '' : 'none';
+      document.getElementById('edAssetSnmpCommunityLabel').style.display = showSnmp;
+      document.getElementById('edAssetSnmpClearLabel').style.display = type === 'snmp' ? 'flex' : 'none';
       document.getElementById('edAssetSnmpPortLabel').style.display = type === 'snmp' ? '' : 'none';
     }
     document.getElementById('assetMonitorType').addEventListener('change', toggleMonitorPort);

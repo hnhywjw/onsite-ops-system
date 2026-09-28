@@ -685,6 +685,34 @@ const captchaSecret = crypto.randomBytes(32).toString('hex');
 const captchaChallenges = new Map();
 const CAPTCHA_CHALLENGE_LIMIT = 5000;
 
+// 忘记密码流程的短时票据：仅在 verify 校验通过后签发，绑定账号，防止跳过第一步直接调用 reset。
+const forgotPasswordTickets = new Map();
+const FORGOT_TICKET_TTL_MS = 300000;
+
+function createForgotPasswordTicket(username) {
+  const nowMs = Date.now();
+  for (const [key, entry] of forgotPasswordTickets) {
+    if (!entry || entry.expiresAt <= nowMs) forgotPasswordTickets.delete(key);
+  }
+  const ticket = crypto.randomBytes(24).toString('hex');
+  forgotPasswordTickets.set(ticket, {
+    usernameHash: hashCaptchaAnswer(username),
+    expiresAt: nowMs + FORGOT_TICKET_TTL_MS,
+  });
+  return ticket;
+}
+
+function consumeForgotPasswordTicket(ticket, username) {
+  const key = String(ticket || '').trim();
+  const entry = forgotPasswordTickets.get(key);
+  if (!entry) return false;
+  forgotPasswordTickets.delete(key);
+  if (entry.expiresAt <= Date.now()) return false;
+  const received = Buffer.from(hashCaptchaAnswer(username));
+  const expected = Buffer.from(entry.usernameHash);
+  return received.length === expected.length && crypto.timingSafeEqual(received, expected);
+}
+
 function hashCaptchaAnswer(answer) {
   return crypto.createHmac('sha256', captchaSecret).update(String(answer || '').trim().toUpperCase()).digest('hex');
 }
@@ -964,7 +992,9 @@ function normalizeSystemConfig(rawSystemConfig = {}) {
     dailyHighHoursThreshold: Number.isFinite(dailyHighHoursThreshold) ? Math.min(24, Math.max(0, Math.round(dailyHighHoursThreshold * 10) / 10)) : defaultDailyHighHoursThreshold,
     noLogStreakDays: Number.isFinite(noLogStreakDays) ? Math.min(30, Math.max(1, Math.round(noLogStreakDays))) : defaultNoLogStreakDays,
     projectInactiveDays: Number.isFinite(projectInactiveDays) ? Math.min(90, Math.max(1, Math.round(projectInactiveDays))) : defaultProjectInactiveDays,
-    monitorTargetAllowlist: String(rawSystemConfig.monitorTargetAllowlist || '').trim().slice(0, 4096)
+    monitorTargetAllowlist: String(rawSystemConfig.monitorTargetAllowlist || '').trim().slice(0, 4096),
+    ssoAutoApproveAllowlist: String(rawSystemConfig.ssoAutoApproveAllowlist || '').trim().slice(0, 4096),
+    ssoDefaultProjectId: String(rawSystemConfig.ssoDefaultProjectId || '').trim()
   };
 }
 
@@ -1005,6 +1035,9 @@ function normalizeRuntimeState(rawRuntimeState = {}) {
   return {
     loginRateLimits,
     oidcState,
+    monitoring: {
+      lastRunAt: String(rawRuntimeState.monitoring?.lastRunAt || '').trim()
+    },
     maintenance: {
       lastAuditArchiveDate: String(maintenance.lastAuditArchiveDate || '').trim(),
       lastBackupCleanupWeek: String(maintenance.lastBackupCleanupWeek || '').trim(),
@@ -1529,6 +1562,14 @@ function readCabinetFields(body = {}) {
 
 const ASSET_TYPE_OPTIONS = ['网络设备', '安全设备', '服务器', '存储', '监控', 'UPS配电', '空调系统', '其它'];
 const ASSET_MONITOR_TYPES = ['ping', 'tcp', 'snmp'];
+const ASSET_RELATION_TYPES = ['connected', 'depends_on', 'hosts', 'monitors', 'backup', 'powers'];
+
+// 统一文本长度上限校验：超长输入直接拒绝，避免异常大字段破坏展示与存储。
+function checkTextLength(value, max, label) {
+  if (value === undefined || value === null) return null;
+  if (String(value).length > max) return `${label}长度不能超过 ${max} 个字符`;
+  return null;
+}
 const ASSET_RESERVED_IDS = new Set(['import', 'cabinet-layout', 'topology-layout', 'topology', 'monitor-status']);
 const ASSET_IMPORT_MAX_ROWS = 500;
 
@@ -1563,7 +1604,10 @@ function readMonitorFields(body = {}, existing = null) {
   if (monitorPort && !validatePort(monitorPort)) return { error: '监控端口无效' };
   if (monitorEnabled && monitorType === 'tcp' && !validatePort(monitorPort)) return { error: 'TCP 监测必须填写有效端口' };
   let snmpCommunity = existing ? String(existing.snmpCommunity || '') : '';
-  if (body.snmpCommunity !== undefined) {
+  // 留空表示保持原值；需要清空时必须显式传 clearSnmpCommunity，避免误清已保存团体字。
+  if (body.clearSnmpCommunity === true || body.clearSnmpCommunity === 'true') {
+    snmpCommunity = '';
+  } else if (body.snmpCommunity !== undefined) {
     const nextCommunity = String(body.snmpCommunity || '').trim();
     if (nextCommunity) snmpCommunity = nextCommunity;
   }
@@ -5704,6 +5748,22 @@ function requireExistingProject(projectId, db) {
   return db.projects.find(item => item.id === projectId) || null;
 }
 
+// SSO（LDAP/OIDC）首次开通账号时的默认策略：命中白名单且默认项目有效才自动启用，否则保持待审批。
+function resolveSsoProvisioning(systemConfig, db, identities = []) {
+  const allowlist = String(systemConfig?.ssoAutoApproveAllowlist || '')
+    .split(/[\s,;]+/)
+    .map(item => item.trim().toLowerCase())
+    .filter(Boolean);
+  if (!allowlist.length) return null;
+  const candidates = identities
+    .map(item => String(item || '').trim().toLowerCase())
+    .filter(Boolean);
+  if (!candidates.some(item => allowlist.includes(item))) return null;
+  const projectId = String(systemConfig?.ssoDefaultProjectId || '').trim();
+  if (!requireExistingProject(projectId, db)) return null;
+  return { status: 'active', projectId };
+}
+
 function requireExistingUser(userId, db) {
   if (!userId) return null;
   return db.users.find(item => item.id === userId) || null;
@@ -6122,6 +6182,10 @@ function validateLogPayload(db, user, body, existingLog = null) {
   if (!result) return { error: '请选择处理结果' };
   const conclusion = normalizeLogText(body.conclusion !== undefined ? body.conclusion : (existingLog?.conclusion || ''));
   if (!conclusion) return { error: '请输入结论' };
+  const logLengthError = checkTextLength(event, 4000, '工单内容')
+    || checkTextLength(process, 4000, '处理过程')
+    || checkTextLength(conclusion, 4000, '结论');
+  if (logLengthError) return { error: logLengthError };
   if (body.durationHours === undefined && !existingLog) return { error: '请输入工单用时' };
   const durationHours = Number(body.durationHours !== undefined ? body.durationHours : (existingLog?.durationHours || 0));
   if (!Number.isFinite(durationHours) || durationHours <= 0) return { error: '工单用时必须大于 0' };
@@ -7929,7 +7993,11 @@ const requestHandler = async (req, res) => {
         return json(res, 429, { message: `尝试次数过多，请在 ${Math.max(1, Math.ceil(rateState.retryAfterMs / 60000))} 分钟后重试` }, rateLimitResponseHeaders(rateState.retryAfterMs));
       }
       recordForgotPasswordAttempt(db, rateKey);
-      return json(res, 200, { question: '请输入您设置的安全问题答案', message: '如账号存在且已设置安全问题，请继续验证' });
+      if (!verifyCaptchaToken(body.captchaToken, body.captcha)) {
+        return json(res, 401, { message: '验证码错误' });
+      }
+      const ticket = createForgotPasswordTicket(username);
+      return json(res, 200, { ticket, question: '请输入您设置的安全问题答案', message: '如账号存在且已设置安全问题，请继续验证' });
     }
 
     if (req.method === 'POST' && pathname === '/api/forgot-password/reset') {
@@ -7942,12 +8010,18 @@ const requestHandler = async (req, res) => {
         return json(res, 429, { message: `尝试次数过多，请在 ${Math.max(1, Math.ceil(rateState.retryAfterMs / 60000))} 分钟后重试` }, rateLimitResponseHeaders(rateState.retryAfterMs));
       }
       recordForgotPasswordAttempt(db, rateKey);
+      if (!verifyCaptchaToken(body.captchaToken, body.captcha)) {
+        return json(res, 401, { message: '验证码错误' });
+      }
       const user = db.users.find(item => item.username === username && item.status !== 'disabled');
       if (!user) {
         return json(res, 200, { message: '如验证信息正确，密码将被重置' });
       }
       if (!user.securityAnswerHash || !verifyPassword(body.securityAnswer, user.securityAnswerHash)) {
         return json(res, 200, { message: '如验证信息正确，密码将被重置' });
+      }
+      if (!consumeForgotPasswordTicket(body.ticket, username)) {
+        return json(res, 400, { message: '验证已过期，请重新获取验证码' });
       }
       if (!body.newPassword || String(body.newPassword).length < 8) {
         return json(res, 400, { message: '密码长度不能少于 8 位' });
@@ -7971,6 +8045,15 @@ const requestHandler = async (req, res) => {
       if (!username) {
         return json(res, 400, { message: '账号不能为空' });
       }
+      if (username.length > 64) {
+        return json(res, 400, { message: '账号长度不能超过 64 位' });
+      }
+      const registerLengthError = checkTextLength(body.name, 64, '姓名')
+        || checkTextLength(body.phone, 32, '电话')
+        || checkTextLength(body.idCard, 32, '身份证号')
+        || checkTextLength(body.email, 128, '邮箱')
+        || checkTextLength(body.wechat, 64, '微信');
+      if (registerLengthError) return json(res, 400, { message: registerLengthError });
       if (!db.systemConfig.allowRegistration) {
         return json(res, 403, { message: '管理员已关闭自主注册功能' });
       }
@@ -7983,10 +8066,8 @@ const requestHandler = async (req, res) => {
       // 无论账号是否已存在都返回相同文案，唯一性检查与写入在同一临界区内完成。
       await withDbMutationLock(async () => {
         const lockDb = await readDb();
-        if ((lockDb.users || []).some(item => item.username === username)) return;
-        const created = {
-          id: id('user'),
-          username,
+        const existing = (lockDb.users || []).find(item => item.username === username);
+        const payload = {
           passwordHash: hash(body.password),
           role: 'viewer',
           name: body.name || username,
@@ -7999,11 +8080,18 @@ const requestHandler = async (req, res) => {
           endDate: body.endDate || '',
           securityQuestion: body.securityQuestion || '',
           securityAnswerHash: body.securityAnswer ? hash(body.securityAnswer) : '',
-          status: 'pending',
-          createdAt: now()
+          status: 'pending'
         };
-        lockDb.users.push(created);
-        appendAuditLog(lockDb, created, 'create', 'user', created.id, `自注册账号 ${created.name}`);
+        if (existing) {
+          // 仅允许被驳回的账号重新提交，其余状态（待审/启用/停用）保持唯一性不变。
+          if (existing.status !== 'rejected') return;
+          Object.assign(existing, payload, { reviewedAt: '', reviewedBy: '' });
+          appendAuditLog(lockDb, existing, 'update', 'user', existing.id, `自注册账号重新提交 ${existing.name}`);
+        } else {
+          const created = Object.assign({ id: id('user'), username, createdAt: now() }, payload);
+          lockDb.users.push(created);
+          appendAuditLog(lockDb, created, 'create', 'user', created.id, `自注册账号 ${created.name}`);
+        }
         await writeDb(lockDb);
       });
       return json(res, 201, { message: '提交成功，请等待管理员审批' });
@@ -8088,6 +8176,7 @@ const requestHandler = async (req, res) => {
         const displayName = userInfo.name || preferredUsername;
         let localUser = db.users.find(item => item.username === 'oidc_' + oidcSub);
         if (!localUser) {
+          const provisioning = resolveSsoProvisioning(db.systemConfig, db, [preferredUsername, userInfo.email, oidcSub]);
           localUser = {
             id: id('user'),
             username: 'oidc_' + oidcSub,
@@ -8098,12 +8187,12 @@ const requestHandler = async (req, res) => {
             idCard: '',
             email: userInfo.email || '',
             wechat: '',
-            projectId: '',
+            projectId: provisioning?.projectId || '',
             startDate: '',
             endDate: '',
             securityQuestion: '',
             securityAnswerHash: '',
-            status: 'pending',
+            status: provisioning?.status || 'pending',
             createdAt: now()
           };
           db.users.push(localUser);
@@ -8163,6 +8252,7 @@ const requestHandler = async (req, res) => {
         let createdLocalUser = false;
         let localUser = db.users.find(item => item.username === 'ldap_' + username);
         if (!localUser) {
+          const provisioning = resolveSsoProvisioning(db.systemConfig, db, [username, ldapUser.email]);
           localUser = {
             id: id('user'),
             username: 'ldap_' + username,
@@ -8173,12 +8263,12 @@ const requestHandler = async (req, res) => {
             idCard: '',
             email: ldapUser.email || '',
             wechat: '',
-            projectId: '',
+            projectId: provisioning?.projectId || '',
             startDate: '',
             endDate: '',
             securityQuestion: '',
             securityAnswerHash: '',
-            status: 'pending',
+            status: provisioning?.status || 'pending',
             createdAt: now()
           };
           db.users.push(localUser);
@@ -8221,7 +8311,11 @@ const requestHandler = async (req, res) => {
     if (req.method === 'GET' && pathname === '/api/session') {
       const user = getAuthUser(req, db);
       const sessionToken = getSessionToken(req);
-      return json(res, 200, { user: sanitizeUser(user), systemConfig: user ? presentSystemConfig(user, db.systemConfig) : {}, csrfToken: user && sessionToken ? getSessionCsrfToken(sessionToken) : '' });
+      return json(res, 200, {
+        user: sanitizeUser(user),
+        systemConfig: user ? presentSystemConfig(user, db.systemConfig) : { allowRegistration: !!db.systemConfig.allowRegistration },
+        csrfToken: user && sessionToken ? getSessionCsrfToken(sessionToken) : ''
+      });
     }
 
     if (req.method === 'GET' && pathname === '/api/sessions/online') {
@@ -8265,6 +8359,9 @@ const requestHandler = async (req, res) => {
       if (!user) return;
       const body = await readBody(req);
       if (!String(body.name || '').trim()) return json(res, 400, { message: '项目名称不能为空' });
+      const projectLengthError = checkTextLength(body.name, 128, '项目名称')
+        || checkTextLength(body.customerName, 128, '客户名称');
+      if (projectLengthError) return json(res, 400, { message: projectLengthError });
       const project = {
         id: id('project'),
         name: body.name,
@@ -8293,6 +8390,9 @@ const requestHandler = async (req, res) => {
       const body = await readBody(req);
       const nextProjectName = String(body.name || '').trim();
       if (!nextProjectName) return json(res, 400, { message: '项目名称不能为空' });
+      const projectLengthError = checkTextLength(nextProjectName, 128, '项目名称')
+        || checkTextLength(body.customerName, 128, '客户名称');
+      if (projectLengthError) return json(res, 400, { message: projectLengthError });
       project.name = nextProjectName;
       project.customerName = body.customerName !== undefined
         ? (String(body.customerName || '').trim() || nextProjectName)
@@ -8372,6 +8472,12 @@ const requestHandler = async (req, res) => {
       if (!name) {
         return json(res, 400, { message: '请输入姓名' });
       }
+      const userLengthError = checkTextLength(name, 64, '姓名')
+        || checkTextLength(body.phone, 32, '电话')
+        || checkTextLength(body.idCard, 32, '身份证号')
+        || checkTextLength(body.email, 128, '邮箱')
+        || checkTextLength(body.wechat, 64, '微信');
+      if (userLengthError) return json(res, 400, { message: userLengthError });
       // 用户名唯一性检查与写入放入同一临界区，避免并发创建出重复账号。
       const outcome = await withDbMutationLock(async () => {
         const lockDb = await readDb();
@@ -8552,6 +8658,12 @@ const requestHandler = async (req, res) => {
       if (body.name !== undefined && !String(body.name || '').trim()) {
         return json(res, 400, { message: '请输入姓名' });
       }
+      const userLengthError = checkTextLength(body.name, 64, '姓名')
+        || checkTextLength(body.phone, 32, '电话')
+        || checkTextLength(body.idCard, 32, '身份证号')
+        || checkTextLength(body.email, 128, '邮箱')
+        || checkTextLength(body.wechat, 64, '微信');
+      if (userLengthError) return json(res, 400, { message: userLengthError });
       if (body.projectId !== undefined && body.projectId && !requireExistingProject(body.projectId, db)) {
         return json(res, 400, { message: '关联项目不存在' });
       }
@@ -8693,6 +8805,35 @@ const requestHandler = async (req, res) => {
         }
         planned.push(entry);
       }
+      // 显式指定起始 U 位时，若与目标机柜已有设备冲突则阻断，避免静默覆盖；可通过 allowOverlap 显式忽略。
+      if (hasStart) {
+        const movingIds = new Set(planned.map(entry => entry.asset.id));
+        const requested = new Map();
+        for (const entry of planned) {
+          if (entry.rackUnitStart === undefined) continue;
+          const key = `${entry.asset.projectId || ''}\u0000${cabinetName}`;
+          const ranges = requested.get(key) || [];
+          ranges.push([entry.rackUnitStart, entry.rackUnitStart + entry.rackUnitSize - 1]);
+          requested.set(key, ranges);
+        }
+        for (const [key, ranges] of requested) {
+          const [projectId] = key.split('\u0000');
+          const conflicts = (db.assets || []).filter(item =>
+            (item.projectId || '') === projectId
+            && String(item.cabinetName || '').trim() === cabinetName
+            && !movingIds.has(item.id)
+            && Number.isInteger(item.rackUnitStart)
+          ).filter(item => {
+            const size = Number.isInteger(item.rackUnitSize) && item.rackUnitSize > 0 ? item.rackUnitSize : 1;
+            const end = item.rackUnitStart + size - 1;
+            return ranges.some(([start, stop]) => item.rackUnitStart <= stop && end >= start);
+          });
+          if (conflicts.length && body.allowOverlap !== true) {
+            const names = conflicts.slice(0, 3).map(item => item.name || '设备').join('、');
+            return json(res, 409, { message: `机柜「${cabinetName}」中 ${names} 已占用所选 U 位，可调整起始 U 位或勾选允许重叠后重试` });
+          }
+        }
+      }
       for (const entry of planned) {
         entry.asset.cabinetName = cabinetName;
         if (entry.rackUnitStart !== undefined) {
@@ -8717,6 +8858,15 @@ const requestHandler = async (req, res) => {
       if (cabinetFields.error) return json(res, 400, { message: cabinetFields.error });
       const name = String(body.name || '').trim();
       if (!name) return json(res, 400, { message: '资产名称不能为空' });
+      const assetLengthError = checkTextLength(name, 128, '资产名称')
+        || checkTextLength(body.installationLocation, 128, '安装位置')
+        || checkTextLength(body.brand, 64, '品牌')
+        || checkTextLength(body.model, 64, '型号')
+        || checkTextLength(body.serialNumber, 64, '序列号')
+        || checkTextLength(body.owner, 64, '责任人')
+        || checkTextLength(body.version, 32, '版本')
+        || checkTextLength(body.notes, 4000, '备注');
+      if (assetLengthError) return json(res, 400, { message: assetLengthError });
       const typeField = readAssetTypeField(body.type);
       if (typeField.error) return json(res, 400, { message: typeField.error });
       const type = typeField.type;
@@ -8767,13 +8917,22 @@ const requestHandler = async (req, res) => {
       const rows = Array.isArray(body.assets) ? body.assets : [];
       if (!rows.length) return json(res, 400, { message: '导入数据为空' });
       if (rows.length > ASSET_IMPORT_MAX_ROWS) return json(res, 400, { message: `单次最多导入 ${ASSET_IMPORT_MAX_ROWS} 条` });
-      const results = { created: 0, skipped: 0, errors: [] };
+      const results = { created: 0, skipped: 0, errors: [], warnings: [] };
       for (let i = 0; i < rows.length; i++) {
         const row = rows[i];
         const rowLabel = `第${i + 2}行`;
         // Excel 数字单元格会被解析为 number，先做字符串归一化再 trim。
         const name = String(row.name ?? row['资产名称'] ?? '').trim();
         if (!name) { results.errors.push(`${rowLabel}: 资产名称为空`); results.skipped++; continue; }
+        const importLengthError = checkTextLength(name, 128, '资产名称')
+          || checkTextLength(row.installationLocation ?? row['安装位置'], 128, '安装位置')
+          || checkTextLength(row.brand ?? row['品牌'], 64, '品牌')
+          || checkTextLength(row.model ?? row['规格型号'], 64, '型号')
+          || checkTextLength(row.serialNumber ?? row['序列号'], 64, '序列号')
+          || checkTextLength(row.owner ?? row['责任人'] ?? row['责任人/部门'], 64, '责任人')
+          || checkTextLength(row.version ?? row['版本'], 32, '版本')
+          || checkTextLength(row.notes ?? row['备注'], 4000, '备注');
+        if (importLengthError) { results.errors.push(`${rowLabel}: ${importLengthError}`); results.skipped++; continue; }
         const typeValue = String(row.type ?? row['资产类型'] ?? '').trim();
         if (!ASSET_TYPE_OPTIONS.includes(typeValue)) { results.errors.push(`${rowLabel}: 资产类型无效`); results.skipped++; continue; }
         let projectId = user.projectId;
@@ -8784,7 +8943,7 @@ const requestHandler = async (req, res) => {
             projectId = p.id;
           } else {
             const available = db.projects.map(prj => prj.name).join('、');
-            results.errors.push(`${rowLabel}: 项目"${projectName}"不存在，已归入默认项目。可用项目：${available || '无'}`);
+            results.warnings.push(`${rowLabel}: 项目"${projectName}"不存在，已归入默认项目。可用项目：${available || '无'}`);
           }
         }
         if (!db.projects.find(prj => prj.id === projectId)) { results.errors.push(`${rowLabel}: 关联项目不存在`); results.skipped++; continue; }
@@ -8905,6 +9064,15 @@ const requestHandler = async (req, res) => {
         if (maintainField.error) return json(res, 400, { message: maintainField.error });
         nextMaintainExpiryDate = maintainField.value;
       }
+      const assetLengthError = checkTextLength(body.name, 128, '资产名称')
+        || checkTextLength(body.installationLocation, 128, '安装位置')
+        || checkTextLength(body.brand, 64, '品牌')
+        || checkTextLength(body.model, 64, '型号')
+        || checkTextLength(body.serialNumber, 64, '序列号')
+        || checkTextLength(body.owner, 64, '责任人')
+        || checkTextLength(body.version, 32, '版本')
+        || checkTextLength(body.notes, 4000, '备注');
+      if (assetLengthError) return json(res, 400, { message: assetLengthError });
       const monitorChanged = ['monitorEnabled', 'monitorType', 'monitorHost', 'monitorPort', 'snmpCommunity', 'snmpPort']
         .some(field => monitorFields[field] !== target[field]);
       target.projectId = projectId;
@@ -9006,13 +9174,15 @@ const requestHandler = async (req, res) => {
         if (tgtAsset.projectId !== user.projectId) return json(res, 403, { message: '无权访问目标资产' });
       }
       if (!db.assetRelations) db.assetRelations = [];
+      const relationType = String(body.relationType || 'connected').trim() || 'connected';
+      if (!ASSET_RELATION_TYPES.includes(relationType)) return json(res, 400, { message: '关系类型无效' });
       const exists = db.assetRelations.find(r => r.sourceAssetId === sourceAssetId && r.targetAssetId === targetAssetId);
       if (exists) return json(res, 409, { message: '该关系已存在' });
       const rel = {
         id: id('rel'),
         sourceAssetId,
         targetAssetId,
-        relationType: body.relationType || 'connected',
+        relationType,
         label: body.label || '',
         sourcePort: body.sourcePort || '',
         targetPort: body.targetPort || '',
@@ -9084,7 +9254,11 @@ const requestHandler = async (req, res) => {
       }
       if (body.sourcePort !== undefined) rel.sourcePort = body.sourcePort;
       if (body.targetPort !== undefined) rel.targetPort = body.targetPort;
-      if (body.relationType !== undefined) rel.relationType = body.relationType;
+      if (body.relationType !== undefined) {
+        const relationType = String(body.relationType || '').trim();
+        if (!ASSET_RELATION_TYPES.includes(relationType)) return json(res, 400, { message: '关系类型无效' });
+        rel.relationType = relationType;
+      }
       if (body.label !== undefined) rel.label = body.label;
       if (hasSourceField) rel.sourceAssetId = String(body.sourceAssetId);
       if (hasTargetField) rel.targetAssetId = String(body.targetAssetId);
@@ -9340,6 +9514,11 @@ const requestHandler = async (req, res) => {
       const body = await readBody(req);
       const kbTitle = String(body.title || '').trim();
       if (!kbTitle) return json(res, 400, { message: '知识条目标题不能为空' });
+      const kbLengthError = checkTextLength(kbTitle, 128, '标题')
+        || checkTextLength(body.content, 4000, '正文')
+        || checkTextLength(body.problem, 4000, '问题描述')
+        || checkTextLength(body.solution, 4000, '解决方案');
+      if (kbLengthError) return json(res, 400, { message: kbLengthError });
       const kbProjectId = user.role === 'admin' ? (body.projectId || user.projectId) : user.projectId;
       if (!requireExistingProject(kbProjectId, db)) return json(res, 400, { message: '关联项目不存在' });
       const item = {
@@ -9374,6 +9553,11 @@ const requestHandler = async (req, res) => {
         if (!nextKbTitle) return json(res, 400, { message: '知识条目标题不能为空' });
         target.title = nextKbTitle;
       }
+      const kbLengthError = checkTextLength(body.title, 128, '标题')
+        || checkTextLength(body.content, 4000, '正文')
+        || checkTextLength(body.problem, 4000, '问题描述')
+        || checkTextLength(body.solution, 4000, '解决方案');
+      if (kbLengthError) return json(res, 400, { message: kbLengthError });
       if (body.content !== undefined) target.content = body.content;
       if (body.category !== undefined) target.category = body.category;
       if (body.tags !== undefined) target.tags = body.tags;
@@ -11365,6 +11549,12 @@ const requestHandler = async (req, res) => {
       target.periodKey = periodMeta.periodKey;
       target.rangeStart = periodMeta.rangeStart;
       target.rangeEnd = periodMeta.rangeEnd;
+      const reportSectionError = checkTextLength(body.summary, 5000, '工作摘要')
+        || checkTextLength(body.completedWork, 5000, '已完成工作')
+        || checkTextLength(body.pendingWork, 5000, '待办工作')
+        || checkTextLength(body.risks, 5000, '风险与问题')
+        || checkTextLength(body.nextPlan, 5000, '下一步计划');
+      if (reportSectionError) return json(res, 400, { message: reportSectionError });
       target.summary = String(body.summary || target.summary || '').trim();
       target.completedWork = String(body.completedWork || target.completedWork || '').trim();
       target.pendingWork = String(body.pendingWork || target.pendingWork || '').trim();
@@ -11410,6 +11600,12 @@ const requestHandler = async (req, res) => {
         db.workReports = (db.workReports || []).filter(item => item.id !== target.id);
         survivor = duplicate;
       }
+      const reportSectionError = checkTextLength(body.summary, 5000, '工作摘要')
+        || checkTextLength(body.completedWork, 5000, '已完成工作')
+        || checkTextLength(body.pendingWork, 5000, '待办工作')
+        || checkTextLength(body.risks, 5000, '风险与问题')
+        || checkTextLength(body.nextPlan, 5000, '下一步计划');
+      if (reportSectionError) return json(res, 400, { message: reportSectionError });
       if (body.summary !== undefined) survivor.summary = String(body.summary || '').trim();
       if (body.completedWork !== undefined) survivor.completedWork = String(body.completedWork || '').trim();
       if (body.pendingWork !== undefined) survivor.pendingWork = String(body.pendingWork || '').trim();
@@ -11572,13 +11768,13 @@ const requestHandler = async (req, res) => {
       const user = requireAdmin(req, res, db);
       if (!user) return;
       const body = await readBody(req);
-      const allowedKeys = ['webIdleLogoutMinutes', 'httpsLoginEnabled', 'httpsPort', 'allowRegistration', 'httpLoginDisabled', 'loginRateLimitMaxAttempts', 'loginRateLimitWindowMinutes', 'loginRateLimitLockMinutes', 'timezoneOffset', 'dailyReportReminderHour', 'weeklyReportReminderDays', 'monthlyReportReminderDays', 'dailyLowHoursThreshold', 'dailyHighHoursThreshold', 'noLogStreakDays', 'projectInactiveDays', 'monitorTargetAllowlist'];
+      const allowedKeys = ['webIdleLogoutMinutes', 'httpsLoginEnabled', 'httpsPort', 'allowRegistration', 'httpLoginDisabled', 'loginRateLimitMaxAttempts', 'loginRateLimitWindowMinutes', 'loginRateLimitLockMinutes', 'timezoneOffset', 'dailyReportReminderHour', 'weeklyReportReminderDays', 'monthlyReportReminderDays', 'dailyLowHoursThreshold', 'dailyHighHoursThreshold', 'noLogStreakDays', 'projectInactiveDays', 'monitorTargetAllowlist', 'ssoAutoApproveAllowlist', 'ssoDefaultProjectId'];
       const safeBody = {};
       for (const key of allowedKeys) {
         if (body[key] !== undefined) safeBody[key] = body[key];
       }
       // 涉及登录与账号锁定策略的敏感设置需要管理员二次验证，防止会话被盗后放宽防护。
-      const sensitiveKeys = ['httpsLoginEnabled', 'httpLoginDisabled', 'allowRegistration', 'loginRateLimitMaxAttempts', 'loginRateLimitWindowMinutes', 'loginRateLimitLockMinutes', 'monitorTargetAllowlist'];
+      const sensitiveKeys = ['httpsLoginEnabled', 'httpLoginDisabled', 'allowRegistration', 'loginRateLimitMaxAttempts', 'loginRateLimitWindowMinutes', 'loginRateLimitLockMinutes', 'monitorTargetAllowlist', 'ssoAutoApproveAllowlist', 'ssoDefaultProjectId'];
       if (sensitiveKeys.some(key => safeBody[key] !== undefined) && !verifyAdminStepUp(user, body.password)) {
         return json(res, 401, { message: '修改登录安全设置需要管理员密码验证' });
       }
@@ -11587,6 +11783,9 @@ const requestHandler = async (req, res) => {
         if (invalidEntry) {
           return json(res, 400, { message: `白名单条目无效：${invalidEntry}，请填写 IP、CIDR 或主机名` });
         }
+      }
+      if (safeBody.ssoDefaultProjectId !== undefined && String(safeBody.ssoDefaultProjectId).trim() && !requireExistingProject(String(safeBody.ssoDefaultProjectId).trim(), db)) {
+        return json(res, 400, { message: 'SSO 默认项目不存在' });
       }
       db.systemConfig = normalizeSystemConfig({ ...db.systemConfig, ...safeBody });
       systemTimezoneOffsetMinutes = db.systemConfig.timezoneOffset;
@@ -12627,6 +12826,9 @@ async function runAssetMonitorScheduler() {
   try {
     const db = await readDb();
     refreshMonitorTargetPolicy(db.systemConfig);
+    // 首次运行后从持久化状态回填，保证重启后仍能展示上次采集时间。
+    const persistedLastRunAt = db.runtimeState?.monitoring?.lastRunAt;
+    if (!monitorRuntimeState.lastRunAt && persistedLastRunAt) monitorRuntimeState.lastRunAt = persistedLastRunAt;
     const monitoredAssets = (db.assets || []).filter(a => a.monitorEnabled && a.monitorHost);
     for (const asset of monitoredAssets) {
       await checkAssetMonitor(asset);
@@ -12634,7 +12836,14 @@ async function runAssetMonitorScheduler() {
         try { await collectAssetSnmpMetrics(asset); } catch (_) {}
       }
     }
-    monitorRuntimeState.lastRunAt = now();
+    const finishedAt = now();
+    monitorRuntimeState.lastRunAt = finishedAt;
+    // 仅落库 runtimeState，避免把本轮读取的整库快照写回造成无谓覆盖。
+    try {
+      const stateDb = await readDb();
+      ensureRuntimeState(stateDb).monitoring = { lastRunAt: finishedAt };
+      await writeDb(stateDb, { replaceCollections: ['runtimeState'], silent: true });
+    } catch (_) {}
   } catch (error) {
     console.warn('Asset monitor scheduler error:', error.message);
   } finally {
