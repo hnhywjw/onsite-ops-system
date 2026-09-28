@@ -11777,6 +11777,10 @@ const requestHandler = async (req, res) => {
       const reportId = pathname.split('/')[3];
       const target = (db.workReports || []).find(item => item.id === reportId);
       if (!target) return json(res, 404, { message: '工作汇报不存在' });
+      // 禁止自审：审核人不得审核本人提交的工作汇报；管理员作为可审核角色予以豁免。
+      if (user.role !== 'admin' && user.id === target.userId) {
+        return json(res, 403, { message: '不能审核本人提交的工作汇报' });
+      }
       const body = await readBody(req);
       const action = String(body.action || '').trim();
       if (!['approved', 'returned', 'locked'].includes(action)) return json(res, 400, { message: '无效的审核动作' });
