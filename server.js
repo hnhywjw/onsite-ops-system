@@ -5021,9 +5021,16 @@ function parseAiInspectionScheduleTime(executedAt) {
 
 function addAiTaskCycleOnce(task) {
   if (!task.cycle || !task.executedAt) return false;
-  const parts = task.executedAt.match(/^(\d{4})-(\d{2})-(\d{2})T(\d{2}):(\d{2})(?::(\d{2}))?$/);
-  if (!parts) return false;
-  const d = new Date(Number(parts[1]), Number(parts[2]) - 1, Number(parts[3]), Number(parts[4]), Number(parts[5] || '0'), Number(parts[6] || '0'));
+  const parts = String(task.executedAt).match(/^(\d{4})-(\d{2})-(\d{2})T(\d{2}):(\d{2})(?::(\d{2}))?$/);
+  let d;
+  if (parts) {
+    d = new Date(Number(parts[1]), Number(parts[2]) - 1, Number(parts[3]), Number(parts[4]), Number(parts[5] || '0'), Number(parts[6] || '0'));
+  } else {
+    // 兼容早期失败路径写入的带时区 ISO 时间，避免周期任务因计划格式异常而无法推进。
+    const timestamp = Date.parse(task.executedAt);
+    if (!Number.isFinite(timestamp)) return false;
+    d = new Date(timestamp);
+  }
   const pad = n => String(n).padStart(2, '0');
   const toLocalStr = date => `${date.getFullYear()}-${pad(date.getMonth() + 1)}-${pad(date.getDate())}T${pad(date.getHours())}:${pad(date.getMinutes())}`;
   if (task.cycle === 'daily') {
@@ -5393,8 +5400,13 @@ async function executeAiInspectionTask(db, task, options = {}) {
       db.aiInspectionResults = db.aiInspectionResults || [];
       db.aiInspectionResults.push(result);
       task.status = task.cycle ? '待执行' : '失败';
-      task.executedAt = result.createdAt;
       task.completedAt = result.createdAt;
+      if (task.cycle) {
+        // 周期任务失败后同样要推进到下一周期，否则会在下一个调度 tick 立即重跑，导致结果与通知无限堆积。
+        advanceAiTaskNextExecution(task);
+      } else {
+        task.executedAt = result.createdAt;
+      }
       const operator = (db.users || []).find(item => item.id === task.createdBy);
       if (operator) {
         appendAuditLog(db, operator, 'execute', 'aiInspectionTask', task.id, `执行智能巡检 ${task.title}（探测失败: ${failureMessage}）`, task.projectId);
@@ -5465,8 +5477,13 @@ async function executeAiInspectionTask(db, task, options = {}) {
     db.aiInspectionResults = db.aiInspectionResults || [];
     db.aiInspectionResults.push(result);
     task.status = task.cycle ? '待执行' : '失败';
-    task.executedAt = result.createdAt;
     task.completedAt = result.createdAt;
+    if (task.cycle) {
+      // 周期任务失败后同样要推进到下一周期，否则会在下一个调度 tick 立即重跑，导致结果与通知无限堆积。
+      advanceAiTaskNextExecution(task);
+    } else {
+      task.executedAt = result.createdAt;
+    }
     const operator = (db.users || []).find(item => item.id === task.createdBy);
     if (operator) {
       appendAuditLog(db, operator, 'execute', 'aiInspectionTask', task.id, `执行智能巡检 ${task.title}（探测异常: ${failureMessage}）`, task.projectId);
