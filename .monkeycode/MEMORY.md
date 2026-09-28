@@ -111,6 +111,17 @@ Agent 在任务执行过程中发现的条目应遵循以下格式：
   - `npm run e2e` 的自动登出提示断言存在竞态，偶发失败时重跑一次即可确认。
   - `npm run e2e` 的「AI 巡检任务创建与执行」步骤等待探测结果时，`page.waitForFunction` 的 `{ timeout: 90000 }` 被误传为第二参数（arg），实际按默认 30s 生效；探测较慢时会偶发超时，重跑一次即可确认，与本轮业务代码无关。
   - `npm run e2e` 在「管理员审核日报并退回周报」前 `selectOption('#workReportFilterProject', ...)` 偶发 `did not find some options`：项目筛选选项来自登录时 `pageSize=100` 的项目列表，而 `scripts/regression.js` 的「布局隔离项目」等测试项目未在用例结束时删除、会持续累积；库内项目接近或超过 100 时新建项目可能落到该页之外导致偶发失败，重跑一次即可确认，属测试数据治理问题。
+  - `npm run regression` 若紧随 `npm start` 重启后立即运行，偶发在最早期请求直接报 `fetch failed`（连接竞态），等待服务 `GET /api/health` 返回 200 后重跑即过。
+  - `npm run e2e` 在「进入工作汇报链路」的 `page.click('#refreshWorkloadBtn')` 偶发 30s 超时；该按钮本身存在，库内测试数据（项目、`col_ai_inspection_results` 数万条等）累积会拖慢渲染/出现覆盖层，重跑一次即可确认，同样属测试数据治理问题。
+  - `scripts/regression.js` 与 `scripts/e2e.js` 创建的测试项目、`AI 周期巡检回归任务` 等不在用例结束时清理，会随每次运行累积；排障前可先核对库内高频测试名（如「AI 周期巡检回归任务」「布局隔离项目」「提醒回归项目」「时区提醒项目」）规模。
+
+[备份文件保留策略不对称]
+- Date: 2026-09-28
+- Context: Agent 巡检测试数据残留与磁盘占用时发现
+- Category: 运维部署
+- Instructions:
+  - `data/backups` 下的 `auto-backup-*` 由 `runAutoBackup` 按 7 天保留期自动删除。
+  - `backup-before-reset-*`、`backup-before-import-*`、`backup-before-restore-*` 没有保留策略，会长期堆积占用磁盘；排障前先 `ls` 统计数量与体积。
 
 [GitHub 推送凭据来源]
 - Date: 2026-09-19

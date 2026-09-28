@@ -8473,6 +8473,33 @@ const requestHandler = async (req, res) => {
       // 通知属于过程性提醒，不构成业务关联；随项目删除级联清理，避免历史通知长期阻断项目删除。
       db.notifications = (db.notifications || []).filter(item => item.projectId !== projectId);
       const projectRelationCollections = ['users','assets','logs','workReports','knowledgeBase','documents','inspectionPlans','inspectionExecutions','spareParts','sparePartMovements','changeRecords','incidentRecords','approvals','notifications','aiInspectionTargets','aiInspectionTemplates','aiInspectionTasks','aiInspectionResults','configBackupPlans','configBackupRecords'];
+      const force = String(reqUrl.searchParams.get('force') || '') === '1';
+      if (force) {
+        // 管理员强制删除：先级联清理该项目下的全部业务数据与人员，再删除项目，便于清理历史残留项目。
+        const projectUserIds = (db.users || []).filter(item => item.projectId === projectId).map(item => item.id);
+        const removedCounts = {};
+        for (const key of projectRelationCollections) {
+          if (!Array.isArray(db[key])) continue;
+          const before = db[key].length;
+          db[key] = db[key].filter(item => item.projectId !== projectId);
+          const removed = before - db[key].length;
+          if (removed > 0) removedCounts[key] = removed;
+        }
+        // 项目和人员归属强相关，强制删除项目时同步清理其人员及会话，避免遗留无归属账号。
+        if (projectUserIds.length) {
+          db.sessions = (db.sessions || []).filter(item => !projectUserIds.includes(item.userId));
+        }
+        const index = db.projects.findIndex(item => item.id === projectId);
+        if (index === -1) return json(res, 404, { message: '项目不存在' });
+        const removedProject = db.projects.splice(index, 1)[0];
+        if (db.topologyLayouts && db.topologyLayouts.positions && typeof db.topologyLayouts.positions === 'object') {
+          delete db.topologyLayouts.positions[projectId];
+        }
+        const summary = Object.entries(removedCounts).map(([key, count]) => `${key}:${count}`).join(', ') || '无关联数据';
+        appendAuditLog(db, user, 'delete', 'project', projectId, `管理员强制删除项目 ${removedProject.name || projectId}（级联清理 ${summary}）`, projectId);
+        await writeDb(db, { replaceCollections: ['sessions'] });
+        return json(res, 200, { ok: true, forced: true, removed: removedCounts });
+      }
       const relationNames = projectRelationCollections.filter(key => (db[key] || []).some(item => item.projectId === projectId));
       if (relationNames.length) {
         return json(res, 400, { message: `该项目存在关联数据(${relationNames.join(', ')})，请先清理后再删除` });
@@ -13225,9 +13252,11 @@ async function runAutoBackup() {
         fs.writeFileSync(filePath, JSON.stringify(serializeDbSnapshot(db), null, 2));
       }
     }
+    // 自动快照（每日备份、重置/导入/恢复前的安全快照）统一保留 7 天，避免长期堆积占满磁盘；
+    // 手动触发的 backup-* 仍由 runMaintenanceTasks 按 localBackupRetentionDays 归档。
     const cutoff = Date.now() - 7 * 24 * 60 * 60 * 1000;
     for (const file of fs.readdirSync(backupDir)) {
-      if (!file.startsWith('auto-backup-')) continue;
+      if (!file.startsWith('auto-backup-') && !file.startsWith('backup-before-')) continue;
       const fp = path.join(backupDir, file);
       if (fs.statSync(fp).mtimeMs < cutoff) fs.unlinkSync(fp);
     }

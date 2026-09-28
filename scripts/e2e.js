@@ -379,13 +379,29 @@ async function cleanupData(page, payload) {
     const users = await getList('/api/users');
     const createdUser = users.find(item => item.username === data.customerUsername);
     if (createdUser) await request(`/api/users/${createdUser.id}`, { method: 'DELETE', body: '{}' });
-    const projects = await getList('/api/projects');
-    const createdProject = projects.find(item => item.name === data.projectName);
-    if (createdProject) await request(`/api/projects/${createdProject.id}`, { method: 'DELETE', body: '{}' });
     const docs = await getList('/api/documents');
     for (const docTitle of (data.docTitles || [])) {
       const doc = docs.find(item => item.title === docTitle);
       if (doc) await request(`/api/documents/${doc.id}`, { method: 'DELETE', body: '{}' });
+    }
+    // 用例会为基线工程师创建日报/周报，按本轮使用的合成日期清理，避免工作汇报逐轮累积。
+    const reportDates = data.workReportDates || [];
+    if (reportDates.length) {
+      const engineer = (await getList('/api/users?all=1')).find(item => item.username === 'engineer1');
+      const reports = await getList('/api/work-reports');
+      for (const report of reports) {
+        if (engineer && report.userId === engineer.id && reportDates.includes(report.rangeStart)) {
+          await request(`/api/work-reports/${report.id}`, { method: 'DELETE', body: '{}' });
+        }
+      }
+    }
+    const projects = await getList('/api/projects');
+    const createdProject = projects.find(item => item.name === data.projectName);
+    if (createdProject) {
+      // 用例会在该项目下创建审批工程师等账号，先清空项目内人员，避免用户关联阻断项目删除。
+      const projectUsers = (await getList('/api/users?all=1')).filter(item => item.projectId === createdProject.id);
+      for (const item of projectUsers) await request(`/api/users/${item.id}`, { method: 'DELETE', body: '{}' });
+      await request(`/api/projects/${createdProject.id}?force=1`, { method: 'DELETE', body: '{}' });
     }
   }, { data: payload, glyphs: CAPTCHA_GLYPHS });
 }
@@ -1167,11 +1183,11 @@ async function main() {
     await page.click('#confirmOkBtn');
     await page.waitForTimeout(1000);
 
-    await cleanupData(page, { targetName, taskTitle, projectName, customerUsername, changeTitle, docTitles: [docTitle1, docTitle2] });
+    await cleanupData(page, { targetName, taskTitle, projectName, customerUsername, changeTitle, docTitles: [docTitle1, docTitle2], workReportDates: [reportDate, weeklyReportRangeStart] });
     process.stdout.write('E2E passed\n');
   } finally {
     try {
-      await cleanupData(page, { targetName, taskTitle, projectName, customerUsername, changeTitle, docTitles: [docTitle1, docTitle2] });
+      await cleanupData(page, { targetName, taskTitle, projectName, customerUsername, changeTitle, docTitles: [docTitle1, docTitle2], workReportDates: [reportDate, weeklyReportRangeStart] });
     } catch (error) {
     }
     try {

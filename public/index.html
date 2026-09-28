@@ -6013,8 +6013,9 @@
       state.projectPage = Math.min(Math.max(1, state.projectPage || 1), totalPages);
       const start = (state.projectPage - 1) * pageSize;
       const pageItems = state.projects.slice(start, start + pageSize);
+      const canForceDeleteProject = state.user?.role === 'admin';
       document.getElementById('projectTable').innerHTML = pageItems.map(item => `
-        <tr><td>${esc(item.customerName)}</td><td>${esc(item.name)}</td><td>${esc(formatProjectPeriod(item))}</td><td>${esc(item.notifyBefore || '-')}</td><td>${esc(item.paymentMethod || '-')}</td><td>${esc(item.description || '-')}</td><td><div class="toolbar"><button class="secondary" data-action="edit-project" data-id="${item.id}" type="button">修改</button><button class="secondary" data-action="delete-project" data-id="${item.id}" type="button" style="background:#fee2e2;color:#dc2626;border-color:#fecaca;">删除</button></div></td></tr>
+        <tr><td>${esc(item.customerName)}</td><td>${esc(item.name)}</td><td>${esc(formatProjectPeriod(item))}</td><td>${esc(item.notifyBefore || '-')}</td><td>${esc(item.paymentMethod || '-')}</td><td>${esc(item.description || '-')}</td><td><div class="toolbar"><button class="secondary" data-action="edit-project" data-id="${item.id}" type="button">修改</button><button class="secondary" data-action="delete-project" data-id="${item.id}" type="button" style="background:#fee2e2;color:#dc2626;border-color:#fecaca;">删除</button>${canForceDeleteProject ? `<button class="secondary" data-action="force-delete-project" data-id="${item.id}" type="button" style="background:#fef3c7;color:#b45309;border-color:#fde68a;">强制删除</button>` : ''}</div></td></tr>
       `).join('') || '<tr><td colspan="7">暂无数据</td></tr>';
       document.getElementById('projectPageInfo').textContent = `第 ${state.projectPage} / ${totalPages} 页`;
       document.getElementById('projectPrevBtn').disabled = state.projectPage <= 1;
@@ -8800,6 +8801,16 @@
       await loadBaseData();
     }
 
+    async function forceRemoveProject(id) {
+      const project = state.projects.find(item => item.id === id);
+      const label = project?.name || id;
+      if (!await showConfirm(`确认强制删除项目「${label}」吗？\n\n将级联删除该项目下的全部人员、资产、日志、工作汇报、通知等关联数据，且不可恢复。`)) return;
+      const result = await api(`/api/projects/${id}?force=1`, { method: 'DELETE' });
+      const removedParts = Object.entries(result?.removed || {}).map(([key, count]) => `${key}:${count}`);
+      setMessages(['projectMessage', 'projectListMessage'], `项目「${label}」已强制删除${removedParts.length ? `（级联清理 ${removedParts.join('、')}）` : ''}`);
+      await loadBaseData();
+    }
+
     async function removeUser(id) {
       if (!await showConfirm('确认删除该人员吗？')) return;
       await api(`/api/users/${id}`, { method: 'DELETE' });
@@ -11097,6 +11108,9 @@
         }
         if (button.dataset.action === 'delete-project') {
           await removeProject(button.dataset.id);
+        }
+        if (button.dataset.action === 'force-delete-project') {
+          await forceRemoveProject(button.dataset.id);
         }
       } catch (error) {
         setMessages(['projectMessage', 'projectListMessage'], error.message, 'error');

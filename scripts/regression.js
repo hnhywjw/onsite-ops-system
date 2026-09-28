@@ -288,6 +288,25 @@ function createTarGz(entries) {
   }
 }
 
+const regressionTestProjectPrefixes = ['提醒回归项目-', '时区提醒项目-', '布局隔离项目-'];
+
+// 回归用例创建的项目不会自动消失，长期累积会撑爆登录时的项目下拉（pageSize=100）并让 e2e 偶发失败。
+// 用例结束统一强制删除本轮项目及其关联数据，并清理中断运行时残留的测试周期任务。
+async function cleanupRegressionArtifacts(cookie) {
+  const projects = await request('/api/projects?all=1', { headers: { cookie } });
+  const projectList = Array.isArray(projects.data?.data) ? projects.data.data : [];
+  for (const project of projectList) {
+    if (!regressionTestProjectPrefixes.some(prefix => String(project.name || '').startsWith(prefix))) continue;
+    await request(`/api/projects/${project.id}?force=1`, { method: 'DELETE', headers: { cookie } });
+  }
+  const tasks = await request('/api/ai-inspection/tasks?all=1', { headers: { cookie } });
+  const taskList = Array.isArray(tasks.data?.data) ? tasks.data.data : [];
+  for (const task of taskList) {
+    if (!String(task.title || '').startsWith('AI 周期巡检回归任务')) continue;
+    await request(`/api/ai-inspection/tasks/${task.id}`, { method: 'DELETE', headers: { cookie } });
+  }
+}
+
 async function main() {
   const health = await request('/api/health');
   assert(health.status === 200 && health.data.ok === true, '健康检查接口失败');
@@ -2536,6 +2555,8 @@ async function main() {
   });
   assert(privateAfterClear.status === 201, '清空白名单后内网地址应默认放行');
   await request(`/api/ai-inspection/targets/${privateAfterClear.data.id}`, { method: 'DELETE', headers: { cookie } });
+
+  await cleanupRegressionArtifacts(cookie);
 
   process.stdout.write('Regression passed\n');
 }
