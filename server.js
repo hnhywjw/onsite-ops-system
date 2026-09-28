@@ -10427,111 +10427,118 @@ const requestHandler = async (req, res) => {
       const user = requireEditor(req, res, db);
       if (!user) return;
       const recordId = pathname.split('/')[3];
-      const target = (db.changeRecords || []).find(item => item.id === recordId);
-      if (!target) return json(res, 404, { message: '变更记录不存在' });
-      if (!canDeleteOwnedRecord(user, target, target.createdBy || '')) return json(res, 403, { message: '仅支持修改自己创建的变更记录' });
-      if (target.status !== '待运维审批' && target.status !== '已驳回') return json(res, 400, { message: '仅草稿或已驳回状态的变更记录支持修改' });
-      const wasRejected = target.status === '已驳回';
-      const oldStatus = target.status;
       const body = await readBody(req);
-      // 管理员改项目时先校验项目存在，再按新项目归属校验关联资产/审批人/甲方客户。
-      const nextChangeProjectId = (user.role === 'admin' && body.projectId !== undefined) ? String(body.projectId || '').trim() : target.projectId;
-      const changeProjectChanged = nextChangeProjectId !== target.projectId;
-      if (changeProjectChanged) {
-        if (!requireExistingProject(nextChangeProjectId, db)) return json(res, 400, { message: '关联项目不存在' });
-        target.projectId = nextChangeProjectId;
-      }
-      if (body.title !== undefined) target.title = String(body.title || '').trim() || target.title;
-      if (body.content !== undefined) target.content = String(body.content || '').trim() || target.content;
-      if (body.riskLevel !== undefined) target.riskLevel = body.riskLevel;
-      if (body.assetId !== undefined) {
-        if (body.assetId) {
-          const nextChangeAsset = requireExistingAsset(body.assetId, db);
-          if (!nextChangeAsset || nextChangeAsset.projectId !== target.projectId) return json(res, 400, { message: '关联资产不存在或不属于当前项目' });
+      // 变更记录与其关联审批记录必须同一临界区完成读写，否则并发的审批决策/删除会基于旧快照覆盖彼此，产生孤儿审批或状态回退。
+      const outcome = await withDbMutationLock(async () => {
+        const lockDb = await readDb();
+        const target = (lockDb.changeRecords || []).find(item => item.id === recordId);
+        if (!target) return { status: 404, message: '变更记录不存在' };
+        if (!canDeleteOwnedRecord(user, target, target.createdBy || '')) return { status: 403, message: '仅支持修改自己创建的变更记录' };
+        if (target.status !== '待运维审批' && target.status !== '已驳回') return { status: 400, message: '仅草稿或已驳回状态的变更记录支持修改' };
+        const wasRejected = target.status === '已驳回';
+        const oldStatus = target.status;
+        // 管理员改项目时先校验项目存在，再按新项目归属校验关联资产/审批人/甲方客户。
+        const nextChangeProjectId = (user.role === 'admin' && body.projectId !== undefined) ? String(body.projectId || '').trim() : target.projectId;
+        const changeProjectChanged = nextChangeProjectId !== target.projectId;
+        if (changeProjectChanged) {
+          if (!requireExistingProject(nextChangeProjectId, lockDb)) return { status: 400, message: '关联项目不存在' };
+          target.projectId = nextChangeProjectId;
         }
-        target.assetId = body.assetId;
-      } else if (changeProjectChanged && target.assetId) {
-        const linkedAsset = requireExistingAsset(target.assetId, db);
-        if (!linkedAsset || linkedAsset.projectId !== target.projectId) target.assetId = '';
-      }
-      if (body.approverId !== undefined) {
-        const approver = requireExistingUser(body.approverId, db);
-        if (!approver || !canViewProject(approver, target.projectId) || !['admin', 'engineer'].includes(approver.role)) return json(res, 400, { message: '审批人不存在或无权限审批当前项目' });
-        if (approver.id === target.createdBy) return json(res, 400, { message: '不能指定提交人本人为审批人' });
-        target.approverId = approver.id;
-        target.approverName = approver.name;
-      } else if (changeProjectChanged && target.approverId) {
-        const approver = requireExistingUser(target.approverId, db);
-        if (!approver || !canViewProject(approver, target.projectId) || !['admin', 'engineer'].includes(approver.role)) {
-          target.approverId = '';
-          target.approverName = '';
+        if (body.title !== undefined) target.title = String(body.title || '').trim() || target.title;
+        if (body.content !== undefined) target.content = String(body.content || '').trim() || target.content;
+        if (body.riskLevel !== undefined) target.riskLevel = body.riskLevel;
+        if (body.assetId !== undefined) {
+          if (body.assetId) {
+            const nextChangeAsset = requireExistingAsset(body.assetId, lockDb);
+            if (!nextChangeAsset || nextChangeAsset.projectId !== target.projectId) return { status: 400, message: '关联资产不存在或不属于当前项目' };
+          }
+          target.assetId = body.assetId;
+        } else if (changeProjectChanged && target.assetId) {
+          const linkedAsset = requireExistingAsset(target.assetId, lockDb);
+          if (!linkedAsset || linkedAsset.projectId !== target.projectId) target.assetId = '';
         }
-      }
-      if (body.customerId !== undefined) {
-        const customer = requireExistingUser(body.customerId, db);
-        if (!customer || customer.projectId !== target.projectId || customer.role !== 'customer') return json(res, 400, { message: '甲方客户不存在或不属于当前项目' });
-        target.customerId = customer.id;
-        target.customerName = customer.name;
-      } else if (changeProjectChanged && target.customerId) {
-        const customer = requireExistingUser(target.customerId, db);
-        if (!customer || customer.projectId !== target.projectId || customer.role !== 'customer') {
-          target.customerId = '';
-          target.customerName = '';
+        if (body.approverId !== undefined) {
+          const approver = requireExistingUser(body.approverId, lockDb);
+          if (!approver || !canViewProject(approver, target.projectId) || !['admin', 'engineer'].includes(approver.role)) return { status: 400, message: '审批人不存在或无权限审批当前项目' };
+          if (approver.id === target.createdBy) return { status: 400, message: '不能指定提交人本人为审批人' };
+          target.approverId = approver.id;
+          target.approverName = approver.name;
+        } else if (changeProjectChanged && target.approverId) {
+          const approver = requireExistingUser(target.approverId, lockDb);
+          if (!approver || !canViewProject(approver, target.projectId) || !['admin', 'engineer'].includes(approver.role)) {
+            target.approverId = '';
+            target.approverName = '';
+          }
         }
-      }
-      // 变更内容/审批人/项目变更后同步到关联审批记录，避免审批端展示过期或跨项目信息。
-      const linkedApproval = (db.approvals || []).find(a => a.relatedId === target.id && a.category === 'change');
-      if (linkedApproval) {
-        linkedApproval.title = target.title;
-        linkedApproval.content = target.content;
-        linkedApproval.approverId = target.approverId;
-        linkedApproval.customerId = target.customerId;
-        linkedApproval.projectId = target.projectId;
-      }
-      if (wasRejected) {
-        target.status = '待运维审批';
-        // 重新提交后清理上一轮驳回原因，避免终态残留误导审批人。
-        target.rejectionReason = '';
-        const approver = (db.users || []).find(u => u.id === target.approverId);
-        createNotification(db, target.projectId, '变更待审批', `${target.title} 已重新提交${oldStatus === '已驳回' ? '（原已驳回）' : ''}，待${approver ? approver.name : '审批人'}审批`, 'warning', 'approval', 'changeRecord', target.id);
+        if (body.customerId !== undefined) {
+          const customer = requireExistingUser(body.customerId, lockDb);
+          if (!customer || customer.projectId !== target.projectId || customer.role !== 'customer') return { status: 400, message: '甲方客户不存在或不属于当前项目' };
+          target.customerId = customer.id;
+          target.customerName = customer.name;
+        } else if (changeProjectChanged && target.customerId) {
+          const customer = requireExistingUser(target.customerId, lockDb);
+          if (!customer || customer.projectId !== target.projectId || customer.role !== 'customer') {
+            target.customerId = '';
+            target.customerName = '';
+          }
+        }
+        // 变更内容/审批人/项目变更后同步到关联审批记录，避免审批端展示过期或跨项目信息。
+        const linkedApproval = (lockDb.approvals || []).find(a => a.relatedId === target.id && a.category === 'change');
         if (linkedApproval) {
-          linkedApproval.status = '待运维审批';
-          linkedApproval.currentStage = 'approver';
-          linkedApproval.approvedBy = '';
-          linkedApproval.rejectionReason = '';
-          linkedApproval.updatedAt = now();
+          linkedApproval.title = target.title;
+          linkedApproval.content = target.content;
+          linkedApproval.approverId = target.approverId;
+          linkedApproval.customerId = target.customerId;
+          linkedApproval.projectId = target.projectId;
         }
-      }
-      appendAuditLog(db, user, 'update', 'changeRecord', recordId, `修改变更记录 ${target.title}`, target.projectId);
-      await writeDb(db);
-      return json(res, 200, target);
+        if (wasRejected) {
+          target.status = '待运维审批';
+          // 重新提交后清理上一轮驳回原因，避免终态残留误导审批人。
+          target.rejectionReason = '';
+          const approver = (lockDb.users || []).find(u => u.id === target.approverId);
+          createNotification(lockDb, target.projectId, '变更待审批', `${target.title} 已重新提交${oldStatus === '已驳回' ? '（原已驳回）' : ''}，待${approver ? approver.name : '审批人'}审批`, 'warning', 'approval', 'changeRecord', target.id);
+          if (linkedApproval) {
+            linkedApproval.status = '待运维审批';
+            linkedApproval.currentStage = 'approver';
+            linkedApproval.approvedBy = '';
+            linkedApproval.rejectionReason = '';
+            linkedApproval.updatedAt = now();
+          }
+        }
+        appendAuditLog(lockDb, user, 'update', 'changeRecord', recordId, `修改变更记录 ${target.title}`, target.projectId);
+        await writeDb(lockDb);
+        return { status: 200, body: target };
+      });
+      if (outcome.status !== 200) return json(res, outcome.status, { message: outcome.message });
+      return json(res, 200, outcome.body);
     }
 
     if (req.method === 'DELETE' && pathname.startsWith('/api/change-records/')) {
       const user = requireEditor(req, res, db);
       if (!user) return;
       const recordId = pathname.split('/')[3];
-      const index = (db.changeRecords || []).findIndex(item => item.id === recordId);
-      if (index === -1) return json(res, 404, { message: '变更记录不存在' });
-      const target = db.changeRecords[index];
-      if (!canDeleteOwnedRecord(user, target, target.createdBy || '')) return json(res, 403, { message: '仅支持删除自己创建的变更记录' });
-      // 变更记录进入审批流转后仅管理员可删除，创建者仅能删除尚未进入审批或已被驳回的记录。
-      if (user.role !== 'admin' && !['待运维审批', '已驳回'].includes(target.status)) {
-        return json(res, 403, { message: '该变更记录已进入审批流程，仅管理员可删除' });
-      }
-      db.changeRecords.splice(index, 1);
-      if (target.approvalId) {
-        try {
-          db.approvals = (db.approvals || []).filter(item => item.id !== target.approvalId);
-        } catch (error) {
-          appendAuditLog(db, user, 'system', 'approval', target.approvalId, `变更记录 ${target.title} 删除时级联删除审批失败: ${error.message}`, target.projectId);
+      // 删除变更记录会级联移除其关联审批，必须与并发的审批决策/变更编辑同一临界区，避免审批被重新写回成为孤儿。
+      const outcome = await withDbMutationLock(async () => {
+        const lockDb = await readDb();
+        const target = (lockDb.changeRecords || []).find(item => item.id === recordId);
+        if (!target) return { status: 404, message: '变更记录不存在' };
+        if (!canDeleteOwnedRecord(user, target, target.createdBy || '')) return { status: 403, message: '仅支持删除自己创建的变更记录' };
+        // 变更记录进入审批流转后仅管理员可删除，创建者仅能删除尚未进入审批或已被驳回的记录。
+        if (user.role !== 'admin' && !['待运维审批', '已驳回'].includes(target.status)) {
+          return { status: 403, message: '该变更记录已进入审批流程，仅管理员可删除' };
         }
-      }
-      // 级联清理该变更及其审批产生的通知，避免遗留空通知。
-      removeNotificationsBySource(db, 'approval', target.approvalId);
-      removeNotificationsBySource(db, 'changeRecord', recordId);
-      appendAuditLog(db, user, 'delete', 'changeRecord', recordId, `删除变更记录 ${target.title}`, target.projectId);
-      await writeDb(db);
+        lockDb.changeRecords = (lockDb.changeRecords || []).filter(item => item.id !== recordId);
+        if (target.approvalId) {
+          lockDb.approvals = (lockDb.approvals || []).filter(item => item.id !== target.approvalId);
+        }
+        // 级联清理该变更及其审批产生的通知，避免遗留空通知。
+        removeNotificationsBySource(lockDb, 'approval', target.approvalId);
+        removeNotificationsBySource(lockDb, 'changeRecord', recordId);
+        appendAuditLog(lockDb, user, 'delete', 'changeRecord', recordId, `删除变更记录 ${target.title}`, target.projectId);
+        await writeDb(lockDb);
+        return { status: 200 };
+      });
+      if (outcome.status !== 200) return json(res, outcome.status, { message: outcome.message });
       return json(res, 200, { ok: true });
     }
 
@@ -10680,47 +10687,53 @@ const requestHandler = async (req, res) => {
       const user = requireAuth(req, res, db);
       if (!user) return;
       const approvalId = pathname.split('/')[3];
-      const item = (db.approvals || []).find(entry => entry.id === approvalId);
-      if (!item) return json(res, 404, { message: '审批记录不存在' });
-      if (!canDecideApproval(user, item)) return json(res, 403, { message: '当前账号无权处理该审批' });
-      // 已结束的审批不可再次决策，避免重复流转覆盖最终结果。
-      if (item.currentStage === 'completed' || item.status === '已通过' || item.status === '已驳回') {
-        return json(res, 400, { message: '该审批已结束，不能重复处理' });
-      }
       const body = await readBody(req);
       // 仅接受明确的通过/驳回决策，避免缺省或异常状态被误判为驳回。
       const decision = String(body.status || '').trim();
-      if (!['approved', 'rejected'].includes(decision)) {
-        return json(res, 400, { message: '无效的审批决策' });
-      }
-      if (decision === 'approved') {
-        if (item.currentStage === 'approver') {
-          item.status = '待客户确认';
-          item.currentStage = 'customer';
-          item.approvedBy = user.id;
-          createNotification(db, item.projectId, '审批流转通知', `${item.title} 已通过运维审批，等待甲方客户确认`, 'warning', 'approval', 'approval', item.id);
+      // 审批决策会同时改写关联变更记录，必须与并发的变更编辑/删除同一临界区，避免状态回退或写回已被删除的审批。
+      const outcome = await withDbMutationLock(async () => {
+        const lockDb = await readDb();
+        const item = (lockDb.approvals || []).find(entry => entry.id === approvalId);
+        if (!item) return { status: 404, message: '审批记录不存在' };
+        if (!canDecideApproval(user, item)) return { status: 403, message: '当前账号无权处理该审批' };
+        // 已结束的审批不可再次决策，避免重复流转覆盖最终结果。
+        if (item.currentStage === 'completed' || item.status === '已通过' || item.status === '已驳回') {
+          return { status: 400, message: '该审批已结束，不能重复处理' };
+        }
+        if (!['approved', 'rejected'].includes(decision)) {
+          return { status: 400, message: '无效的审批决策' };
+        }
+        if (decision === 'approved') {
+          if (item.currentStage === 'approver') {
+            item.status = '待客户确认';
+            item.currentStage = 'customer';
+            item.approvedBy = user.id;
+            createNotification(lockDb, item.projectId, '审批流转通知', `${item.title} 已通过运维审批，等待甲方客户确认`, 'warning', 'approval', 'approval', item.id);
+          } else {
+            item.status = '已通过';
+            item.currentStage = 'completed';
+            item.approvedBy = user.id;
+            createNotification(lockDb, item.projectId, '审批结果通知', `${item.title} 已完成客户确认`, 'info', 'approval', 'approval', item.id);
+          }
         } else {
-          item.status = '已通过';
+          item.status = '已驳回';
           item.currentStage = 'completed';
           item.approvedBy = user.id;
-          createNotification(db, item.projectId, '审批结果通知', `${item.title} 已完成客户确认`, 'info', 'approval', 'approval', item.id);
+          item.rejectionReason = body.reason || '';
+          createNotification(lockDb, item.projectId, '审批结果通知', `${item.title} 已驳回${item.rejectionReason ? '：' + item.rejectionReason : ''}`, 'warning', 'approval', 'approval', item.id);
         }
-      } else {
-        item.status = '已驳回';
-        item.currentStage = 'completed';
-        item.approvedBy = user.id;
-        item.rejectionReason = body.reason || '';
-        createNotification(db, item.projectId, '审批结果通知', `${item.title} 已驳回${item.rejectionReason ? '：' + item.rejectionReason : ''}`, 'warning', 'approval', 'approval', item.id);
-      }
-      item.updatedAt = now();
-      if (body.relatedType === 'changeRecord' || item.category === 'change') {
-        const target = (db.changeRecords || []).find(entry => entry.id === item.relatedId);
-        // 仅同步同项目的变更记录，避免跨项目篡改他人数据。
-        if (target && target.projectId === item.projectId) { target.status = item.status; target.rejectionReason = item.rejectionReason || ''; }
-      }
-      appendAuditLog(db, user, 'decision', 'approval', item.id, `${item.title} ${item.status}`, item.projectId);
-      await writeDb(db);
-      return json(res, 200, item);
+        item.updatedAt = now();
+        if (body.relatedType === 'changeRecord' || item.category === 'change') {
+          const target = (lockDb.changeRecords || []).find(entry => entry.id === item.relatedId);
+          // 仅同步同项目的变更记录，避免跨项目篡改他人数据。
+          if (target && target.projectId === item.projectId) { target.status = item.status; target.rejectionReason = item.rejectionReason || ''; }
+        }
+        appendAuditLog(lockDb, user, 'decision', 'approval', item.id, `${item.title} ${item.status}`, item.projectId);
+        await writeDb(lockDb);
+        return { status: 200, body: item };
+      });
+      if (outcome.status !== 200) return json(res, outcome.status, { message: outcome.message });
+      return json(res, 200, outcome.body);
     }
 
     // 作废/删除审批：变更流程的审批记录只能随变更记录一并删除，避免变更记录停留在无审批的半闭环状态。
@@ -10728,19 +10741,24 @@ const requestHandler = async (req, res) => {
       const user = requireEditor(req, res, db);
       if (!user) return;
       const approvalId = pathname.split('/')[3];
-      const index = (db.approvals || []).findIndex(item => item.id === approvalId);
-      if (index === -1) return json(res, 404, { message: '审批记录不存在' });
-      const target = db.approvals[index];
-      const linkedChange = (db.changeRecords || []).find(entry => entry.approvalId === target.id || (target.category === 'change' && entry.id === target.relatedId));
-      if (linkedChange) return json(res, 400, { message: '该审批属于变更记录流程，请删除对应变更记录' });
-      if (user.role !== 'admin') {
-        if (target.requestedBy !== user.id) return json(res, 403, { message: '仅支持作废自己提交的审批' });
-        if (target.currentStage === 'completed') return json(res, 403, { message: '已完成的审批不能作废' });
-      }
-      db.approvals.splice(index, 1);
-      removeNotificationsBySource(db, 'approval', approvalId);
-      appendAuditLog(db, user, 'delete', 'approval', target.id, `作废审批 ${target.title}`, target.projectId);
-      await writeDb(db);
+      // 作废审批需与并发的审批决策/变更编辑同一临界区，避免在关联判断后审批又被并发改写。
+      const outcome = await withDbMutationLock(async () => {
+        const lockDb = await readDb();
+        const target = (lockDb.approvals || []).find(item => item.id === approvalId);
+        if (!target) return { status: 404, message: '审批记录不存在' };
+        const linkedChange = (lockDb.changeRecords || []).find(entry => entry.approvalId === target.id || (target.category === 'change' && entry.id === target.relatedId));
+        if (linkedChange) return { status: 400, message: '该审批属于变更记录流程，请删除对应变更记录' };
+        if (user.role !== 'admin') {
+          if (target.requestedBy !== user.id) return { status: 403, message: '仅支持作废自己提交的审批' };
+          if (target.currentStage === 'completed') return { status: 403, message: '已完成的审批不能作废' };
+        }
+        lockDb.approvals = (lockDb.approvals || []).filter(item => item.id !== approvalId);
+        removeNotificationsBySource(lockDb, 'approval', approvalId);
+        appendAuditLog(lockDb, user, 'delete', 'approval', target.id, `作废审批 ${target.title}`, target.projectId);
+        await writeDb(lockDb);
+        return { status: 200 };
+      });
+      if (outcome.status !== 200) return json(res, outcome.status, { message: outcome.message });
       return json(res, 200, { ok: true });
     }
 
