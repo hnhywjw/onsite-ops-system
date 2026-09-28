@@ -109,3 +109,24 @@ Agent 在任务执行过程中发现的条目应遵循以下格式：
   - 恢复接口需要管理员二次验证与 CSRF：请求体传 `{"password":"Admin123!"}`，请求头带登录响应返回的 `csrfToken`（`X-CSRF-Token`），文件名需 `encodeURIComponent`（含 `+` 时尤其重要）。
   - 忘记密码限流（`FP_MAX_ATTEMPTS=5`，锁 30 分钟）是内存态，短时间连续多次运行回归会触发 429 假失败；重启 `npm start` 服务即可清零。
   - `npm run e2e` 的自动登出提示断言存在竞态，偶发失败时重跑一次即可确认。
+  - `npm run e2e` 的「AI 巡检任务创建与执行」步骤等待探测结果时，`page.waitForFunction` 的 `{ timeout: 90000 }` 被误传为第二参数（arg），实际按默认 30s 生效；探测较慢时会偶发超时，重跑一次即可确认，与本轮业务代码无关。
+  - `npm run e2e` 在「管理员审核日报并退回周报」前 `selectOption('#workReportFilterProject', ...)` 偶发 `did not find some options`：项目筛选选项来自登录时 `pageSize=100` 的项目列表，而 `scripts/regression.js` 的「布局隔离项目」等测试项目未在用例结束时删除、会持续累积；库内项目接近或超过 100 时新建项目可能落到该页之外导致偶发失败，重跑一次即可确认，属测试数据治理问题。
+
+[GitHub 推送凭据来源]
+- Date: 2026-09-19
+- Context: 用户提供个人 GitHub PAT 并要求后续直接使用
+- Category: 环境配置
+- Instructions:
+  - GitHub 凭据存放在 `/root/.config/gh/hosts.yml`（位于仓库之外），`git push` 与 `gh` 经 `gh auth git-credential` 免密可用；token 值禁止写入仓库文件或在对话中回显。
+  - 该 token 仅含 `repo` scope，缺少 `read:org`；仓库读写、push、release 上传正常，涉及组织数据的 `gh` 子命令可能报 scope 错误。
+  - `gh auth login --with-token` 会校验 scope 并因缺少 `read:org` 失败，更新凭据时直接改 `hosts.yml` 即可。
+  - 家目录可能随环境重建而丢失；若 `gh auth status` 显示未登录，需要用户重新提供 token。
+
+[写失败回滚验证开关]
+- Date: 2026-09-26
+- Context: Agent 为验证 `writeDb` 落库失败回滚逻辑新增可控注入开关
+- Category: 测试方法
+- Instructions:
+  - 非生产环境下用 `FORCE_DB_WRITE_FAILURE_FILE=/path/flag npm start` 启动；当该文件存在时，`writeDb` 在写 MySQL 前抛错，用于验证内存回滚与持久层一致。
+  - 创建标志文件即注入失败，重命名或移走文件即恢复，不受后台定时写库干扰（数字计数会被启动时的调度器写库消耗，故改用文件开关）。
+  - `NODE_ENV=production` 下该开关被忽略，生产环境不会启用注入。

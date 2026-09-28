@@ -11752,11 +11752,18 @@ const requestHandler = async (req, res) => {
       if (index === -1) return json(res, 404, { message: '工作汇报不存在' });
       const target = db.workReports[index];
       if (!canManageWorkReport(user, target)) return json(res, 403, { message: '无权删除该工作汇报' });
-      if (target.status !== 'draft') return json(res, 400, { message: '仅草稿工作汇报可以删除' });
+      // 创建者仅能删除草稿；已提交/已确认/已锁定的汇报已进入审核闭环，仅管理员可强制删除，
+      // 否则会永久阻断其关联用户/项目的删除。
+      if (target.status !== 'draft' && user.role !== 'admin') {
+        return json(res, 400, { message: '已提交的工作汇报仅管理员可删除' });
+      }
+      const wasSubmitted = target.status !== 'draft';
       db.workReports.splice(index, 1);
-      appendAuditLog(db, user, 'delete', 'workReport', target.id, '删除草稿工作汇报', target.projectId);
+      // 级联清理该汇报的审核通知，避免遗留指向已删除汇报的空通知。
+      removeNotificationsBySource(db, 'workReport', target.id);
+      appendAuditLog(db, user, 'delete', 'workReport', target.id, wasSubmitted ? `管理员强制删除${reportTypeLabel(target.reportType)}（原状态 ${target.status}）` : '删除草稿工作汇报', target.projectId);
       await writeDb(db);
-      return json(res, 200, { ok: true, message: '工作汇报草稿已删除' });
+      return json(res, 200, { ok: true, message: wasSubmitted ? '工作汇报已强制删除' : '工作汇报草稿已删除' });
     }
 
     if (req.method === 'POST' && pathname.startsWith('/api/work-reports/') && pathname.endsWith('/submit')) {

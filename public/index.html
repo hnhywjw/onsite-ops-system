@@ -4754,7 +4754,9 @@
         const actions = [];
         actions.push(`<button class="secondary" data-action="view-work-report" data-id="${item.id}" type="button">详情</button>`);
         if (canEdit && canEditWorkReportContent(item.status)) actions.push(`<button class="secondary" data-action="edit-work-report" data-id="${attrEsc(item.id)}" type="button">编辑</button>`);
+        const canForceDelete = state.user.role === 'admin';
         if (canEdit && item.status === 'draft') actions.push(`<button class="secondary" data-action="delete-work-report" data-id="${attrEsc(item.id)}" type="button">删除</button>`);
+        else if (canForceDelete) actions.push(`<button class="secondary" data-action="delete-work-report" data-force="1" data-id="${attrEsc(item.id)}" type="button" style="background:#fee2e2;color:#dc2626;border-color:#fecaca;">强制删除</button>`);
         if (canEdit && (item.status === 'draft' || item.status === 'returned')) actions.push(`<button class="secondary" data-action="submit-work-report" data-id="${attrEsc(item.id)}" type="button">提交</button>`);
         if (canReview && item.status === 'submitted') actions.push(`<button class="secondary" data-action="approve-work-report" data-id="${item.id}" type="button">确认</button>`);
         if (canReview && (item.status === 'submitted' || item.status === 'approved')) actions.push(`<button class="secondary" data-action="return-work-report" data-id="${item.id}" type="button">退回</button>`);
@@ -10588,10 +10590,11 @@
           return;
         }
         if (button.dataset.action === 'delete-work-report') {
-          const confirmed = await showConfirm('确认删除该草稿工作汇报？');
+          const force = button.dataset.force === '1';
+          const confirmed = await showConfirm(force ? '该工作汇报已进入审核流程，强制删除将同时清除其审核通知且不可恢复，确认强制删除？' : '确认删除该草稿工作汇报？');
           if (!confirmed) return;
           await api(`/api/work-reports/${report.id}`, { method: 'DELETE' });
-          showToast('工作汇报草稿已删除');
+          showToast(force ? '工作汇报已强制删除' : '工作汇报草稿已删除');
         }
         if (button.dataset.action === 'submit-work-report') {
           const validationError = validateWorkReportPayload({
