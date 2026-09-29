@@ -127,6 +127,9 @@ function collectionChanged(previous, next, key) {
     }
     return false;
   }
+  // notifications/aiInspectionResults 在 cloneDbSnapshot 中只做数组浅拷贝，元素对象与缓存共享引用，
+  // 原地修改（如标记已读）后两侧 JSON 完全相同，无法靠字符串比较发现，需依赖元素上的 _dirty 标记。
+  if (arrayHasDirtyItems(curr)) return true;
   return JSON.stringify(prev) !== JSON.stringify(curr);
 }
 
@@ -8051,6 +8054,7 @@ const requestHandler = async (req, res) => {
       db.sessions = (db.sessions || []).filter(item => item.userId !== user.id);
       appendAuditLog(db, user, 'update', 'user', user.id, '修改个人密码');
       await writeDb(db, { replaceCollections: ['sessions'] });
+      closeUserWebSockets(user.id);
       return json(res, 200, { message: '密码修改成功' });
     }
 
@@ -8084,26 +8088,32 @@ const requestHandler = async (req, res) => {
       if (!verifyCaptchaToken(body.captchaToken, body.captcha)) {
         return json(res, 401, { message: '验证码错误' });
       }
-      const user = db.users.find(item => item.username === username && item.status !== 'disabled');
-      if (!user) {
-        return json(res, 200, { message: '如验证信息正确，密码将被重置' });
-      }
-      if (!user.securityAnswerHash || !verifyPassword(body.securityAnswer, user.securityAnswerHash)) {
-        return json(res, 200, { message: '如验证信息正确，密码将被重置' });
-      }
-      if (!consumeForgotPasswordTicket(body.ticket, username)) {
-        return json(res, 400, { message: '验证已过期，请重新获取验证码' });
-      }
+      // 密码强度先于票据消费校验，避免弱密码白白消耗一次性票据。
       if (!body.newPassword || String(body.newPassword).length < 8) {
         return json(res, 400, { message: '密码长度不能少于 8 位' });
       }
       if (!/[a-zA-Z]/.test(body.newPassword) || !/[0-9]/.test(body.newPassword) || !/[^a-zA-Z0-9]/.test(body.newPassword)) {
         return json(res, 400, { message: '密码必须包含字母、数字和特殊字符' });
       }
+      // 携带了票据就必须有效（且一次性）：命中即删，答错安全问题同样消耗，避免在票据 TTL 内
+      // 用同一票据反复尝试同一账号的安全问题。未携带票据时保持原有的通用 200 文案。
+      const providedTicket = String(body.ticket || '').trim();
+      if (providedTicket && !consumeForgotPasswordTicket(providedTicket, username)) {
+        return json(res, 400, { message: '验证已过期，请重新获取验证码' });
+      }
+      const user = db.users.find(item => item.username === username && item.status !== 'disabled');
+      if (!user || !user.securityAnswerHash || !verifyPassword(body.securityAnswer, user.securityAnswerHash)) {
+        return json(res, 200, { message: '如验证信息正确，密码将被重置' });
+      }
+      // 成功路径必须校验一次性票据（前端流程由 /forgot-password/verify 签发）。
+      if (!providedTicket) {
+        return json(res, 400, { message: '验证已过期，请重新获取验证码' });
+      }
       user.passwordHash = hash(body.newPassword);
       db.sessions = (db.sessions || []).filter(item => item.userId !== user.id);
       appendAuditLog(db, user, 'update', 'user', user.id, '通过安全问题重置密码');
       await writeDb(db, { replaceCollections: ['sessions'] });
+      closeUserWebSockets(user.id);
       return json(res, 200, { reset: true, message: '密码重置成功，请使用新密码登录' });
     }
 
@@ -8373,8 +8383,11 @@ const requestHandler = async (req, res) => {
     if (req.method === 'POST' && pathname === '/api/logout') {
       const sessionToken = getSessionToken(req);
       if (sessionToken) {
+        const session = (db.sessions || []).find(item => item.token === sessionToken);
+        const sessionOwnerId = session ? session.userId : '';
         db.sessions = (db.sessions || []).filter(item => item.token !== sessionToken);
         await writeDb(db, { silent: true, replaceCollections: ['sessions'] });
+        if (sessionOwnerId) closeUserWebSockets(sessionOwnerId);
       }
       return json(res, 200, { ok: true }, { 'Set-Cookie': buildClearSessionCookie(req, db.systemConfig) });
     }
@@ -8654,6 +8667,7 @@ const requestHandler = async (req, res) => {
       db.sessions = (db.sessions || []).filter(item => item.userId !== target.id);
       appendAuditLog(db, approver, 'update', 'user', target.id, `拒绝自注册账号 ${target.name}`, target.projectId);
       await writeDb(db, { replaceCollections: ['sessions'] });
+      closeUserWebSockets(target.id);
       return json(res, 200, { message: '已拒绝该注册申请', user: sanitizeUser(target) });
     }
 
@@ -8713,6 +8727,7 @@ const requestHandler = async (req, res) => {
       db.sessions = (db.sessions || []).filter(item => item.userId !== target.id);
       appendAuditLog(db, admin, 'update', 'user', target.id, `禁用账号 ${target.name}`, target.projectId);
       await writeDb(db, { replaceCollections: ['sessions'] });
+      closeUserWebSockets(target.id);
       return json(res, 200, { message: '账号已禁用', user: sanitizeUser(target) });
     }
 
@@ -8803,6 +8818,7 @@ const requestHandler = async (req, res) => {
       if (body.password || roleOrProjectChanged) {
         db.sessions = (db.sessions || []).filter(item => item.userId !== target.id);
         await writeDb(db, { replaceCollections: ['sessions'] });
+        closeUserWebSockets(target.id);
       } else {
         await writeDb(db);
       }
@@ -8849,8 +8865,21 @@ const requestHandler = async (req, res) => {
       const removedUser = db.users[index];
       db.users.splice(index, 1);
       db.sessions = (db.sessions || []).filter(item => item.userId !== targetUserId);
+      // 清理通知里按用户 id 存储的已读/隐藏映射，避免删除账号后残留永不会被使用的孤儿键。
+      for (const notification of db.notifications || []) {
+        let notificationChanged = false;
+        for (const field of ['readBy', 'hiddenBy']) {
+          const map = notification[field];
+          if (map && typeof map === 'object' && map[targetUserId] !== undefined) {
+            delete map[targetUserId];
+            notificationChanged = true;
+          }
+        }
+        if (notificationChanged) notification._dirty = true;
+      }
       appendAuditLog(db, user, 'delete', 'user', targetUserId, `删除人员 ${removedUser.name || targetUserId}`, removedUser.projectId || '');
-      await writeDb(db, { replaceCollections: ['sessions'] });
+      await writeDb(db, { replaceCollections: ['sessions', 'notifications'] });
+      closeUserWebSockets(targetUserId);
       return json(res, 200, { ok: true });
     }
 
@@ -10438,13 +10467,15 @@ const requestHandler = async (req, res) => {
       if (approver.id === user.id) return json(res, 400, { message: '不能指定提交人本人为审批人' });
       const customer = requireExistingUser(body.customerId, db);
       if (!customer || customer.projectId !== projectId || customer.role !== 'customer') return json(res, 400, { message: '甲方客户不存在或不属于当前项目' });
+      const riskLevel = String(body.riskLevel || '中').trim();
+      if (!['低', '中', '高'].includes(riskLevel)) return json(res, 400, { message: '风险等级无效' });
       const item = {
         id: id('change'),
         projectId,
         assetId: body.assetId || '',
         title: title,
         content: content,
-        riskLevel: body.riskLevel || '中',
+        riskLevel,
         status: '待运维审批',
         approverId: approver.id,
         approverName: approver.name,
@@ -10502,7 +10533,11 @@ const requestHandler = async (req, res) => {
         }
         if (body.title !== undefined) target.title = String(body.title || '').trim() || target.title;
         if (body.content !== undefined) target.content = String(body.content || '').trim() || target.content;
-        if (body.riskLevel !== undefined) target.riskLevel = body.riskLevel;
+        if (body.riskLevel !== undefined) {
+          const nextRiskLevel = String(body.riskLevel).trim();
+          if (!['低', '中', '高'].includes(nextRiskLevel)) return { status: 400, message: '风险等级无效' };
+          target.riskLevel = nextRiskLevel;
+        }
         if (body.assetId !== undefined) {
           if (body.assetId) {
             const nextChangeAsset = requireExistingAsset(body.assetId, lockDb);
@@ -12583,12 +12618,18 @@ const requestHandler = async (req, res) => {
       const upgradesDir = path.join(dataDir, 'upgrades');
       const readyFlag = path.join(upgradesDir, 'UPGRADE_READY');
       const pendingDir = path.join(upgradesDir, 'pending');
-      const pendingVersion = fs.existsSync(path.join(pendingDir, 'package.json'))
-        ? JSON.parse(fs.readFileSync(path.join(pendingDir, 'package.json'), 'utf8')).version || 'unknown'
-        : null;
-      const ready = fs.existsSync(readyFlag)
-        ? JSON.parse(fs.readFileSync(readyFlag, 'utf8'))
-        : null;
+      // 升级包/标记文件可能被中断的升级流程写坏，解析失败时按「无」处理，避免状态接口直接 500。
+      const readJsonFile = filePath => {
+        try {
+          if (!fs.existsSync(filePath)) return null;
+          return JSON.parse(fs.readFileSync(filePath, 'utf8'));
+        } catch (_) {
+          return null;
+        }
+      };
+      const pendingManifest = readJsonFile(path.join(pendingDir, 'package.json'));
+      const pendingVersion = pendingManifest ? (pendingManifest.version || 'unknown') : null;
+      const ready = readJsonFile(readyFlag);
       const currentVersion = packageInfo.version;
       return json(res, 200, {
         currentVersion,
@@ -12614,6 +12655,16 @@ const server = http.createServer(requestHandler);
 
 const wss = new WebSocketServer({ noServer: true });
 const wsClients = new Set();
+
+// 会话被撤销（注销、改密、禁用、拒绝、删除、改角色/项目）后，需同步断开该用户已建立的
+// WebSocket，否则该连接会按握手时的角色/项目继续接收广播，直到 socket 自行断开。
+function closeUserWebSockets(userId) {
+  if (!userId) return;
+  for (const ws of wsClients) {
+    if (ws.userId !== userId) continue;
+    try { ws.close(1008, 'session invalidated'); } catch (_) {}
+  }
+}
 
 function attachWsUpgradeHandler(targetServer) {
   targetServer.on('upgrade', (request, socket, head) => {
