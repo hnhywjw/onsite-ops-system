@@ -5067,6 +5067,16 @@ function advanceAiTaskNextExecution(task, referenceMs = Date.now()) {
   return true;
 }
 
+// 判断周期任务是否已逾期超过一个完整周期（通常意味着服务停机期间漏跑）。
+// 只有这种情况才允许在读取任务列表时顺延到下一个未来周期；仅逾期一个周期以内的
+// 任务交由调度器补跑，读接口不得抢跑。
+function isAiTaskOverdueBeyondCycle(task, referenceMs = Date.now()) {
+  if (!task.cycle || !task.executedAt) return false;
+  const next = { cycle: task.cycle, executedAt: task.executedAt };
+  if (!addAiTaskCycleOnce(next)) return false;
+  return parseAiInspectionScheduleTime(next.executedAt) <= referenceMs;
+}
+
 // 仅当直连来源是本机反向代理时才信任转发头，避免客户端伪造 X-Forwarded-*。
 function isTrustedProxyRequest(req) {
   const remoteAddress = req.socket?.remoteAddress || '';
@@ -11113,12 +11123,11 @@ const requestHandler = async (req, res) => {
       (db.aiInspectionTasks || []).forEach(task => {
         if (!task.cycle) return;
         if (task.status === '已停用' || task.status === '执行中') return;
+        // 读接口不清理历史结果；仅当任务逾期超过一个完整周期（服务停机漏跑）时才顺延跳过，
+        // 逾期在一个周期以内的任务留给调度器补跑，避免打开列表就吞掉本轮巡检。
+        if (!isAiTaskOverdueBeyondCycle(task, referenceMs)) return;
         if (!ensureAiTaskFutureExecution(task, referenceMs)) return;
         changed = true;
-        if (resultMap.has(task.id)) {
-          db.aiInspectionResults = (db.aiInspectionResults || []).filter(item => item.taskId !== task.id);
-          resultMap.delete(task.id);
-        }
         if (task.status === '已完成' || task.status === '失败') task.status = '待执行';
       });
       if (changed) await writeDb(db, { silent: true });
