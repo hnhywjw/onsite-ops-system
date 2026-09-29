@@ -4849,6 +4849,91 @@ function removeNotificationsBySource(db, sourceType, sourceId) {
   return before - db.notifications.length;
 }
 
+// 在同一项目内按内容前缀匹配最长的候选标题/名称，避免短名误配到长名记录。
+function pickLongestTitleMatch(items, projectId, keyOf, predicate) {
+  let best = null;
+  for (const item of items || []) {
+    if (!item || item.projectId !== projectId) continue;
+    const key = String(keyOf(item) || '');
+    if (!key || !predicate(key)) continue;
+    if (!best || key.length > best.keyLength) best = { item, keyLength: key.length };
+  }
+  return best ? best.item : null;
+}
+
+// 依据通知类别与内容特征，在同一项目内匹配到产生该通知的业务实体。
+// 仅用于历史通知来源回填，属尽力匹配（历史内容不含实体 id，同名记录存在歧义）。
+function matchNotificationSource(db, notification) {
+  const category = String(notification.category || '');
+  const title = String(notification.title || '');
+  const content = String(notification.content || '');
+  const projectId = notification.projectId || '';
+  if (!content) return null;
+  if (category === 'ai-inspection') {
+    const task = pickLongestTitleMatch(db.aiInspectionTasks, projectId, item => item.title, key => content.startsWith(`${key} `));
+    return task ? { sourceType: 'aiInspectionTask', sourceId: task.id } : null;
+  }
+  if (category === 'config-backup') {
+    const plan = pickLongestTitleMatch(db.configBackupPlans, projectId, item => item.name || '配置备份', key => content.startsWith(`${key} 失败`));
+    return plan ? { sourceType: 'configBackupPlan', sourceId: plan.id } : null;
+  }
+  if (category === 'inspection-overdue') {
+    const plan = pickLongestTitleMatch(db.inspectionPlans, projectId, item => item.title, key => content.startsWith(`巡检计划 ${key} 将于`));
+    return plan ? { sourceType: 'inspectionPlan', sourceId: plan.id } : null;
+  }
+  if (category === 'inspection') {
+    const plan = pickLongestTitleMatch(db.inspectionPlans, projectId, item => item.title, key => content.startsWith(`${key} 巡检发现异常`));
+    return plan ? { sourceType: 'inspectionPlan', sourceId: plan.id } : null;
+  }
+  if (category === 'maintenance-expiry') {
+    const asset = pickLongestTitleMatch(db.assets, projectId, item => item.name, key => content.startsWith(`资产 ${key}（`));
+    return asset ? { sourceType: 'asset', sourceId: asset.id } : null;
+  }
+  if (category === 'monitor-alert') {
+    const asset = pickLongestTitleMatch(db.assets, projectId, item => item.name, key => content.startsWith(`资产 "${key}"`));
+    return asset ? { sourceType: 'asset', sourceId: asset.id } : null;
+  }
+  if (category === 'inventory') {
+    const spare = pickLongestTitleMatch(db.spareParts, projectId, item => item.name, key => content.startsWith(`${key} 库存达到安全阈值`) || content.startsWith(`${key} 当前库存`));
+    return spare ? { sourceType: 'sparePart', sourceId: spare.id } : null;
+  }
+  if (category === 'incident') {
+    const incident = pickLongestTitleMatch(db.incidentRecords, projectId, item => item.title, key => content.startsWith(`${key} 已超时`));
+    return incident ? { sourceType: 'incident', sourceId: incident.id } : null;
+  }
+  if (category === 'approval') {
+    // 变更流程通知的标题为「变更待审批」，其余审批通知（待处理/流转/结果）对应审批记录。
+    const isChange = title === '变更待审批' || content.includes('已提交给') || content.includes('已重新提交');
+    if (isChange) {
+      const change = pickLongestTitleMatch(db.changeRecords, projectId, item => item.title, key => content.startsWith(`${key} 已`));
+      return change ? { sourceType: 'changeRecord', sourceId: change.id } : null;
+    }
+    const approval = pickLongestTitleMatch(db.approvals, projectId, item => item.title, key => content.startsWith(key));
+    return approval ? { sourceType: 'approval', sourceId: approval.id } : null;
+  }
+  return null;
+}
+
+// 历史通知来源回填：早期通知未记录 sourceType/sourceId，删除业务实体时无法级联清理。
+// 逐条按内容特征匹配业务实体并补齐来源标记；已被标记的通知跳过，保证幂等。
+function backfillNotificationSources(db) {
+  const stats = { scanned: 0, updated: 0, unmatched: 0, byType: {} };
+  const notifications = Array.isArray(db.notifications) ? db.notifications : [];
+  for (const notification of notifications) {
+    if (!notification) continue;
+    if (notification.sourceType && notification.sourceId) continue;
+    stats.scanned += 1;
+    const source = matchNotificationSource(db, notification);
+    if (!source) { stats.unmatched += 1; continue; }
+    notification.sourceType = source.sourceType;
+    notification.sourceId = source.sourceId;
+    notification._dirty = true;
+    stats.updated += 1;
+    stats.byType[source.sourceType] = (stats.byType[source.sourceType] || 0) + 1;
+  }
+  return stats;
+}
+
 function getActiveProjectEngineers(db, projectId) {
   return (db.users || []).filter(item => item.projectId === projectId && item.role === 'engineer' && item.status !== 'disabled' && item.status !== 'rejected');
 }
@@ -10750,6 +10835,7 @@ const requestHandler = async (req, res) => {
       if (!target) return json(res, 404, { message: '故障记录不存在' });
       if (!canDeleteOwnedRecord(user, target, target.createdBy || '')) return json(res, 403, { message: '仅支持修改自己创建的故障记录' });
       const body = await readBody(req);
+      const previousIncidentSlaStatus = String(target.slaStatus || '正常');
       if (body.status !== undefined && !incidentStatusOptions.includes(String(body.status))) return json(res, 400, { message: '无效的故障处理状态' });
       if (body.slaStatus !== undefined && !incidentSlaStatusOptions.includes(String(body.slaStatus))) return json(res, 400, { message: '无效的 SLA 状态' });
       if (body.severity !== undefined && !incidentSeverityOptions.includes(String(body.severity))) return json(res, 400, { message: '无效的严重级别' });
@@ -10780,6 +10866,10 @@ const requestHandler = async (req, res) => {
           if (!nextAsset || nextAsset.projectId !== target.projectId) return json(res, 400, { message: '关联资产不存在或不属于当前项目' });
         }
         target.assetId = body.assetId;
+      }
+      // SLA 由「正常/预警」跃迁到「超时」时补发提醒；仅改其他字段或重复提交「超时」不会重复通知。
+      if (previousIncidentSlaStatus !== '超时' && target.slaStatus === '超时') {
+        createNotification(db, target.projectId, 'SLA 超时提醒', `${target.title} 已超时`, 'error', 'incident', 'incident', target.id);
       }
       appendAuditLog(db, user, 'update', 'incident', incidentId, `修改故障记录 ${target.title}`, target.projectId);
       await writeDb(db);
@@ -12195,6 +12285,19 @@ const requestHandler = async (req, res) => {
       appendAuditLog(db, user, 'upload', 'system', '', `上传 HTTPS 登录证书 ${db.systemConfig.httpsCertFilename} 和私钥 ${db.systemConfig.httpsKeyFilename}`);
       await writeDb(db);
       return json(res, 200, { message: 'HTTPS 证书上传成功', systemConfig: db.systemConfig });
+    }
+
+    // 一次性维护接口：为历史通知按内容特征补齐 sourceType/sourceId，便于删除实体时级联清理。
+    if (req.method === 'POST' && pathname === '/api/system/backfill-notification-sources') {
+      const user = requireAdmin(req, res, db);
+      if (!user) return;
+      const stats = backfillNotificationSources(db);
+      appendAuditLog(db, user, 'backfill', 'notification', '', `回填历史通知来源：扫描 ${stats.scanned} 条，补齐 ${stats.updated} 条`);
+      await writeDb(db);
+      return json(res, 200, {
+        message: `历史通知来源回填完成：扫描 ${stats.scanned} 条，补齐 ${stats.updated} 条，无法匹配 ${stats.unmatched} 条`,
+        ...stats
+      });
     }
 
     if (req.method === 'POST' && pathname === '/api/system/import') {

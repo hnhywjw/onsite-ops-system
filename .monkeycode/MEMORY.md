@@ -152,6 +152,15 @@ Agent 在任务执行过程中发现的条目应遵循以下格式：
   - 智能巡检对象删除会连带清理其任务与配置备份计划，需先收集这些子实体 ID，再分别清理对应通知，避免遗留空通知。
   - 资产删除（普通与 `?cascade=1` 强制级联）都要清理 `asset` 来源通知，并连带清理其巡检对象派生任务/备份计划的通知；备件删除清理 `sparePart` 来源通知。
   - 强制删除项目（`?force=1`）会级联清理 `assetRelations`（按资产 ID，无 `projectId` 字段）并失效拓扑/流量运行时状态，落库成功后清理资料附件磁盘目录。
+  - 历史通知若缺少 `sourceType`/`sourceId`，运行 `node scripts/backfill-notification-sources.js`（管理员接口 `POST /api/system/backfill-notification-sources` 的封装）按内容特征回填；脚本幂等，可重复执行。
+
+[故障 SLA 人工控制与跃迁通知]
+- Date: 2026-09-29
+- Context: Agent 实现故障 SLA 超时补发通知时确认
+- Category: 业务规则
+- Instructions:
+  - 故障 `slaStatus` 始终由人工维护，禁止引入自动 SLA 判定或定时改写。
+  - 仅在 `slaStatus` 由「正常/预警」跃迁到「超时」时补发一次 `SLA 超时提醒`；重复提交「超时」或仅改其他字段不重复通知，恢复后再超时视为新一次跃迁。
 
 [GitHub 推送凭据来源]
 - Date: 2026-09-19
