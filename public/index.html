@@ -6782,9 +6782,10 @@
         menu.style.display = 'none';
         openEditRelationModal(state.topoContextRelId);
       });
-      menu.querySelector('[data-action="delete"]').addEventListener('click', () => {
+      menu.querySelector('[data-action="delete"]').addEventListener('click', async () => {
         menu.style.display = 'none';
-        deleteTopoRelation(state.topoContextRelId);
+        const relId = state.topoContextRelId;
+        if (relId && await showConfirm('确定删除该连接关系吗？')) deleteTopoRelation(relId);
       });
     }
 
@@ -9635,6 +9636,11 @@
 
     loadRememberedUsername();
 
+    // 后台刷新类请求失败时已有各自的提示，这里兜底捕获未处理的 Promise 拒绝，避免只在控制台静默报错。
+    window.addEventListener('unhandledrejection', event => {
+      console.error('未处理的异步错误:', event.reason && event.reason.message ? event.reason.message : event.reason);
+    });
+
     window.addEventListener('load', () => {
       state.captchaToken = state.captchaToken || window.__captchaToken || '';
       state.ldapCaptchaToken = state.ldapCaptchaToken || window.__ldapCaptchaToken || '';
@@ -9667,8 +9673,13 @@
       }
     }
 
+    let activeConfirmSettle = null;
+
     function showConfirm(message) {
       return new Promise((resolve) => {
+        // 上一个确认框尚未关闭时再次弹出（例如重复点击删除按钮），先以「取消」结算前者，
+        // 否则两组监听器会并存，一次点击同时 resolve 出两次删除。
+        if (activeConfirmSettle) activeConfirmSettle(false);
         const messageEl = document.getElementById('confirmMessage');
         const modal = document.getElementById('confirmModal');
         const okBtn = document.getElementById('confirmOkBtn');
@@ -9683,10 +9694,12 @@
         const settle = value => {
           if (settled) return;
           settled = true;
+          if (activeConfirmSettle === settle) activeConfirmSettle = null;
           cleanup();
           closeModal('confirmModal');
           resolve(value);
         };
+        activeConfirmSettle = settle;
         const backdrop = event => {
           if (event.target === modal) settle(false);
         };
@@ -9711,6 +9724,7 @@
 
     function showDangerConfirm(message, confirmWord = '确认操作') {
       return new Promise((resolve) => {
+        if (activeConfirmSettle) activeConfirmSettle(false);
         const messageEl = document.getElementById('confirmMessage');
         const modal = document.getElementById('confirmModal');
         const okBtn = document.getElementById('confirmOkBtn');
@@ -9737,10 +9751,12 @@
         const settle = value => {
           if (settled) return;
           settled = true;
+          if (activeConfirmSettle === settle) activeConfirmSettle = null;
           cleanup();
           closeModal('confirmModal');
           resolve(value);
         };
+        activeConfirmSettle = settle;
         const backdrop = event => {
           if (event.target === modal) settle(false);
         };
@@ -10213,21 +10229,21 @@
     });
     document.getElementById('aiInspectionResultPrevBtn').addEventListener('click', () => {
       const page = Math.max(1, (state.aiInspectionResultPage || 1) - 1);
-      loadAiInspectionResults({ page }).then(() => renderAiInspection());
+      loadAiInspectionResults({ page }).then(() => renderAiInspection()).catch(() => {});
     });
     document.getElementById('aiInspectionResultNextBtn').addEventListener('click', () => {
       const totalPages = Math.max(1, Number(state.aiInspectionResultTotalPages || 1));
       const page = Math.min(totalPages, (state.aiInspectionResultPage || 1) + 1);
-      loadAiInspectionResults({ page }).then(() => renderAiInspection());
+      loadAiInspectionResults({ page }).then(() => renderAiInspection()).catch(() => {});
     });
     document.getElementById('aiInspectionReportPrevBtn').addEventListener('click', () => {
       const page = Math.max(1, (state.aiInspectionReportPage || 1) - 1);
-      loadAiInspectionReports({ page }).then(() => renderAiInspection());
+      loadAiInspectionReports({ page }).then(() => renderAiInspection()).catch(() => {});
     });
     document.getElementById('aiInspectionReportNextBtn').addEventListener('click', () => {
       const totalPages = Math.max(1, Number(state.aiInspectionReportTotalPages || 1));
       const page = Math.min(totalPages, (state.aiInspectionReportPage || 1) + 1);
-      loadAiInspectionReports({ page }).then(() => renderAiInspection());
+      loadAiInspectionReports({ page }).then(() => renderAiInspection()).catch(() => {});
     });
     document.getElementById('configBackupPlanPrevBtn').addEventListener('click', () => {
       state.configBackupPlanPage = Math.max(1, state.configBackupPlanPage - 1);
@@ -11527,13 +11543,13 @@
     ['aiResultSearch', 'aiResultLevelFilter'].forEach(id => {
       const el = document.getElementById(id);
       if (el) el.addEventListener('input', () => {
-        loadAiInspectionResults({ page: 1 }).then(() => renderAiInspection());
+        loadAiInspectionResults({ page: 1 }).then(() => renderAiInspection()).catch(() => {});
       });
     });
     ['aiReportSearch', 'aiReportLevelFilter'].forEach(id => {
       const el = document.getElementById(id);
       if (el) el.addEventListener('input', () => {
-        loadAiInspectionReports({ page: 1 }).then(() => renderAiInspection());
+        loadAiInspectionReports({ page: 1 }).then(() => renderAiInspection()).catch(() => {});
       });
     });
 
@@ -11616,6 +11632,8 @@
         if (!password) {
           setMessage('systemUpgradeMessage', '请输入管理员密码', 'error');
           passwordInput?.focus();
+          button.disabled = false;
+          button.textContent = originalText;
           return;
         }
         const formData = new FormData();
