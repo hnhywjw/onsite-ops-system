@@ -101,21 +101,17 @@ Agent 在任务执行过程中发现的条目应遵循以下格式：
   - 所有 git push 操作必须推送到 `main` 分支，不要使用 `master`。
 
 [回归测试的环境状态治理]
-- Date: 2026-09-15
+- Date: 2026-09-29（合并自 2026-09-15）
 - Context: Agent 修复资产布局图问题后连续运行回归与 e2e 时发现
 - Category: 排错调试
 - Instructions:
   - `npm run regression` 中途失败会残留测试用户/项目/资产，多次中断会污染库并让后续断言连锁失败；此时可登录后调用 `POST /api/system/backups/{filename}/restore`，恢复到 `data/backups` 下本轮最早的 `backup-*.json` 快照（回归脚本在用例前会创建一次 `backup-*.json`，即本轮最干净的基线）。
   - 恢复接口需要管理员二次验证与 CSRF：请求体传 `{"password":"Admin123!"}`，请求头带登录响应返回的 `csrfToken`（`X-CSRF-Token`），文件名需 `encodeURIComponent`（含 `+` 时尤其重要）。
   - 忘记密码限流（`FP_MAX_ATTEMPTS=5`，锁 30 分钟）是内存态，短时间连续多次运行回归会触发 429 假失败；重启 `npm start` 服务即可清零。
-  - `npm run e2e` 的自动登出提示断言存在竞态，偶发失败时重跑一次即可确认。
-  - `npm run e2e` 的「AI 巡检任务创建与执行」步骤等待探测结果时，`page.waitForFunction` 的 `{ timeout: 90000 }` 被误传为第二参数（arg），实际按默认 30s 生效；探测较慢时会偶发超时，重跑一次即可确认，与本轮业务代码无关。
-  - `npm run e2e` 在「管理员审核日报并退回周报」前 `selectOption('#workReportFilterProject', ...)` 偶发 `did not find some options`：项目筛选选项来自登录时 `pageSize=100` 的项目列表，而 `scripts/regression.js` 的「布局隔离项目」等测试项目未在用例结束时删除、会持续累积；库内项目接近或超过 100 时新建项目可能落到该页之外导致偶发失败，重跑一次即可确认，属测试数据治理问题。
-  - `npm run regression` 若紧随 `npm start` 重启后立即运行，偶发在最早期请求直接报 `fetch failed`（连接竞态），等待服务 `GET /api/health` 返回 200 后重跑即过。
-  - `npm run e2e` 在「进入工作汇报链路」的 `page.click('#refreshWorkloadBtn')` 偶发 30s 超时；该按钮本身存在，库内测试数据（项目、`col_ai_inspection_results` 数万条等）累积会拖慢渲染/出现覆盖层，重跑一次即可确认，同样属测试数据治理问题。
-  - `npm run e2e` 在「资料创建与校验」的 `page.click('section[data-tab="documents"] button[data-subtab="form"]')` 偶发 30s 超时（首个资料提交后子标签页状态未及时就绪），重跑一次即可确认，与业务代码无关。
-  - `scripts/regression.js` 与 `scripts/e2e.js` 创建的测试项目、`AI 周期巡检回归任务` 等不在用例结束时清理，会随每次运行累积；排障前可先核对库内高频测试名（如「AI 周期巡检回归任务」「布局隔离项目」「提醒回归项目」「时区提醒项目」）规模。
-  - `npm run e2e` 在「管理员验证工作汇报看板与导出并清理日志」步骤登录后 `page.waitForFunction` 偶发 30s 超时（`scripts/e2e.js:169`），属登录自动登出竞态，重跑一次即可确认。
+  - `npm run regression` 若紧随 `npm start` 重启后立即运行，偶发在最早期请求直接报 `fetch failed`（连接竞态）；等待 `GET /api/health` 返回 200 后重跑即过。
+  - `scripts/regression.js` 与 `scripts/e2e.js` 创建的测试项目、`AI 周期巡检回归任务` 等不在用例结束时清理，会随每次运行累积；项目筛选选项来自登录时 `pageSize=100` 的列表，库内项目接近或超过 100 时新建项目会落到该页之外导致偶发失败。排障前先核对库内高频测试名（如「AI 周期巡检回归任务」「布局隔离项目」「提醒回归项目」「时区提醒项目」）规模。
+  - `npm run e2e` 有多处偶发 30s 超时/竞态，均由测试数据累积拖慢渲染或登录自动登出竞态引起，重跑一次即可确认、与本轮业务代码无关：自动登出提示断言、`selectOption('#workReportFilterProject')`、`page.click('#refreshWorkloadBtn')`、资料子标签点击、登录后 `page.waitForFunction`（`scripts/e2e.js:169`）；AI 巡检任务探测处 `page.waitForFunction` 的 `{ timeout: 90000 }` 被误传为第二参数，实际按默认 30s 生效。
+  - `npm run e2e` 工作汇报用例按合成日期（`2099-11-*`）创建「E2E工作汇报日志」，工作量按日志聚合；日志清理必须按「事件+日期+用户」精确匹配。曾因 `cleanupData` 只删汇报不删日志、内联删除又只按事件名匹配，残留日志令同名日期工时翻倍、工作量导出断言失败。
 
 [数组集合原地修改必须打脏标记]
 - Date: 2026-09-29
@@ -125,13 +121,16 @@ Agent 在任务执行过程中发现的条目应遵循以下格式：
   - `cloneDbSnapshot` 对 `notifications`、`aiInspectionResults` 等数组集合只做浅拷贝，元素对象与内存缓存共享引用；原地修改字段（如写入 `readBy`/`hiddenBy`）后两侧对象序列化结果完全相同。
   - `collectionChanged` 因此无法靠 `JSON.stringify` 比较发现变更，写入被静默跳过、刷新即回退；此类原地修改必须显式设置元素 `_dirty = true`，由 `arrayHasDirtyItems`/`collectionDirtyItems` 识别后才落库。
 
-[备份文件保留策略不对称]
-- Date: 2026-09-28
-- Context: Agent 巡检测试数据残留与磁盘占用时发现
+[备份文件保留策略与凭据语义]
+- Date: 2026-09-29
+- Context: Agent 巡检测试数据残留、磁盘占用与导出凭据时发现
 - Category: 运维部署
 - Instructions:
-  - `data/backups` 下的 `auto-backup-*` 由 `runAutoBackup` 按 7 天保留期自动删除。
+  - `data/backups` 下的 `auto-backup-*` 由 `runAutoBackup` 按 7 天保留期自动删除；归档区 `data/archive/backups` 由 `pruneArchiveFiles` 清理。
   - `backup-before-reset-*`、`backup-before-import-*`、`backup-before-restore-*` 没有保留策略，会长期堆积占用磁盘；排障前先 `ls` 统计数量与体积。
+  - 备份列表 `listBackupFiles` 同时返回可恢复区与归档区文件（带 `archived`/`size`/`href`）；归档文件可下载/恢复/删除，接口需带 `?archived=1` 且管理员密码二次验证。
+  - `/api/system/export` 与备份下载返回完整快照（含 `passwordHash`、`snmpCommunity`、资料密钥），与磁盘备份/恢复语义一致，保证跨环境导入后账号仍可登录；`redactSnapshotSecrets` 已移除。
+  - 数据库初始化（reset）会清空指向已删项目的 `ssoDefaultProjectId` 并删除 `data/uploads/documents` 下附件，两处均在 `writeDb` 成功之后执行。
 
 [GitHub 推送凭据来源]
 - Date: 2026-09-19
