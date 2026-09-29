@@ -141,6 +141,15 @@ Agent 在任务执行过程中发现的条目应遵循以下格式：
   - 非管理员仅能作废自己提交、未完成且不在变更流程中的审批（否则返回 400/403）。
   - 变更记录删除（`DELETE /api/change-records/:id`）仍会反向级联清理其审批与通知，两个方向保持一致。
 
+[业务实体删除与通知级联]
+- Date: 2026-09-29
+- Context: Agent 巡检孤儿数据与通知一致性时补充
+- Category: 排错调试
+- Instructions:
+  - 删除会产生通知的业务实体时，必须同步清理其通知：通知统一带 `sourceType`/`sourceId`，用 `removeNotificationsBySource(db, sourceType, sourceId)` 精确移除。
+  - 智能巡检对象删除会连带清理其任务与配置备份计划，需先收集这些子实体 ID，再分别清理对应通知，避免遗留空通知。
+  - 强制删除项目（`?force=1`）会级联清理 `assetRelations`（按资产 ID，无 `projectId` 字段）并失效拓扑/流量运行时状态，落库成功后清理资料附件磁盘目录。
+
 [GitHub 推送凭据来源]
 - Date: 2026-09-19
 - Context: 用户提供个人 GitHub PAT 并要求后续直接使用
