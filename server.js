@@ -3632,6 +3632,18 @@ function restoreDocumentAttachments(db, attachments) {
   }
 }
 
+// 导入会整体替换 documents 数据集，需清理残留自旧数据集、已不被引用的资料附件目录，
+// 否则磁盘会长期保留不可达文件。仅在落库成功后调用，避免写库失败时误删旧数据附件。
+function pruneDocumentAttachmentDirs(db) {
+  const keep = new Set((db.documents || []).map(doc => doc.id));
+  let names = [];
+  try { names = fs.readdirSync(documentsUploadDir); } catch (_) { return; }
+  for (const name of names) {
+    if (keep.has(name)) continue;
+    try { fs.rmSync(path.join(documentsUploadDir, name), { recursive: true, force: true }); } catch (_) {}
+  }
+}
+
 function collectBackupFiles(dirPath, archived) {
   if (!fs.existsSync(dirPath)) return [];
   return fs.readdirSync(dirPath)
@@ -12219,6 +12231,8 @@ const requestHandler = async (req, res) => {
       fs.writeFileSync(path.join(backupDir, backupFilename), JSON.stringify(serializeDbSnapshot(db), null, 2));
       appendAuditLog(nextDb, user, 'import', 'system', '', `导入系统数据，导入前备份 ${backupFilename}`);
       await writeDb(nextDb);
+      // 落库成功后清理旧数据残留的资料附件目录，避免导入后磁盘残留不可达附件。
+      pruneDocumentAttachmentDirs(nextDb);
       await applyHttpsServerConfig(nextDb.systemConfig || {});
       return json(res, 200, { message: '数据导入成功，当前登录状态已保留', backupFilename });
     }

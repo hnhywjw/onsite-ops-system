@@ -130,7 +130,8 @@ Agent 在任务执行过程中发现的条目应遵循以下格式：
   - 不再有「30 天归档 + 7 天删除」的旧策略：`data/backups` 内的快照（`auto-backup-*`/`backup-before-*`/`backup-*`）满 180 天直接删除，归档区仅保留历史文件并同样按 180 天清理。
   - 备份列表 `listBackupFiles` 同时返回可恢复区与归档区文件（带 `archived`/`size`/`href`）；归档文件可下载/恢复/删除，接口需带 `?archived=1` 且管理员密码二次验证。
   - `/api/system/export` 与备份下载返回完整快照（含 `passwordHash`、`snmpCommunity`、资料密钥），与磁盘备份/恢复语义一致，保证跨环境导入后账号仍可登录；`redactSnapshotSecrets` 已移除。
-  - 数据库初始化（reset）会清空指向已删项目的 `ssoDefaultProjectId` 并删除 `data/uploads/documents` 下附件，两处均在 `writeDb` 成功之后执行。
+  - 初始化（`/api/system/reset`）会清空指向已删项目的 `ssoDefaultProjectId` 并删除 `data/uploads/documents` 下附件，两处均在 `writeDb` 成功之后执行。
+  - 导入快照（`/api/system/import`）会整体替换数据，落库成功后需调用 `pruneDocumentAttachmentDirs` 清理旧数据集残留、已不被引用的资料附件目录；凡是替换或删除数据集的路径都要同步清理 `data/uploads/documents` 下的孤儿附件目录。
 
 [审批删除级联]
 - Date: 2026-09-29
