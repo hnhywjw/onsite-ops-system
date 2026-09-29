@@ -126,11 +126,20 @@ Agent 在任务执行过程中发现的条目应遵循以下格式：
 - Context: Agent 巡检测试数据残留、磁盘占用与导出凭据时发现
 - Category: 运维部署
 - Instructions:
-  - `data/backups` 下的 `auto-backup-*` 由 `runAutoBackup` 按 7 天保留期自动删除；归档区 `data/archive/backups` 由 `pruneArchiveFiles` 清理。
-  - `backup-before-reset-*`、`backup-before-import-*`、`backup-before-restore-*` 没有保留策略，会长期堆积占用磁盘；排障前先 `ls` 统计数量与体积。
+  - 备份统一保留 `LOCAL_BACKUP_RETENTION_DAYS` 天（默认 180），由 `cleanupExpiredBackupFiles` 在可恢复区 `data/backups` 与归档区 `data/archive/backups` 一并清理超期文件；`runAutoBackup`（每日/启动）与 `runMaintenanceTasks`（每周）都会触发。
+  - 不再有「30 天归档 + 7 天删除」的旧策略：`data/backups` 内的快照（`auto-backup-*`/`backup-before-*`/`backup-*`）满 180 天直接删除，归档区仅保留历史文件并同样按 180 天清理。
   - 备份列表 `listBackupFiles` 同时返回可恢复区与归档区文件（带 `archived`/`size`/`href`）；归档文件可下载/恢复/删除，接口需带 `?archived=1` 且管理员密码二次验证。
   - `/api/system/export` 与备份下载返回完整快照（含 `passwordHash`、`snmpCommunity`、资料密钥），与磁盘备份/恢复语义一致，保证跨环境导入后账号仍可登录；`redactSnapshotSecrets` 已移除。
   - 数据库初始化（reset）会清空指向已删项目的 `ssoDefaultProjectId` 并删除 `data/uploads/documents` 下附件，两处均在 `writeDb` 成功之后执行。
+
+[审批删除级联]
+- Date: 2026-09-29
+- Context: Agent 处理孤儿审批无产品级清理入口时新增
+- Category: 排错调试
+- Instructions:
+  - `DELETE /api/approvals/:id` 支持级联：管理员删除属于变更流程的审批时，会一并删除关联变更记录、同一变更下的所有审批及二者的通知；无关联变更的审批直接删除。
+  - 非管理员仅能作废自己提交、未完成且不在变更流程中的审批（否则返回 400/403）。
+  - 变更记录删除（`DELETE /api/change-records/:id`）仍会反向级联清理其审批与通知，两个方向保持一致。
 
 [GitHub 推送凭据来源]
 - Date: 2026-09-19

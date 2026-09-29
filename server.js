@@ -47,7 +47,7 @@ const defaultNoLogStreakDays = 3;
 const defaultProjectInactiveDays = 7;
 const auditArchiveRetentionDays = parseInt(process.env.AUDIT_ARCHIVE_RETENTION_DAYS, 10) || 180;
 const notificationArchiveRetentionDays = parseInt(process.env.NOTIFICATION_ARCHIVE_RETENTION_DAYS, 10) || 180;
-const localBackupRetentionDays = parseInt(process.env.LOCAL_BACKUP_RETENTION_DAYS, 10) || 30;
+const localBackupRetentionDays = parseInt(process.env.LOCAL_BACKUP_RETENTION_DAYS, 10) || 180;
 const generalNotificationRetentionDays = parseInt(process.env.GENERAL_NOTIFICATION_RETENTION_DAYS, 10) || 30;
 const importantNotificationRetentionDays = parseInt(process.env.IMPORTANT_NOTIFICATION_RETENTION_DAYS, 10) || 90;
 const dbConfig = {
@@ -1151,6 +1151,26 @@ function pruneArchiveFiles(dirPath, retentionDays) {
   }
 }
 
+// 备份快照统一保留 localBackupRetentionDays 天（默认 180）：可恢复区与归档区中超期的备份都会被清理，
+// 避免备份无限堆积占满磁盘（此前自动快照仅保留 7 天、归档区则从不清理，两处策略不一致）。
+function cleanupExpiredBackupFiles() {
+  const cutoff = nowMs() - localBackupRetentionDays * 24 * 60 * 60 * 1000;
+  let removed = 0;
+  for (const dirPath of [backupDir, backupArchiveDir]) {
+    if (!fs.existsSync(dirPath)) continue;
+    for (const name of fs.readdirSync(dirPath)) {
+      if (!name.endsWith('.json')) continue;
+      const filePath = path.join(dirPath, name);
+      const stat = fs.statSync(filePath);
+      if (stat.isFile() && stat.mtimeMs < cutoff) {
+        fs.rmSync(filePath, { force: true });
+        removed += 1;
+      }
+    }
+  }
+  return removed;
+}
+
 // 审计归档查询：仅允许读取归档目录下的 .jsonl 文件，避免路径穿越访问任意文件。
 function listAuditArchiveFiles() {
   if (!fs.existsSync(auditArchiveDir)) return [];
@@ -1222,15 +1242,8 @@ function runMaintenanceTasks(db) {
   }
 
   if (runtimeState.maintenance.lastBackupCleanupWeek !== weekKey) {
-    const backupCutoff = nowMs() - localBackupRetentionDays * 24 * 60 * 60 * 1000;
-    for (const name of fs.readdirSync(backupDir)) {
-      const filePath = path.join(backupDir, name);
-      const stat = fs.statSync(filePath);
-      if (stat.isFile() && stat.mtimeMs < backupCutoff) {
-        ensureDir(backupArchiveDir);
-        fs.renameSync(filePath, path.join(backupArchiveDir, name));
-      }
-    }
+    // 备份统一保留 localBackupRetentionDays 天（默认 180），超期直接清理，不再移入归档区堆积。
+    cleanupExpiredBackupFiles();
     runtimeState.maintenance.lastBackupCleanupWeek = weekKey;
   }
 
@@ -10843,30 +10856,48 @@ const requestHandler = async (req, res) => {
       return json(res, 200, outcome.body);
     }
 
-    // 作废/删除审批：变更流程的审批记录只能随变更记录一并删除，避免变更记录停留在无审批的半闭环状态。
+    // 删除审批：审批与关联变更记录属于同一闭环。
+    // 管理员删除属于变更流程的审批时，级联清理关联变更记录及其通知，避免变更记录停留在无审批的半闭环状态；
+    // 其他账号仅能作废自己提交、尚未结束且不在变更流程中的审批。
     if (req.method === 'DELETE' && /^\/api\/approvals\/[^/]+$/.test(pathname)) {
       const user = requireEditor(req, res, db);
       if (!user) return;
       const approvalId = pathname.split('/')[3];
-      // 作废审批需与并发的审批决策/变更编辑同一临界区，避免在关联判断后审批又被并发改写。
+      // 删除审批需与并发的审批决策/变更编辑同一临界区，避免在关联判断后审批又被并发改写。
       const outcome = await withDbMutationLock(async () => {
         const lockDb = await readDb();
         const target = (lockDb.approvals || []).find(item => item.id === approvalId);
         if (!target) return { status: 404, message: '审批记录不存在' };
         const linkedChange = (lockDb.changeRecords || []).find(entry => entry.approvalId === target.id || (target.category === 'change' && entry.id === target.relatedId));
-        if (linkedChange) return { status: 400, message: '该审批属于变更记录流程，请删除对应变更记录' };
+        if (linkedChange && user.role !== 'admin') {
+          return { status: 400, message: '该审批属于变更记录流程，请删除对应变更记录' };
+        }
         if (user.role !== 'admin') {
           if (target.requestedBy !== user.id) return { status: 403, message: '仅支持作废自己提交的审批' };
           if (target.currentStage === 'completed') return { status: 403, message: '已完成的审批不能作废' };
         }
-        lockDb.approvals = (lockDb.approvals || []).filter(item => item.id !== approvalId);
-        removeNotificationsBySource(lockDb, 'approval', approvalId);
-        appendAuditLog(lockDb, user, 'delete', 'approval', target.id, `作废审批 ${target.title}`, target.projectId);
+        let cascadedChangeId = '';
+        if (linkedChange) {
+          // 同一变更记录可能关联多条审批，一并清理，避免遗留指向已删变更的孤儿审批。
+          const affectedApprovalIds = new Set([target.id]);
+          for (const entry of lockDb.approvals || []) {
+            if (entry.id === linkedChange.approvalId || entry.relatedId === linkedChange.id) affectedApprovalIds.add(entry.id);
+          }
+          lockDb.approvals = (lockDb.approvals || []).filter(item => !affectedApprovalIds.has(item.id));
+          for (const affectedId of affectedApprovalIds) removeNotificationsBySource(lockDb, 'approval', affectedId);
+          lockDb.changeRecords = (lockDb.changeRecords || []).filter(entry => entry.id !== linkedChange.id);
+          removeNotificationsBySource(lockDb, 'changeRecord', linkedChange.id);
+          cascadedChangeId = linkedChange.id;
+        } else {
+          lockDb.approvals = (lockDb.approvals || []).filter(item => item.id !== approvalId);
+          removeNotificationsBySource(lockDb, 'approval', approvalId);
+        }
+        appendAuditLog(lockDb, user, 'delete', 'approval', target.id, cascadedChangeId ? `删除审批 ${target.title} 并级联清理变更记录` : `作废审批 ${target.title}`, target.projectId);
         await writeDb(lockDb);
-        return { status: 200 };
+        return { status: 200, cascadedChangeId };
       });
       if (outcome.status !== 200) return json(res, outcome.status, { message: outcome.message });
-      return json(res, 200, { ok: true });
+      return json(res, 200, { ok: true, cascadedChangeId: outcome.cascadedChangeId || '' });
     }
 
     if (req.method === 'GET' && pathname === '/api/ai-inspection/targets') {
@@ -13361,14 +13392,9 @@ async function runAutoBackup() {
         fs.writeFileSync(filePath, JSON.stringify(serializeDbSnapshot(db), null, 2));
       }
     }
-    // 自动快照（每日备份、重置/导入/恢复前的安全快照）统一保留 7 天，避免长期堆积占满磁盘；
-    // 手动触发的 backup-* 仍由 runMaintenanceTasks 按 localBackupRetentionDays 归档。
-    const cutoff = Date.now() - 7 * 24 * 60 * 60 * 1000;
-    for (const file of fs.readdirSync(backupDir)) {
-      if (!file.startsWith('auto-backup-') && !file.startsWith('backup-before-')) continue;
-      const fp = path.join(backupDir, file);
-      if (fs.statSync(fp).mtimeMs < cutoff) fs.unlinkSync(fp);
-    }
+    // 所有备份（每日快照、重置/导入/恢复前快照、手动快照）统一按 localBackupRetentionDays
+    // （默认 180 天）保留，超期在可恢复区与归档区一并清理。
+    cleanupExpiredBackupFiles();
   } catch (e) {
     console.error('Auto backup failed:', e.message);
   }

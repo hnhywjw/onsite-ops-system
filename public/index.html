@@ -8038,9 +8038,15 @@
       document.getElementById('approvalTable').innerHTML = apprRows.map(item => {
         const canApprove = (state.user.role === 'admin' || state.user.id === item.approverId) && item.currentStage === 'approver' && item.status === '待运维审批';
         const canCustomerConfirm = state.user.role === 'customer' && state.user.id === item.customerId && item.currentStage === 'customer' && item.status === '待客户确认';
-        const actions = canApprove || canCustomerConfirm
+        // 管理员可删除任意审批（属于变更流程时会级联清理关联变更记录）；其他账号仅能作废自己提交且未结束的审批。
+        const canDelete = state.user.role === 'admin' || (item.requestedBy === state.user.id && item.currentStage !== 'completed');
+        const decisionButtons = canApprove || canCustomerConfirm
           ? `<button class="secondary" data-action="approve" data-id="${item.id}" type="button">通过</button><button class="secondary" data-action="reject" data-id="${item.id}" type="button">驳回</button>`
-          : '-';
+          : '';
+        const deleteButton = canDelete
+          ? `<button class="secondary" data-action="delete-approval" data-id="${item.id}" data-title="${attrEsc(item.title)}" type="button">删除</button>`
+          : '';
+        const actions = (decisionButtons + deleteButton) || '-';
         return `<tr><td>${esc(item.title)}</td><td>${esc(formatApprovalCategory(item.category))}</td><td>${esc(item.status)}</td><td>${esc(formatUserName(item.approverId))}</td><td>${esc(formatUserName(item.customerId))}</td><td>${esc(formatProjectDisplayById(item.projectId))}</td><td><div class="toolbar">${actions}</div></td></tr>`;
       }).join('') || '<tr><td colspan="7">暂无审批</td></tr>';
       document.getElementById('approvalPageInfo').textContent = `第 ${state.approvalPage} / ${apprTotalPages} 页`;
@@ -11595,6 +11601,17 @@
           state.pendingRejectionId = button.dataset.id;
           document.getElementById('rejectionReasonInput').value = '';
           openModal('rejectionReasonModal');
+        } else if (button.dataset.action === 'delete-approval') {
+          const title = button.dataset.title || '';
+          const confirmed = state.user.role === 'admin'
+            ? await showDangerConfirm(`确认删除审批「${title}」吗？若该审批属于变更流程，关联的变更记录会一并删除。`)
+            : await showConfirm(`确认作废审批「${title}」吗？`);
+          if (!confirmed) return;
+          await api(`/api/approvals/${button.dataset.id}`, { method: 'DELETE', body: '{}' });
+          state.approvals = (await apiCollection('/api/approvals', { silent: true })).data;
+          state.changeRecords = (await apiCollection('/api/change-records', { silent: true })).data;
+          renderApprovals();
+          renderAssetOps();
         }
       } catch (error) {
         setMessage('approvalMessage', error.message, 'error');
