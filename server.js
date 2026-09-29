@@ -3384,28 +3384,6 @@ function serializeDbSnapshot(db) {
   };
 }
 
-function redactSnapshotSecrets(snapshot) {
-  const next = { ...(snapshot || {}) };
-  next.users = (snapshot.users || []).map(item => {
-    const { passwordHash, securityQuestion, securityAnswerHash, ...rest } = item || {};
-    return rest;
-  });
-  next.assets = (snapshot.assets || []).map(item => {
-    const { snmpCommunity, ...rest } = item || {};
-    return rest;
-  });
-  next.documents = (snapshot.documents || []).map(item => {
-    const copy = { ...(item || {}) };
-    DOCUMENT_SECRET_FIELDS.forEach(key => { delete copy[key]; });
-    return copy;
-  });
-    next.aiInspectionTargets = (snapshot.aiInspectionTargets || []).map(item => {
-      const { password, privateKey, accessToken, community, ...rest } = item || {};
-      return rest;
-    });
-    return next;
-  }
-
 function fillMissingSecretFields(incoming = [], current = [], fields = []) {
   const byId = new Map((current || []).map(item => [item && item.id, item]));
   return (incoming || []).map(item => {
@@ -3635,15 +3613,48 @@ function restoreDocumentAttachments(db, attachments) {
   }
 }
 
-function listBackupFiles() {
-  return fs.readdirSync(backupDir)
+function collectBackupFiles(dirPath, archived) {
+  if (!fs.existsSync(dirPath)) return [];
+  return fs.readdirSync(dirPath)
     .filter(name => name.endsWith('.json'))
-    .sort((a, b) => b.localeCompare(a))
-    .map(name => ({
-      name,
-      createdAt: fs.statSync(path.join(backupDir, name)).mtime.toISOString().replace('T', ' '),
-      href: `/api/system/backups/${encodeURIComponent(name)}`
-    }));
+    .map(name => {
+      const stat = fs.statSync(path.join(dirPath, name));
+      return {
+        name,
+        archived,
+        size: stat.size,
+        createdAt: stat.mtime.toISOString().replace('T', ' '),
+        href: `/api/system/backups/${encodeURIComponent(name)}${archived ? '?archived=1' : ''}`
+      };
+    });
+}
+
+// 备份文件分布在「可恢复区」(backupDir) 与「归档区」(backupArchiveDir)。
+// 归档区文件之前对用户完全不可见、不可恢复，这里一并列出，前端按 archived 标记区分展示。
+function listBackupFiles() {
+  return collectBackupFiles(backupDir, false)
+    .concat(collectBackupFiles(backupArchiveDir, true))
+    .sort((a, b) => String(b.createdAt).localeCompare(String(a.createdAt)));
+}
+
+// 解析备份文件名到磁盘路径，archived 决定去可恢复区还是归档区查找，
+// 统一做 basename 与目录越界校验，避免 path traversal。
+function resolveBackupFilePath(rawFilename, archived) {
+  const decoded = decodeURIComponent(String(rawFilename || ''));
+  const filename = path.basename(decoded);
+  if (!filename || filename !== decoded || !filename.endsWith('.json')) return '';
+  const dir = archived ? backupArchiveDir : backupDir;
+  const filePath = path.join(dir, filename);
+  if (!filePath.startsWith(dir + path.sep) || !fs.existsSync(filePath)) return '';
+  return filePath;
+}
+
+// 清空目录内容但保留目录本身（用于数据库初始化时清掉已失效的资料附件）。
+function clearDirectoryContents(dirPath) {
+  if (!fs.existsSync(dirPath)) return;
+  for (const name of fs.readdirSync(dirPath)) {
+    fs.rmSync(path.join(dirPath, name), { recursive: true, force: true });
+  }
 }
 
 async function ensureMySqlReady() {
@@ -8756,6 +8767,11 @@ const requestHandler = async (req, res) => {
       if (!target) {
         return json(res, 404, { message: '人员不存在' });
       }
+      // 与 /disable、删除等管理操作保持一致：不允许通过通用更新接口修改其他管理员账号
+      // （否则可先降级再禁用，绕过禁用接口的保护）。
+      if (target.role === 'admin' && user.id !== target.id) {
+        return json(res, 403, { message: '不能修改其他管理员账号' });
+      }
       const body = await readBody(req);
       // 未提交的字段保持原值，避免局部更新（如仅改密码）静默清空手机号、项目等资料。
       const nextUsername = body.username !== undefined ? String(body.username).trim() : target.username;
@@ -12169,9 +12185,14 @@ const requestHandler = async (req, res) => {
         dailyLowHoursThreshold: preservedHttpsConfig.dailyLowHoursThreshold,
         dailyHighHoursThreshold: preservedHttpsConfig.dailyHighHoursThreshold,
         noLogStreakDays: preservedHttpsConfig.noLogStreakDays,
-        projectInactiveDays: preservedHttpsConfig.projectInactiveDays
+        projectInactiveDays: preservedHttpsConfig.projectInactiveDays,
+        // 初始化会清空所有项目，指向具体项目的 SSO 默认项目随之失效，必须一并清掉。
+        ssoDefaultProjectId: ''
       });
       await writeDb(nextDb);
+      // 资料附件存放在磁盘，数据库初始化后 documents 已清空，对应附件文件一并清理，避免占用空间。
+      // 放在落库成功之后，避免写库失败时附件已被删除但业务数据未清空。
+      clearDirectoryContents(documentsUploadDir);
       let httpsMsg = '';
       try {
         await applyHttpsServerConfig(nextDb.systemConfig || {});
@@ -12190,7 +12211,9 @@ const requestHandler = async (req, res) => {
         'Content-Type': 'application/json; charset=utf-8',
         'Content-Disposition': 'attachment; filename="onsite-ops-export.json"'
       }));
-      return res.end(JSON.stringify(redactSnapshotSecrets(serializeDbSnapshot(db)), null, 2));
+      // 导出内容需与磁盘备份/恢复语义一致，包含凭据哈希与设备密钥，
+      // 保证导出文件在其它环境导入后账号可登录、资产监控凭据可用。
+      return res.end(JSON.stringify(serializeDbSnapshot(db), null, 2));
     }
 
     if (req.method === 'POST' && pathname.startsWith('/api/system/backups/') && pathname.endsWith('/restore')) {
@@ -12202,14 +12225,17 @@ const requestHandler = async (req, res) => {
       }
       const parts = pathname.split('/');
       const rawFilename = parts[4] || '';
-      const filename = path.basename(decodeURIComponent(rawFilename));
-      if (!filename || filename !== decodeURIComponent(rawFilename) || !filename.endsWith('.json')) {
-        return json(res, 400, { message: '文件名无效' });
-      }
-      const filePath = path.join(backupDir, filename);
-      if (!filePath.startsWith(backupDir + path.sep) || !fs.existsSync(filePath)) {
+      const archived = reqUrl.searchParams.get('archived') === '1';
+      const filePath = resolveBackupFilePath(rawFilename, archived);
+      if (!filePath) {
+        const decoded = decodeURIComponent(String(rawFilename || ''));
+        const filename = path.basename(decoded);
+        if (!filename || filename !== decoded || !filename.endsWith('.json')) {
+          return json(res, 400, { message: '文件名无效' });
+        }
         return json(res, 404, { message: '备份文件不存在' });
       }
+      const filename = path.basename(filePath);
       let snapshot;
       try {
         snapshot = JSON.parse(fs.readFileSync(filePath, 'utf8'));
@@ -12247,18 +12273,19 @@ const requestHandler = async (req, res) => {
       const user = requireAdmin(req, res, db);
       if (!user) return;
       const rawFilename = pathname.split('/').pop() || '';
-      const filename = path.basename(decodeURIComponent(rawFilename));
-      if (!filename || filename !== decodeURIComponent(rawFilename)) {
-        return json(res, 400, { message: '文件名无效' });
-      }
-      const filePath = path.join(backupDir, filename);
-      if (!filePath.startsWith(backupDir + path.sep) || !fs.existsSync(filePath)) {
+      const archived = reqUrl.searchParams.get('archived') === '1';
+      const filePath = resolveBackupFilePath(rawFilename, archived);
+      if (!filePath) {
+        const decoded = decodeURIComponent(String(rawFilename || ''));
+        const filename = path.basename(decoded);
+        if (!filename || filename !== decoded) {
+          return json(res, 400, { message: '文件名无效' });
+        }
         return json(res, 404, { message: '备份文件不存在' });
       }
-      let payload = fs.readFileSync(filePath, 'utf8');
-      try {
-        payload = JSON.stringify(redactSnapshotSecrets(JSON.parse(payload)), null, 2);
-      } catch (_) {}
+      const filename = path.basename(filePath);
+      // 备份文件与导出/恢复保持同一语义：包含可恢复凭据，以便跨环境导入后账号仍可登录。
+      const payload = fs.readFileSync(filePath, 'utf8');
       const body = Buffer.from(payload, 'utf8');
       res.writeHead(200, buildSecurityHeaders({
         'Content-Type': 'application/json; charset=utf-8',
@@ -12266,6 +12293,26 @@ const requestHandler = async (req, res) => {
         'Content-Length': String(body.length)
       }));
       return res.end(body);
+    }
+
+    if (req.method === 'DELETE' && pathname.startsWith('/api/system/backups/')) {
+      const user = requireAdmin(req, res, db);
+      if (!user) return;
+      const body = await readBody(req);
+      if (!verifyAdminStepUp(user, body && body.password)) {
+        return json(res, 401, { message: '管理员密码错误' });
+      }
+      const rawFilename = pathname.split('/').pop() || '';
+      const archived = reqUrl.searchParams.get('archived') === '1';
+      const filePath = resolveBackupFilePath(rawFilename, archived);
+      if (!filePath) {
+        return json(res, 404, { message: '备份文件不存在' });
+      }
+      const filename = path.basename(filePath);
+      fs.rmSync(filePath, { force: true });
+      appendAuditLog(db, user, 'delete', 'system', '', `删除${archived ? '归档' : ''}备份 ${filename}`);
+      await writeDb(db);
+      return json(res, 200, { message: '备份已删除', filename });
     }
 
     if (req.method === 'GET' && pathname === '/api/reports/summary') {

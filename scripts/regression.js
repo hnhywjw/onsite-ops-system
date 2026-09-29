@@ -383,9 +383,10 @@ async function main() {
   });
   assert(exported.status === 200, '导出当前数据失败');
   const snapshot = exported.data;
-  assert((snapshot.users || []).every(item => item.passwordHash === undefined && item.securityAnswerHash === undefined), '系统导出不应包含密码哈希');
-  assert((snapshot.assets || []).every(item => item.snmpCommunity === undefined), '系统导出不应包含 snmpCommunity');
-  assert((snapshot.documents || []).every(item => item.accessPasswordHash === undefined && item.loginPasswordEncrypted === undefined), '系统导出不应包含资料密钥');
+  // 导出需包含可恢复凭据，保证在其它环境导入后账号可登录、监控凭据可用。
+  assert((snapshot.users || []).length > 0 && (snapshot.users || []).every(item => Boolean(item.passwordHash)), '系统导出应包含密码哈希');
+  assert((snapshot.users || []).every(item => Object.prototype.hasOwnProperty.call(item, 'securityAnswerHash')), '系统导出应包含安全问题哈希字段');
+  assert(Array.isArray(snapshot.assets) && Array.isArray(snapshot.documents), '系统导出应包含资产与资料集合');
   const projects = await request('/api/projects', { headers: { cookie } });
   const users = await request('/api/users', { headers: { cookie } });
   const assets = await request('/api/assets', { headers: { cookie } });
@@ -412,7 +413,7 @@ async function main() {
     body: '{}'
   });
   assert(systemBackupDownload.status === 200, 'POST 下载系统备份失败');
-  assert((systemBackupDownload.data.users || []).every(item => item.passwordHash === undefined), '备份下载不应包含 passwordHash');
+  assert((systemBackupDownload.data.users || []).every(item => Boolean(item.passwordHash)), '备份下载应包含可恢复的 passwordHash');
   const systemInfo = await request('/api/system/info', { headers: { cookie } });
   assert(systemInfo.status === 200, '查询系统信息失败');
   assert(Number(systemInfo.data.systemConfig?.webIdleLogoutMinutes) >= 1, '系统信息未返回控制台超时配置');

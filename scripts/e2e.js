@@ -394,6 +394,14 @@ async function cleanupData(page, payload) {
           await request(`/api/work-reports/${report.id}`, { method: 'DELETE', body: '{}' });
         }
       }
+      // 用例为工作汇报创建了同名日志，工作量统计按日志聚合；按"事件+日期+用户"精确清理，
+      // 避免仅按事件名匹配时误删他轮日志、又把本轮日志留成残留，导致后续同名日期工时翻倍。
+      const logs = await getList('/api/logs');
+      for (const log of logs) {
+        if (engineer && log.userId === engineer.id && log.event === 'E2E工作汇报日志' && reportDates.includes(log.date)) {
+          await request(`/api/logs/${log.id}`, { method: 'DELETE', body: '{}' });
+        }
+      }
     }
     const projects = await getList('/api/projects');
     const createdProject = projects.find(item => item.name === data.projectName);

@@ -3771,6 +3771,31 @@
       showToast(text, type);
     }
 
+    // 表单提交统一封装：提交期间禁用提交按钮，避免网络较慢时重复点击造成重复创建/提交。
+    async function withSubmitLock(event, task) {
+      event.preventDefault();
+      const form = event.target;
+      const button = form && typeof form.querySelector === 'function' ? form.querySelector('button[type="submit"]') : null;
+      if (button && button.disabled) return;
+      const originalText = button ? button.textContent : '';
+      if (button) button.disabled = true;
+      try {
+        return await task();
+      } finally {
+        if (button) { button.disabled = false; button.textContent = originalText; }
+      }
+    }
+
+    // 写操作成功后的数据刷新：刷新失败时由 loadBaseData 在 globalStatus 上提示，
+    // 此处吞掉非登录态错误，避免把「创建/修改成功」提示覆盖成刷新错误。
+    async function reloadAfterSubmit() {
+      try {
+        await loadBaseData();
+      } catch (error) {
+        if (error && error.message === '请先登录') throw error;
+      }
+    }
+
     function setMessageHtml(id, html, toastText, type = 'success') {
       const box = document.getElementById(id);
       if (box) {
@@ -9281,14 +9306,15 @@
       const appVersion = formatAppVersion(info.version);
       document.getElementById('systemCurrentVersion').textContent = appVersion;
       document.getElementById('sidebarCurrentVersion').textContent = appVersion;
-      document.getElementById('systemBackupList').innerHTML = info.backups.slice(0, 5).map(item => `
+      document.getElementById('systemBackupList').innerHTML = (info.backups || []).slice(0, 8).map(item => `
         <div class="system-backup-item">
           <div>
-            <div>${esc(item.name)}</div>
+            <div>${esc(item.name)}${item.archived ? ' <span class="muted">（已归档）</span>' : ''}</div>
             <div class="muted">${esc(item.createdAt)}</div>
           </div>
           <button class="secondary" type="button" data-action="download-system-backup" data-href="${attrEsc(item.href)}" data-filename="${attrEsc(item.name)}">下载</button>
-          <button class="secondary" type="button" data-action="restore-system-backup" data-filename="${attrEsc(item.name)}">恢复</button>
+          <button class="secondary" type="button" data-action="restore-system-backup" data-filename="${attrEsc(item.name)}" data-archived="${item.archived ? '1' : ''}">恢复</button>
+          <button class="secondary" type="button" data-action="delete-system-backup" data-filename="${attrEsc(item.name)}" data-archived="${item.archived ? '1' : ''}">删除</button>
         </div>
       `).join('') || '<div class="muted">暂无备份文件</div>';
       renderSystemServices();
@@ -10060,8 +10086,7 @@
     document.getElementById('changePwdCancelBtn').addEventListener('click', () => {
       changePwdModal.classList.add('hidden');
     });
-    changePwdForm.addEventListener('submit', async event => {
-      event.preventDefault();
+    changePwdForm.addEventListener('submit', event => withSubmitLock(event, async () => {
       const fd = new FormData(changePwdForm);
       const oldPassword = fd.get('oldPassword');
       const newPassword = fd.get('newPassword');
@@ -10081,7 +10106,7 @@
       } catch (error) {
         setMessage('changePwdMessage', error.message, 'error');
       }
-    });
+    }));
 
     els.navTabs.addEventListener('click', event => {
       const button = event.target.closest('button[data-tab]');
@@ -11725,22 +11750,44 @@
         return;
       }
       const restoreBtn = event.target.closest('button[data-action="restore-system-backup"]');
-      if (!restoreBtn) return;
-      const filename = restoreBtn.dataset.filename;
-      if (!filename) return;
       const passwordInput = document.getElementById('systemRestorePassword');
       const password = passwordInput ? passwordInput.value : '';
+      if (restoreBtn) {
+        const filename = restoreBtn.dataset.filename;
+        if (!filename) return;
+        if (!password) {
+          setMessage('systemBackupMessage', '请输入管理员密码后再恢复备份', 'error');
+          passwordInput?.focus();
+          return;
+        }
+        if (!await showConfirm(`确认从磁盘备份恢复 ${filename} 吗？当前数据会先自动备份。`)) return;
+        try {
+          const result = await api(`/api/system/backups/${encodeURIComponent(filename)}/restore`, { method: 'POST', body: JSON.stringify({ password }) });
+          if (passwordInput) passwordInput.value = '';
+          setMessage('systemBackupMessage', result.message || '磁盘备份恢复成功');
+          await loadBaseData().catch(() => {});
+          await refreshSystemManagement();
+        } catch (error) {
+          setMessage('systemBackupMessage', error.message, 'error');
+        }
+        return;
+      }
+      const deleteBtn = event.target.closest('button[data-action="delete-system-backup"]');
+      if (!deleteBtn) return;
+      const deleteFilename = deleteBtn.dataset.filename;
+      if (!deleteFilename) return;
       if (!password) {
-        setMessage('systemBackupMessage', '请输入管理员密码后再恢复备份', 'error');
+        setMessage('systemBackupMessage', '请输入管理员密码后再删除备份', 'error');
         passwordInput?.focus();
         return;
       }
-      if (!await showConfirm(`确认从磁盘备份恢复 ${filename} 吗？当前数据会先自动备份。`)) return;
+      const archived = deleteBtn.dataset.archived === '1';
+      if (!await showDangerConfirm(`确认删除备份 ${deleteFilename} 吗？删除后无法恢复。`)) return;
       try {
-        const result = await api(`/api/system/backups/${encodeURIComponent(filename)}/restore`, { method: 'POST', body: JSON.stringify({ password }) });
+        const query = archived ? '?archived=1' : '';
+        const result = await api(`/api/system/backups/${encodeURIComponent(deleteFilename)}${query}`, { method: 'DELETE', body: JSON.stringify({ password }) });
         if (passwordInput) passwordInput.value = '';
-        setMessage('systemBackupMessage', result.message || '磁盘备份恢复成功');
-        await loadBaseData();
+        setMessage('systemBackupMessage', result.message || '备份已删除');
         await refreshSystemManagement();
       } catch (error) {
         setMessage('systemBackupMessage', error.message, 'error');
@@ -12117,8 +12164,7 @@
       }
     });
 
-    document.getElementById('aiInspectionTargetForm').addEventListener('submit', async event => {
-      event.preventDefault();
+    document.getElementById('aiInspectionTargetForm').addEventListener('submit', event => withSubmitLock(event, async () => {
       const data = sanitizeAiInspectionTargetFormData(Object.fromEntries(new FormData(event.target).entries()));
       const method = data.id ? 'PUT' : 'POST';
       const path = data.id ? `/api/ai-inspection/targets/${data.id}` : '/api/ai-inspection/targets';
@@ -12126,15 +12172,14 @@
         await api(path, { method, body: JSON.stringify(data) });
         resetAiInspectionTargetForm();
         setMessage('aiInspectionTargetMessage', data.id ? '巡检对象修改成功' : '巡检对象创建成功');
-        await loadBaseData();
+        await reloadAfterSubmit();
         openTabWithSubtab('aiInspection', 'targets');
       } catch (error) {
         setMessage('aiInspectionTargetMessage', error.message, 'error');
       }
-    });
+    }));
 
-    document.getElementById('aiInspectionTemplateForm').addEventListener('submit', async event => {
-      event.preventDefault();
+    document.getElementById('aiInspectionTemplateForm').addEventListener('submit', event => withSubmitLock(event, async () => {
       const data = Object.fromEntries(new FormData(event.target).entries());
       try {
         data.metrics = collectAiInspectionTemplateMetrics();
@@ -12146,44 +12191,41 @@
         await api(path, { method, body: JSON.stringify(data) });
         resetAiInspectionTemplateForm();
         setMessage('aiInspectionTemplateMessage', id ? '巡检模板修改成功' : '巡检模板创建成功');
-        await loadBaseData();
+        await reloadAfterSubmit();
         openTabWithSubtab('aiInspection', 'templates');
       } catch (error) {
         setMessage('aiInspectionTemplateMessage', error.message, 'error');
       }
-    });
+    }));
 
-    document.getElementById('aiInspectionTaskForm').addEventListener('submit', async event => {
-      event.preventDefault();
+    document.getElementById('aiInspectionTaskForm').addEventListener('submit', event => withSubmitLock(event, async () => {
       const data = Object.fromEntries(new FormData(event.target).entries());
       try {
         data.metrics = collectAiInspectionTaskMetrics();
         if (!data.metrics.length) throw new Error('请至少选择一个巡检指标');
         const result = await api('/api/ai-inspection/tasks', { method: 'POST', body: JSON.stringify(data) });
         setMessage('aiInspectionTaskMessage', result.result ? `智能巡检完成：${result.result.level}，得分 ${result.result.score}` : (result.message || '智能巡检任务已创建，等待计划时间执行'));
-        await loadBaseData();
+        await reloadAfterSubmit();
         openTabWithSubtab('aiInspection', result.result ? 'results' : 'tasks');
       } catch (error) {
         setMessage('aiInspectionTaskMessage', error.message, 'error');
       }
-    });
+    }));
 
-    document.getElementById('configBackupPlanForm').addEventListener('submit', async event => {
-      event.preventDefault();
+    document.getElementById('configBackupPlanForm').addEventListener('submit', event => withSubmitLock(event, async () => {
       const data = Object.fromEntries(new FormData(event.target).entries());
       try {
         await api('/api/ai-inspection/config-backup/plans', { method: 'POST', body: JSON.stringify(data) });
         event.target.reset();
         setMessage('configBackupMessage', '配置备份计划创建成功');
-        await loadBaseData();
+        await reloadAfterSubmit();
         openTabWithSubtab('aiInspection', 'configBackup');
       } catch (error) {
         setMessage('configBackupMessage', error.message, 'error');
       }
-    });
+    }));
 
-    document.getElementById('projectForm').addEventListener('submit', async event => {
-      event.preventDefault();
+    document.getElementById('projectForm').addEventListener('submit', event => withSubmitLock(event, async () => {
       const data = Object.fromEntries(new FormData(event.target).entries());
       const method = data.id ? 'PUT' : 'POST';
       const path = data.id ? `/api/projects/${data.id}` : '/api/projects';
@@ -12191,19 +12233,18 @@
         await api(path, { method, body: JSON.stringify(data) });
         resetProjectForm();
         setMessage('projectMessage', data.id ? '项目修改成功' : '项目创建成功');
-        await loadBaseData();
+        await reloadAfterSubmit();
         openTabWithSubtab('projects', 'list');
       } catch (error) {
         setMessage('projectMessage', error.message, 'error');
       }
-    });
+    }));
 
     document.getElementById('userProjectId').addEventListener('change', event => {
       syncUserProjectPeriod(event.target.value);
     });
 
-    document.getElementById('userForm').addEventListener('submit', async event => {
-      event.preventDefault();
+    document.getElementById('userForm').addEventListener('submit', event => withSubmitLock(event, async () => {
       const data = Object.fromEntries(new FormData(event.target).entries());
       if (!data.id && !data.password) { setMessage('userMessage', '请输入密码', 'error'); return; }
       if (!data.id && data.password && (data.password.length < 8 || !/[a-zA-Z]/.test(data.password) || !/\d/.test(data.password) || !/[^a-zA-Z0-9]/.test(data.password))) { setMessage('userMessage', '密码至少8位，需包含字母、数字和特殊字符', 'error'); return; }
@@ -12226,15 +12267,14 @@
         await api(path, { method, body: JSON.stringify(data) });
         resetUserForm();
         setMessage('userMessage', data.id ? '人员修改成功' : '人员创建成功');
-        await loadBaseData();
+        await reloadAfterSubmit();
         openTabWithSubtab('users', 'list');
       } catch (error) {
         setMessage('userMessage', error.message, 'error');
       }
-    });
+    }));
 
-    document.getElementById('assetForm').addEventListener('submit', async event => {
-      event.preventDefault();
+    document.getElementById('assetForm').addEventListener('submit', event => withSubmitLock(event, async () => {
       const data = Object.fromEntries(new FormData(event.target).entries());
       data.monitorEnabled = document.getElementById('assetMonitorEnabled').checked;
       data.monitorType = document.getElementById('assetMonitorType').value;
@@ -12252,12 +12292,12 @@
         await api(path, { method, body: JSON.stringify(data) });
         resetAssetForm();
         setMessage('assetMessage', data.id ? '资产修改成功' : '资产创建成功');
-        await loadBaseData();
+        await reloadAfterSubmit();
         switchSectionSubtab('assets', 'list');
       } catch (error) {
         setMessage('assetMessage', error.message, 'error');
       }
-    });
+    }));
 
     document.getElementById('assetImportBtn').addEventListener('click', () => {
       document.getElementById('assetImportFile').click();
@@ -12413,8 +12453,7 @@
     document.getElementById('assetMonitorType').addEventListener('change', toggleMonitorPort);
     document.getElementById('edAssetMonitorType').addEventListener('change', toggleEdMonitorPort);
 
-    document.getElementById('inspectionPlanForm').addEventListener('submit', async event => {
-      event.preventDefault();
+    document.getElementById('inspectionPlanForm').addEventListener('submit', event => withSubmitLock(event, async () => {
       const data = Object.fromEntries(new FormData(event.target).entries());
       const id = data.id;
       delete data.id;
@@ -12425,15 +12464,14 @@
         resetInspectionPlanForm();
         document.getElementById('inspectionPlanMessage').textContent = '';
         showToast(id ? '巡检计划修改成功' : '巡检计划保存成功');
-        await loadBaseData();
+        await reloadAfterSubmit();
         openTabWithSubtab('assetOps', 'inspection');
       } catch (error) {
         setMessage('inspectionPlanMessage', error.message, 'error');
       }
-    });
+    }));
 
-    document.getElementById('inspectionExecutionForm').addEventListener('submit', async event => {
-      event.preventDefault();
+    document.getElementById('inspectionExecutionForm').addEventListener('submit', event => withSubmitLock(event, async () => {
       const formData = new FormData(event.target);
       const file = formData.get('attachmentFile');
       const data = Object.fromEntries(formData.entries());
@@ -12447,15 +12485,14 @@
         await api(path, { method, body: JSON.stringify(data) });
         event.target.reset();
         setMessage('inspectionExecutionMessage', id ? '执行记录修改成功' : '执行记录提交成功');
-        await loadBaseData();
+        await reloadAfterSubmit();
         openTabWithSubtab('assetOps', 'inspection');
       } catch (error) {
         setMessage('inspectionExecutionMessage', error.message, 'error');
       }
-    });
+    }));
 
-    document.getElementById('sparePartForm').addEventListener('submit', async event => {
-      event.preventDefault();
+    document.getElementById('sparePartForm').addEventListener('submit', event => withSubmitLock(event, async () => {
       const data = Object.fromEntries(new FormData(event.target).entries());
       if (data.quantity !== undefined && Number(data.quantity) < 0) { setMessage('sparePartMessage', '库存数量不能为负数', 'error'); return; }
       if (data.safeStock !== undefined && Number(data.safeStock) < 0) { setMessage('sparePartMessage', '安全库存不能为负数', 'error'); return; }
@@ -12467,15 +12504,14 @@
         await api(path, { method, body: JSON.stringify(data) });
         resetSparePartForm();
         setMessage('sparePartMessage', id ? '备件修改成功' : '备件创建成功');
-        await loadBaseData();
+        await reloadAfterSubmit();
         openTabWithSubtab('assetOps', 'spare');
       } catch (error) {
         setMessage('sparePartMessage', error.message, 'error');
       }
-    });
+    }));
 
-    document.getElementById('changeRecordForm').addEventListener('submit', async event => {
-      event.preventDefault();
+    document.getElementById('changeRecordForm').addEventListener('submit', event => withSubmitLock(event, async () => {
       const data = Object.fromEntries(new FormData(event.target).entries());
       const id = data.id;
       delete data.id;
@@ -12485,15 +12521,14 @@
         await api(path, { method, body: JSON.stringify(data) });
         resetChangeRecordForm();
         setMessage('changeRecordMessage', id ? '变更记录修改成功' : '变更记录提交成功');
-        await loadBaseData();
+        await reloadAfterSubmit();
         openTabWithSubtab('assetOps', 'change');
       } catch (error) {
         setMessage('changeRecordMessage', error.message, 'error');
       }
-    });
+    }));
 
-    document.getElementById('incidentForm').addEventListener('submit', async event => {
-      event.preventDefault();
+    document.getElementById('incidentForm').addEventListener('submit', event => withSubmitLock(event, async () => {
       const data = Object.fromEntries(new FormData(event.target).entries());
       const id = data.id;
       delete data.id;
@@ -12503,15 +12538,14 @@
         await api(path, { method, body: JSON.stringify(data) });
         resetIncidentForm();
         setMessage('incidentMessage', id ? '故障记录修改成功' : '故障记录创建成功');
-        await loadBaseData();
+        await reloadAfterSubmit();
         openTabWithSubtab('assetOps', 'incident');
       } catch (error) {
         setMessage('incidentMessage', error.message, 'error');
       }
-    });
+    }));
 
-    document.getElementById('logForm').addEventListener('submit', async event => {
-      event.preventDefault();
+    document.getElementById('logForm').addEventListener('submit', event => withSubmitLock(event, async () => {
       const data = Object.fromEntries(new FormData(event.target).entries());
       if (data.durationHours !== undefined && Number(data.durationHours) < 0) { setMessage('logMessage', '工单用时不能为负数', 'error'); return; }
       try {
@@ -12528,10 +12562,9 @@
       } catch (error) {
         setMessage('logMessage', error.message, 'error');
       }
-    });
+    }));
 
-    document.getElementById('kbForm').addEventListener('submit', async event => {
-      event.preventDefault();
+    document.getElementById('kbForm').addEventListener('submit', event => withSubmitLock(event, async () => {
       const data = Object.fromEntries(new FormData(event.target).entries());
       const id = data.id;
       delete data.id;
@@ -12549,10 +12582,9 @@
       } catch (error) {
         setMessage('kbMessage', error.message, 'error');
       }
-    });
+    }));
 
-    document.getElementById('documentForm').addEventListener('submit', async event => {
-      event.preventDefault();
+    document.getElementById('documentForm').addEventListener('submit', event => withSubmitLock(event, async () => {
       const formData = new FormData(event.target);
       const id = formData.get('id');
       formData.delete('id');
@@ -12574,7 +12606,7 @@
       } catch (error) {
         setMessage('documentMessage', error.message, 'error');
       }
-    });
+    }));
 
     document.getElementById('documentType').addEventListener('change', updateDocumentTypeFields);
 
