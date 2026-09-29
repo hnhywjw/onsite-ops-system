@@ -4842,8 +4842,13 @@
       }
       resetWorkReportForm();
       setMessage('workReportEditorMessage', submitAfterSave ? '工作汇报已提交' : '工作汇报已保存');
-      await loadBaseData();
-      await refreshReports();
+      // 写成功后刷新数据；刷新失败不应覆盖上面的成功提示，仅在未登录时向上抛出。
+      try {
+        await loadBaseData();
+        await refreshReports();
+      } catch (error) {
+        if (error && error.message === '请先登录') throw error;
+      }
     }
 
     async function reviewWorkReport(reportId, action) {
@@ -10617,18 +10622,29 @@
       await handleWorkReportFilterChange();
     });
     document.getElementById('workReportFilterUser').addEventListener('change', handleWorkReportFilterChange);
-    document.getElementById('saveWorkReportBtn').addEventListener('click', async () => {
+    // 保存/提交按钮在请求期间禁用，避免网络较慢时重复点击创建出多份工作汇报。
+    document.getElementById('saveWorkReportBtn').addEventListener('click', async event => {
+      const button = event.currentTarget;
+      if (button.disabled) return;
+      button.disabled = true;
       try {
         await saveWorkReport(false);
       } catch (error) {
         setMessage('workReportEditorMessage', error.message, 'error');
+      } finally {
+        button.disabled = false;
       }
     });
-    document.getElementById('submitWorkReportBtn').addEventListener('click', async () => {
+    document.getElementById('submitWorkReportBtn').addEventListener('click', async event => {
+      const button = event.currentTarget;
+      if (button.disabled) return;
+      button.disabled = true;
       try {
         await saveWorkReport(true);
       } catch (error) {
         setMessage('workReportEditorMessage', error.message, 'error');
+      } finally {
+        button.disabled = false;
       }
     });
     document.getElementById('resetWorkReportBtn').addEventListener('click', resetWorkReportForm);
@@ -11752,7 +11768,11 @@
       try {
         const result = await api('/api/system/backup', { method: 'POST', body: '{}' });
         appendBackupLinkToMessage('systemBackupMessage', result.href, result.filename, `备份创建成功: ${result.filename}`);
-        await refreshSystemManagement();
+        try {
+          await refreshSystemManagement();
+        } catch (refreshError) {
+          if (refreshError && refreshError.message === '请先登录') throw refreshError;
+        }
       } catch (error) {
         setMessage('systemBackupMessage', error.message, 'error');
       }
@@ -11783,7 +11803,11 @@
           if (passwordInput) passwordInput.value = '';
           setMessage('systemBackupMessage', result.message || '磁盘备份恢复成功');
           await loadBaseData().catch(() => {});
-          await refreshSystemManagement();
+          try {
+            await refreshSystemManagement();
+          } catch (refreshError) {
+            if (refreshError && refreshError.message === '请先登录') throw refreshError;
+          }
         } catch (error) {
           setMessage('systemBackupMessage', error.message, 'error');
         }
@@ -11805,7 +11829,11 @@
         const result = await api(`/api/system/backups/${encodeURIComponent(deleteFilename)}${query}`, { method: 'DELETE', body: JSON.stringify({ password }) });
         if (passwordInput) passwordInput.value = '';
         setMessage('systemBackupMessage', result.message || '备份已删除');
-        await refreshSystemManagement();
+        try {
+          await refreshSystemManagement();
+        } catch (refreshError) {
+          if (refreshError && refreshError.message === '请先登录') throw refreshError;
+        }
       } catch (error) {
         setMessage('systemBackupMessage', error.message, 'error');
       }

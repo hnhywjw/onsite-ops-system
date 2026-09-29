@@ -5451,7 +5451,7 @@ async function executeAiInspectionTask(db, task, options = {}) {
       } else {
         appendSystemAuditLog(db, 'execute', 'aiInspectionTask', task.id, `执行智能巡检 ${task.title}（探测失败: ${failureMessage}）`, task.projectId);
       }
-      createNotification(db, task.projectId, '自动化巡检提醒', `${task.title} 探测失败: ${failureMessage}`, 'warning', 'ai-inspection');
+      createNotification(db, task.projectId, '自动化巡检提醒', `${task.title} 探测失败: ${failureMessage}`, 'warning', 'ai-inspection', 'aiInspectionTask', task.id);
       if (options.persist === true) {
         return { result, changed: true };
       }
@@ -5489,7 +5489,7 @@ async function executeAiInspectionTask(db, task, options = {}) {
       appendSystemAuditLog(db, 'execute', 'aiInspectionTask', task.id, `执行智能巡检 ${task.title}，结果 ${result.level}`, task.projectId);
     }
     if (result.level === '异常' || result.level === '严重') {
-      createNotification(db, task.projectId, '自动化巡检提醒', `${task.title} 输出 ${result.level} 结果`, result.level === '严重' ? 'warning' : 'info', 'ai-inspection');
+      createNotification(db, task.projectId, '自动化巡检提醒', `${task.title} 输出 ${result.level} 结果`, result.level === '严重' ? 'warning' : 'info', 'ai-inspection', 'aiInspectionTask', task.id);
     }
     if (options.persist === true) {
       return { result, changed: true };
@@ -5529,7 +5529,7 @@ async function executeAiInspectionTask(db, task, options = {}) {
     } else {
       appendSystemAuditLog(db, 'execute', 'aiInspectionTask', task.id, `执行智能巡检 ${task.title}（探测异常: ${failureMessage}）`, task.projectId);
     }
-    createNotification(db, task.projectId, '自动化巡检提醒', `${task.title} 探测异常: ${failureMessage}`, 'warning', 'ai-inspection');
+    createNotification(db, task.projectId, '自动化巡检提醒', `${task.title} 探测异常: ${failureMessage}`, 'warning', 'ai-inspection', 'aiInspectionTask', task.id);
     if (options.persist === true) {
       return { result, changed: true };
     }
@@ -5657,7 +5657,7 @@ async function executeConfigBackupPlan(db, plan, options = {}) {
     plan.lastBackupAt = createdAt;
     plan.lastStatus = '失败';
     if (plan.cycle) advanceAiTaskNextExecution(plan);
-    createNotification(db, plan.projectId, '配置备份提醒', `${plan.name || '配置备份'} 失败: ${message}`, 'warning', 'config-backup');
+    createNotification(db, plan.projectId, '配置备份提醒', `${plan.name || '配置备份'} 失败: ${message}`, 'warning', 'config-backup', 'configBackupPlan', plan.id);
     return record;
   };
   if (!target) return fail('巡检对象不存在');
@@ -8526,6 +8526,8 @@ const requestHandler = async (req, res) => {
       if (force) {
         // 管理员强制删除：先级联清理该项目下的全部业务数据与人员，再删除项目，便于清理历史残留项目。
         const projectUserIds = (db.users || []).filter(item => item.projectId === projectId).map(item => item.id);
+        const projectAssetIds = new Set((db.assets || []).filter(item => item.projectId === projectId).map(item => item.id));
+        const projectDocumentIds = (db.documents || []).filter(item => item.projectId === projectId).map(item => item.id);
         const removedCounts = {};
         for (const key of projectRelationCollections) {
           if (!Array.isArray(db[key])) continue;
@@ -8533,6 +8535,19 @@ const requestHandler = async (req, res) => {
           db[key] = db[key].filter(item => item.projectId !== projectId);
           const removed = before - db[key].length;
           if (removed > 0) removedCounts[key] = removed;
+        }
+        // 资产关系 assetRelations 只按 source/target 资产 ID 关联、没有 projectId，
+        // 需按即将删除的资产单独清理，否则会遗留指向已删资产的孤儿关系并继续占用拓扑/流量运行时状态。
+        if (projectAssetIds.size) {
+          const beforeRelations = (db.assetRelations || []).length;
+          const removedRelationIds = (db.assetRelations || [])
+            .filter(item => projectAssetIds.has(item.sourceAssetId) || projectAssetIds.has(item.targetAssetId))
+            .map(item => item.id);
+          db.assetRelations = (db.assetRelations || []).filter(item => !projectAssetIds.has(item.sourceAssetId) && !projectAssetIds.has(item.targetAssetId));
+          const removedRelations = beforeRelations - db.assetRelations.length;
+          if (removedRelations > 0) removedCounts.assetRelations = removedRelations;
+          removedRelationIds.forEach(invalidateRelationRuntimeState);
+          projectAssetIds.forEach(invalidateAssetRuntimeState);
         }
         // 项目和人员归属强相关，强制删除项目时同步清理其人员及会话，避免遗留无归属账号。
         if (projectUserIds.length) {
@@ -8547,6 +8562,10 @@ const requestHandler = async (req, res) => {
         const summary = Object.entries(removedCounts).map(([key, count]) => `${key}:${count}`).join(', ') || '无关联数据';
         appendAuditLog(db, user, 'delete', 'project', projectId, `管理员强制删除项目 ${removedProject.name || projectId}（级联清理 ${summary}）`, projectId);
         await writeDb(db, { replaceCollections: ['sessions'] });
+        // 资料附件存放在磁盘，落库成功后一并清理对应目录，避免残留不可达附件占用空间。
+        for (const docId of projectDocumentIds) {
+          try { fs.rmSync(path.join(documentsUploadDir, docId), { recursive: true, force: true }); } catch (_) {}
+        }
         return json(res, 200, { ok: true, forced: true, removed: removedCounts });
       }
       const relationNames = projectRelationCollections.filter(key => (db[key] || []).some(item => item.projectId === projectId));
@@ -10149,6 +10168,12 @@ const requestHandler = async (req, res) => {
       if (user.role === 'admin' && body.projectId !== undefined) {
         if (!requireExistingProject(body.projectId, db)) return json(res, 400, { message: '关联项目不存在' });
         target.projectId = body.projectId;
+        // 管理员改项目但未同时指定资产时，原关联资产可能属于旧项目；跨项目引用会让报表统计对不上，
+        // 此处按新项目复校验，不一致即清空，与其它同类接口保持一致。
+        if (body.assetId === undefined && target.assetId) {
+          const linkedAsset = requireExistingAsset(target.assetId, db);
+          if (!linkedAsset || linkedAsset.projectId !== body.projectId) target.assetId = '';
+        }
       }
       appendAuditLog(db, user, 'update', 'inspectionPlan', planId, `修改巡检计划 ${target.title}`, target.projectId);
       await writeDb(db);
@@ -10992,11 +11017,16 @@ const requestHandler = async (req, res) => {
       if (index === -1) return json(res, 404, { message: '巡检对象不存在' });
       const target = db.aiInspectionTargets[index];
       if (!canManageInspectionRecord(user, target)) return json(res, 403, { message: '无权删除该巡检对象' });
+      // 对象删除会连带清理任务与备份计划，需先收集其 ID，以便同步移除它们产生的通知。
+      const cascadeTaskIds = (db.aiInspectionTasks || []).filter(item => item.targetId === targetId).map(item => item.id);
+      const cascadePlanIds = (db.configBackupPlans || []).filter(item => item.targetId === targetId).map(item => item.id);
       db.aiInspectionTargets.splice(index, 1);
       db.aiInspectionTasks = (db.aiInspectionTasks || []).filter(item => item.targetId !== targetId);
       db.aiInspectionResults = (db.aiInspectionResults || []).filter(item => item.targetId !== targetId);
       db.configBackupPlans = (db.configBackupPlans || []).filter(item => item.targetId !== targetId);
       db.configBackupRecords = (db.configBackupRecords || []).filter(item => item.targetId !== targetId);
+      cascadeTaskIds.forEach(idValue => removeNotificationsBySource(db, 'aiInspectionTask', idValue));
+      cascadePlanIds.forEach(idValue => removeNotificationsBySource(db, 'configBackupPlan', idValue));
       appendAuditLog(db, user, 'delete', 'aiInspectionTarget', targetId, `删除智能巡检对象 ${target.name}`, target.projectId);
       await writeDb(db);
       return json(res, 200, { ok: true });
@@ -11333,6 +11363,7 @@ const requestHandler = async (req, res) => {
       if (!canManageInspectionRecord(user, target)) return json(res, 403, { message: '无权删除该巡检任务' });
       db.aiInspectionTasks.splice(index, 1);
       db.aiInspectionResults = (db.aiInspectionResults || []).filter(item => item.taskId !== taskId);
+      removeNotificationsBySource(db, 'aiInspectionTask', taskId);
       appendAuditLog(db, user, 'delete', 'aiInspectionTask', taskId, `删除智能巡检任务 ${target.title}`, target.projectId);
       await writeDb(db);
       return json(res, 200, { ok: true });
@@ -11427,6 +11458,7 @@ const requestHandler = async (req, res) => {
       if (!canManageInspectionRecord(user, plan)) return json(res, 403, { message: '无权删除该配置备份计划' });
       db.configBackupPlans.splice(index, 1);
       db.configBackupRecords = (db.configBackupRecords || []).filter(item => item.planId !== planId);
+      removeNotificationsBySource(db, 'configBackupPlan', planId);
       appendAuditLog(db, user, 'delete', 'configBackupPlan', plan.id, `删除配置备份计划 ${plan.name}`, plan.projectId);
       await writeDb(db);
       return json(res, 200, { ok: true });
