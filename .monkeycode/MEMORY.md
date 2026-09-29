@@ -115,6 +115,15 @@ Agent 在任务执行过程中发现的条目应遵循以下格式：
   - `npm run e2e` 在「进入工作汇报链路」的 `page.click('#refreshWorkloadBtn')` 偶发 30s 超时；该按钮本身存在，库内测试数据（项目、`col_ai_inspection_results` 数万条等）累积会拖慢渲染/出现覆盖层，重跑一次即可确认，同样属测试数据治理问题。
   - `npm run e2e` 在「资料创建与校验」的 `page.click('section[data-tab="documents"] button[data-subtab="form"]')` 偶发 30s 超时（首个资料提交后子标签页状态未及时就绪），重跑一次即可确认，与业务代码无关。
   - `scripts/regression.js` 与 `scripts/e2e.js` 创建的测试项目、`AI 周期巡检回归任务` 等不在用例结束时清理，会随每次运行累积；排障前可先核对库内高频测试名（如「AI 周期巡检回归任务」「布局隔离项目」「提醒回归项目」「时区提醒项目」）规模。
+  - `npm run e2e` 在「管理员验证工作汇报看板与导出并清理日志」步骤登录后 `page.waitForFunction` 偶发 30s 超时（`scripts/e2e.js:169`），属登录自动登出竞态，重跑一次即可确认。
+
+[数组集合原地修改必须打脏标记]
+- Date: 2026-09-29
+- Context: Agent 排查「新用户标记通知已读后刷新又变未读」时发现
+- Category: 排错调试
+- Instructions:
+  - `cloneDbSnapshot` 对 `notifications`、`aiInspectionResults` 等数组集合只做浅拷贝，元素对象与内存缓存共享引用；原地修改字段（如写入 `readBy`/`hiddenBy`）后两侧对象序列化结果完全相同。
+  - `collectionChanged` 因此无法靠 `JSON.stringify` 比较发现变更，写入被静默跳过、刷新即回退；此类原地修改必须显式设置元素 `_dirty = true`，由 `arrayHasDirtyItems`/`collectionDirtyItems` 识别后才落库。
 
 [备份文件保留策略不对称]
 - Date: 2026-09-28
