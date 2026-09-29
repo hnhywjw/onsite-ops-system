@@ -1778,13 +1778,17 @@ function cascadeDeleteAsset(db, assetId) {
   removed.targets = beforeTargets - db.aiInspectionTargets.length;
   // 巡检对象被删除后，其派生的智能巡检任务/结果与配置备份计划/记录会成为孤儿，需同步清理。
   const beforeAiTasks = (db.aiInspectionTasks || []).length;
+  const removedAiTaskIds = (db.aiInspectionTasks || []).filter(item => removedTargetIds.includes(item.targetId)).map(item => item.id);
   db.aiInspectionTasks = (db.aiInspectionTasks || []).filter(item => !removedTargetIds.includes(item.targetId));
   const beforeAiResults = (db.aiInspectionResults || []).length;
   db.aiInspectionResults = (db.aiInspectionResults || []).filter(item => !removedTargetIds.includes(item.targetId));
   const beforeConfigPlans = (db.configBackupPlans || []).length;
+  const removedConfigPlanIds = (db.configBackupPlans || []).filter(item => removedTargetIds.includes(item.targetId)).map(item => item.id);
   db.configBackupPlans = (db.configBackupPlans || []).filter(item => !removedTargetIds.includes(item.targetId));
   const beforeConfigRecords = (db.configBackupRecords || []).length;
   db.configBackupRecords = (db.configBackupRecords || []).filter(item => !removedTargetIds.includes(item.targetId));
+  removedAiTaskIds.forEach(id => removeNotificationsBySource(db, 'aiInspectionTask', id));
+  removedConfigPlanIds.forEach(id => removeNotificationsBySource(db, 'configBackupPlan', id));
   removed.aiTasks = beforeAiTasks - db.aiInspectionTasks.length;
   removed.aiResults = beforeAiResults - db.aiInspectionResults.length;
   removed.configBackupPlans = beforeConfigPlans - db.configBackupPlans.length;
@@ -1824,6 +1828,8 @@ function cascadeDeleteAsset(db, assetId) {
     }
   }
   invalidateAssetRuntimeState(assetId);
+  // 资产维保到期、离线告警等通知标记了 sourceType='asset'，随资产删除一并清理。
+  removeNotificationsBySource(db, 'asset', assetId);
   removed.notifications = beforeNotifications - (db.notifications || []).length;
   return removed;
 }
@@ -5810,7 +5816,7 @@ function checkExpiryNotifications(db) {
       );
       if (existingNotifications.length === 0) {
         const expiryText = daysLeft <= 0 ? `已到期 ${Math.abs(daysLeft)} 天` : `剩余 ${daysLeft} 天`;
-        createNotification(db, asset.projectId, daysLeft <= 0 ? '维保已到期' : '维保即将到期', `资产 ${asset.name}（${asset.type || '-'}）维保将于 ${asset.maintainExpiryDate} 到期，${expiryText}`, daysLeft <= 7 ? 'warning' : 'info', 'maintenance-expiry');
+        createNotification(db, asset.projectId, daysLeft <= 0 ? '维保已到期' : '维保即将到期', `资产 ${asset.name}（${asset.type || '-'}）维保将于 ${asset.maintainExpiryDate} 到期，${expiryText}`, daysLeft <= 7 ? 'warning' : 'info', 'maintenance-expiry', 'asset', asset.id);
         changed = true;
       }
     }
@@ -5828,7 +5834,7 @@ function checkExpiryNotifications(db) {
         n => n.category === 'inspection-overdue' && n.projectId === plan.projectId && String(n.content || '').includes(plan.title || '-') && getNotificationCreatedAtMs(n) > (now - thirtyDaysMs)
       );
       if (existingNotifications.length === 0) {
-        createNotification(db, plan.projectId, '巡检计划提醒', `巡检计划 ${plan.title || '-'} 将于 ${plan.nextDate} 到期（${daysLeft < 0 ? '已逾期 ' + Math.abs(daysLeft) + ' 天' : daysLeft === 0 ? '今日到期' : '剩余 ' + daysLeft + ' 天'}）`, daysLeft <= 0 ? 'warning' : 'info', 'inspection-overdue');
+        createNotification(db, plan.projectId, '巡检计划提醒', `巡检计划 ${plan.title || '-'} 将于 ${plan.nextDate} 到期（${daysLeft < 0 ? '已逾期 ' + Math.abs(daysLeft) + ' 天' : daysLeft === 0 ? '今日到期' : '剩余 ' + daysLeft + ' 天'}）`, daysLeft <= 0 ? 'warning' : 'info', 'inspection-overdue', 'inspectionPlan', plan.id);
         changed = true;
       }
     }
@@ -9331,6 +9337,8 @@ const requestHandler = async (req, res) => {
           }
         }
         invalidateAssetRuntimeState(assetId);
+        // 资产维保到期、离线告警等通知标记了 sourceType='asset'，随资产删除一并清理。
+        removeNotificationsBySource(lockDb, 'asset', assetId);
         appendAuditLog(lockDb, user, 'delete', 'asset', assetId, `删除资产 ${target.name}`, target.projectId);
         await writeDb(lockDb);
         return { status: 200, body: { ok: true } };
@@ -10336,7 +10344,7 @@ const requestHandler = async (req, res) => {
       const item = { id: id('spare'), projectId, assetId, name: spareName, model: body.model || '', quantity: quantityValue, safeStock: safeStockValue, unit: body.unit || '', location: body.location || '', notes: body.notes || '', createdAt: now() };
       db.spareParts.push(item);
       appendAuditLog(db, user, 'create', 'sparePart', item.id, `创建备件 ${item.name}`, projectId);
-      if (item.quantity <= item.safeStock) createNotification(db, projectId, '备件库存提醒', `${item.name} 库存达到安全阈值`, 'warning', 'inventory');
+      if (item.quantity <= item.safeStock) createNotification(db, projectId, '备件库存提醒', `${item.name} 库存达到安全阈值`, 'warning', 'inventory', 'sparePart', item.id);
       await writeDb(db);
       return json(res, 201, item);
     }
@@ -10431,6 +10439,8 @@ const requestHandler = async (req, res) => {
         const removedMovementCount = (lockDb.sparePartMovements || []).filter(item => item.sparePartId === sparePartId).length;
         lockDb.spareParts.splice(index, 1);
         lockDb.sparePartMovements = (lockDb.sparePartMovements || []).filter(item => item.sparePartId !== sparePartId);
+        // 备件库存提醒标记了 sourceType='sparePart'，随备件删除一并清理。
+        removeNotificationsBySource(lockDb, 'sparePart', sparePartId);
         appendAuditLog(lockDb, user, 'delete', 'sparePart', sparePartId, `删除备件 ${target.name}，同时移除 ${removedMovementCount} 条出入库流水`, target.projectId);
         await writeDb(lockDb);
         return { status: 200 };
@@ -10477,7 +10487,7 @@ const requestHandler = async (req, res) => {
         lockDb.sparePartMovements.push(movement);
         appendAuditLog(lockDb, user, 'stock', 'sparePart', target.id, `${type === 'inbound' ? '入库' : '消耗'}备件 ${target.name} 数量 ${quantity}`, target.projectId);
         if (target.quantity <= target.safeStock) {
-          createNotification(lockDb, target.projectId, '备件库存提醒', `${target.name} 当前库存 ${target.quantity}，已达到安全阈值`, 'warning', 'inventory');
+          createNotification(lockDb, target.projectId, '备件库存提醒', `${target.name} 当前库存 ${target.quantity}，已达到安全阈值`, 'warning', 'inventory', 'sparePart', target.id);
         }
         await writeDb(lockDb);
         return { status: 200, item: target, movement };
@@ -13180,7 +13190,9 @@ async function notifyMonitorChange(asset, prevStatus, newStatus) {
       title,
       message,
       newStatus === 'offline' ? 'warning' : 'info',
-      'monitor-alert'
+      'monitor-alert',
+      'asset',
+      asset.id
     );
     await writeDb(db);
     broadcastToProject(asset.projectId, { type: 'monitor_alert', assetId: asset.id, assetName: asset.name, host: asset.monitorHost || '', monitorStatus: newStatus, title, message });

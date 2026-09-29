@@ -147,7 +147,9 @@ Agent 在任务执行过程中发现的条目应遵循以下格式：
 - Category: 排错调试
 - Instructions:
   - 删除会产生通知的业务实体时，必须同步清理其通知：通知统一带 `sourceType`/`sourceId`，用 `removeNotificationsBySource(db, sourceType, sourceId)` 精确移除。
+  - 所有由业务实体产生的通知都必须打来源标记，否则删除实体后会残留孤儿通知：`aiInspectionTask`、`configBackupPlan`、`inspectionPlan`（含到期提醒与异常提醒）、`asset`（维保到期、离线告警）、`sparePart`（库存提醒）、`changeRecord`、`approval`、`incident`、`workReport`。
   - 智能巡检对象删除会连带清理其任务与配置备份计划，需先收集这些子实体 ID，再分别清理对应通知，避免遗留空通知。
+  - 资产删除（普通与 `?cascade=1` 强制级联）都要清理 `asset` 来源通知，并连带清理其巡检对象派生任务/备份计划的通知；备件删除清理 `sparePart` 来源通知。
   - 强制删除项目（`?force=1`）会级联清理 `assetRelations`（按资产 ID，无 `projectId` 字段）并失效拓扑/流量运行时状态，落库成功后清理资料附件磁盘目录。
 
 [GitHub 推送凭据来源]
