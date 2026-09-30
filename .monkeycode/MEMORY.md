@@ -169,3 +169,12 @@ Agent 在任务执行过程中发现的条目应遵循以下格式：
   - 创建 Release：`gh release create v<ver> --repo hnhywjw/onsite-ops-system --title "..." --notes-file <notes.md> <production.tar.gz> <upgrade.tar.gz> <sha256>`。
   - 用户要求 Release 说明里必须写清楚安装部署说明：Notes 需包含更新内容、交付物与 SHA256、环境要求、Docker Compose 安装步骤、反向代理示例、手动部署、升级部署（含升级包签名要求）与验收清单；用 `gh release edit v<ver> --notes-file <notes.md>` 更新。
   - 部署文档中引用安装包/升级包文件名时，版本号必须与当前发布版本一致（历史 `PRODUCTION_DEPLOY.md` 升级章节曾残留旧版本文件名）。
+
+[全量开发包与私有仓库]
+- Date: 2026-09-30
+- Context: Agent 按要求导出可再次导入开发平台的全量包并上传 GitHub
+- Category: 运维部署/工作流协作
+- Instructions:
+  - 全量开发包用于新 Devbox 导入后继续开发，含源码、`.git`、`.monkeycode`、`node_modules`、当前 MySQL 导出（`mysqldump --databases onsite_ops_system`）、`data/db.json` 与密钥文件；排除 `data/backups`、`data/archive`、`public/downloads`、历史 `onsite-ops-*.tar.gz`/`.sha256`。
+  - 因包含数据库导出与密钥（`data/encryption.key`、`data/upgrade-signing.key`、`data/https/`），只上传到**私有仓库** `hnhywjw/onsite-ops-system-devbox`（`gh repo create --private`），不得上传到公开仓库 `hnhywjw/onsite-ops-system`。
+  - 空仓库直接建 Release 会报 422「Repository is empty」，需先推一个 README 初始化 `main` 分支，再 `gh release create`。
