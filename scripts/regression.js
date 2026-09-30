@@ -1281,9 +1281,20 @@ async function main() {
     body: JSON.stringify({ name: '删除阻断用户', username: `block_user_${suffix}`, password: 'Block123!', role: 'engineer', projectId: blockProjectA.data.id })
   });
   assert(blockUser.status === 201, '创建删除阻断用人员失败');
+  const blockUserB = await request('/api/users', {
+    method: 'POST', headers: { cookie, 'Content-Type': 'application/json' },
+    body: JSON.stringify({ name: '删除阻断用户B', username: `block_user_b_${suffix}`, password: 'Block123!', role: 'engineer', projectId: blockProjectB.data.id })
+  });
+  assert(blockUserB.status === 201, '创建删除阻断用人员B失败');
+  // 汇报人须属于所选项目：项目A的人员不能为项目B写汇报
+  const crossProjectReport = await request('/api/work-reports', {
+    method: 'POST', headers: { cookie, 'Content-Type': 'application/json' },
+    body: JSON.stringify({ reportType: 'daily', anchorDate: '2098-04-10', projectId: blockProjectB.data.id, userId: blockUser.data.id, summary: '跨项目汇报应被拒绝' })
+  });
+  assert(crossProjectReport.status === 400 && String(crossProjectReport.data.message || '').includes('不属于所选项目'), '汇报人不属于所选项目时应被拒绝');
   const reportForProjectB = await request('/api/work-reports', {
     method: 'POST', headers: { cookie, 'Content-Type': 'application/json' },
-    body: JSON.stringify({ reportType: 'daily', anchorDate: '2098-04-11', projectId: blockProjectB.data.id, userId: blockUser.data.id, summary: '项目删除阻断回归' })
+    body: JSON.stringify({ reportType: 'daily', anchorDate: '2098-04-11', projectId: blockProjectB.data.id, userId: blockUserB.data.id, summary: '项目删除阻断回归' })
   });
   assert(reportForProjectB.status === 200, '创建项目删除阻断用汇报失败');
   const deleteProjectWithReport = await request(`/api/projects/${blockProjectB.data.id}`, { method: 'DELETE', headers: { cookie } });
@@ -1298,6 +1309,7 @@ async function main() {
   // 清理阻断测试数据
   await request(`/api/work-reports/${reportForProjectB.data.data.id}`, { method: 'DELETE', headers: { cookie, 'Content-Type': 'application/json' }, body: '{}' });
   await request(`/api/work-reports/${reportForUser.data.data.id}`, { method: 'DELETE', headers: { cookie, 'Content-Type': 'application/json' }, body: '{}' });
+  await request(`/api/users/${blockUserB.data.id}`, { method: 'DELETE', headers: { cookie } });
   await request(`/api/users/${blockUser.data.id}`, { method: 'DELETE', headers: { cookie } });
   await request(`/api/projects/${blockProjectA.data.id}`, { method: 'DELETE', headers: { cookie } });
   await request(`/api/projects/${blockProjectB.data.id}`, { method: 'DELETE', headers: { cookie } });

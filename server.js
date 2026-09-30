@@ -12018,6 +12018,10 @@ const requestHandler = async (req, res) => {
         if (!projectId) return { status: 400, message: '请选择关联项目' };
         if (!requireExistingProject(projectId, lockDb)) return { status: 400, message: '关联项目不存在' };
         if (user.role !== 'admin' && targetUserId !== user.id) return { status: 403, message: '仅支持创建本人的工作汇报' };
+        // 汇报人须属于所选项目：已绑定项目的人员不能为其项目之外的项目写汇报。
+        if (targetUser.projectId && targetUser.projectId !== projectId) {
+          return { status: 400, message: '汇报人不属于所选项目' };
+        }
         const periodMeta = getWorkReportPeriodMeta(reportType, body.anchorDate || body.rangeStart || formatDateKey(new Date()));
         if (!periodMeta) return { status: 400, message: '无效的汇报周期' };
         const existing = (lockDb.workReports || []).find(item => item.userId === targetUserId && item.projectId === projectId && item.reportType === reportType && item.periodKey === periodMeta.periodKey);
@@ -12087,6 +12091,11 @@ const requestHandler = async (req, res) => {
         : target.projectId;
       if (!nextProjectId) return json(res, 400, { message: '请选择关联项目' });
       if (!requireExistingProject(nextProjectId, db)) return json(res, 400, { message: '关联项目不存在' });
+      // 与创建保持一致：已绑定项目的汇报人不能把汇报改到其项目之外。
+      const reportOwner = requireExistingUser(target.userId, db);
+      if (reportOwner && reportOwner.projectId && reportOwner.projectId !== nextProjectId) {
+        return json(res, 400, { message: '汇报人不属于所选项目' });
+      }
       const periodMeta = getWorkReportPeriodMeta(nextReportType, body.anchorDate || body.rangeStart || target.rangeStart);
       if (!periodMeta) return json(res, 400, { message: '无效的汇报周期' });
       const duplicate = (db.workReports || []).find(item => item.id !== target.id
