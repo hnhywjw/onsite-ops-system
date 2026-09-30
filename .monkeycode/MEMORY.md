@@ -51,47 +51,16 @@ Agent 在任务执行过程中发现的条目应遵循以下格式：
   - `readDb()` 使用内存缓存，命中后不再全表读取 MySQL，也不再对整库 `JSON.stringify`；写入只持久化脏集合。
   - 未设置 `ENCRYPTION_KEY` 时，运行时密钥会写入并复用 `data/encryption.key`，避免重启后无法解密凭据。
 
-[项目启动方式]
-- Date: 2026-06-19
-- Context: Agent 在执行驻场运维管理系统 MySQL 改造后更新
-- Category: 构建方法
+[启动、校验与测试流程]
+- Date: 2026-09-30（合并自 2026-06-19/06-20/08-19/08-20/09-12）
+- Context: Agent 加固调度器健壮性时合并同类条目
+- Category: 构建方法/测试方法
 - Instructions:
-  - 项目使用 `npm start` 启动 Node 服务。
-  - 默认监听端口为 `3000`。
-  - 生产部署默认通过 `docker-compose.yml` 同时启动应用和 MySQL。
-
-[项目校验命令]
-- Date: 2026-09-12
-  - Context: Agent 在收尾审查修复并同步点阵验证码测试解码时更新
-  - Category: 测试方法
-  - Instructions:
-    - 语法与静态校验使用 `npm run lint` 和 `npm run typecheck`。
-    - 端到端核心回归使用 `npm run regression`，依赖本地 `3000` 端口服务可访问。
-    - 浏览器级冒烟使用 `npm run e2e`，依赖本地 `3000` 端口服务可访问。
-    - 发布后自动化冒烟使用 `npm run smoke`，用于快速校验健康检查、登录态和核心读取接口。
-    - 登录验证码为点阵 SVG，regression / e2e / smoke 使用 `scripts/captcha-glyphs.js` 的 `decodeCaptchaFromSvg` 解码。
-
-[健康检查接口]
-- Date: 2026-06-20
-- Context: Agent 在补充生产可用性保障时发现
-- Category: 排错调试
-- Instructions:
-  - 存活检查使用 `GET /api/health`。
-  - 就绪检查使用 `GET /api/ready`，会校验 MySQL 与备份目录状态。
-
-[回归前服务重启要求]
-- Date: 2026-08-19
-- Context: Agent 在补充工作汇报提醒回归时发现
-- Category: 排错调试
-- Instructions:
-  - 修改 `server.js` 后需要重启 `npm start` 对应的 `3000` 端口服务，再运行 `npm run regression`，否则回归会继续命中旧进程。
-
-[端到端测试执行顺序]
-- Date: 2026-08-20
-- Context: Agent 在执行平台新增功能与整体回归检查时发现
-- Category: 测试方法
-- Instructions:
-  - `npm run e2e` 需要与 `npm run regression` 顺序执行，避免并发运行导致浏览器登录链路超时并产生假失败。
+  - 项目用 `npm start` 启动，默认监听 `3000`；生产部署通过 `docker-compose.yml` 同时启动应用与 MySQL。
+  - 存活检查 `GET /api/health`；就绪检查 `GET /api/ready`（校验 MySQL 与备份目录状态）。
+  - 静态校验 `npm run lint` + `npm run typecheck`；核心回归 `npm run regression`；浏览器冒烟 `npm run e2e`；发布后冒烟 `npm run smoke`，后三者都依赖本地 `3000` 服务可访问。
+  - 修改 `server.js` 后必须重启 `3000` 服务再跑回归，否则命中旧进程；`npm run e2e` 必须与 `npm run regression` 顺序执行，并发会导致登录链路假失败。
+  - 登录验证码为点阵 SVG，regression / e2e / smoke 用 `scripts/captcha-glyphs.js` 的 `decodeCaptchaFromSvg` 解码。
 
 [Git 推送目标分支]
 - Date: 2026-07-02
