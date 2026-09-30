@@ -153,3 +153,17 @@ Agent 在任务执行过程中发现的条目应遵循以下格式：
   - 非生产环境下用 `FORCE_DB_WRITE_FAILURE_FILE=/path/flag npm start` 启动；当该文件存在时，`writeDb` 在写 MySQL 前抛错，用于验证内存回滚与持久层一致。
   - 创建标志文件即注入失败，重命名或移走文件即恢复，不受后台定时写库干扰（数字计数会被启动时的调度器写库消耗，故改用文件开关）。
   - `NODE_ENV=production` 下该开关被忽略，生产环境不会启用注入。
+
+[版本发布与 GitHub Release 流程]
+- Date: 2026-09-30
+- Context: Agent 发布 v1.0.15 时按 v1.0.14 既有产物结构复现
+- Category: 运维部署/工作流协作
+- Instructions:
+  - 发布前同步版本号：`package.json`、`package-lock.json`（2 处）、`README.md`（当前版本/下载链接/新增更新说明）、`PRODUCTION_DEPLOY.md`（标题/部署版本/包名/Release 链接/验收版本）；`manifest.json` 被 `.gitignore` 忽略，由构建生成，无需手改。
+  - 完整安装包用平铺目录打包（不含父目录、不含 `public/downloads`）：
+    `tar -czf onsite-ops-system-v<ver>-production.tar.gz --exclude=public/downloads README.md PRODUCTION_DEPLOY.md DEPLOY.md .env.production.example Dockerfile docker-compose.yml docker-compose.prod.yml docker-entrypoint.sh package.json package-lock.json server.js pptx-template.json build-upgrade.js public scripts`
+  - 离线升级包用 `npm run build-upgrade` 生成（写入 `manifest.json` + `onsite-ops-upgrade-v<ver>.tar.gz`）；有 `UPGRADE_SIGNING_KEY`（≥32 位）时 manifest 带 HMAC 签名，否则输出未签名包并提示。
+  - 校验和文件为两行（完整包 + 升级包）：`sha256sum <production.tar.gz> <upgrade.tar.gz> > onsite-ops-system-v<ver>.sha256`。
+  - `*.tar.gz` 被 `.gitignore` 忽略，产物作为 GitHub Release 资产上传，不提交进仓库；`.sha256` 文件同样仅作发布资产。
+  - 推送：`git push origin HEAD:main`（用户要求推送目标为 `main`，本地工作分支为 `release-v1.0.10`，两者可 fast-forward），再 `git push origin v<ver>`。
+  - 创建 Release：`gh release create v<ver> --repo hnhywjw/onsite-ops-system --title "..." --notes-file <notes.md> <production.tar.gz> <upgrade.tar.gz> <sha256>`。
