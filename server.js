@@ -1534,19 +1534,18 @@ function sanitizeUserForViewer(user, viewer) {
 
 function sanitizeAiInspectionResultForViewer(result, viewer) {
   if (!result) return result;
+  // _dirty 是内部落库标记，任何角色都不应看到。
+  const { _dirty, ...source } = result;
   // 原始探测输出（CLI 回显、配置片段）只对管理员与工程师可见。
   const privileged = Boolean(viewer) && (viewer.role === 'admin' || viewer.role === 'engineer');
-  if (privileged) {
-    const { _dirty, ...rest } = result;
-    return rest;
-  }
+  if (privileged) return source;
   const {
     probeError,
     rawOutput,
     stdout,
     stderr,
     ...safe
-  } = result;
+  } = source;
   return {
     ...safe,
     probeError: Boolean(probeError),
