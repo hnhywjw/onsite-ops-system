@@ -133,26 +133,30 @@ Agent 在任务执行过程中发现的条目应遵循以下格式：
   - 初始化（`/api/system/reset`）会清空指向已删项目的 `ssoDefaultProjectId` 并删除 `data/uploads/documents` 下附件，两处均在 `writeDb` 成功之后执行。
   - 导入快照（`/api/system/import`）会整体替换数据，落库成功后需调用 `pruneDocumentAttachmentDirs` 清理旧数据集残留、已不被引用的资料附件目录；凡是替换或删除数据集的路径都要同步清理 `data/uploads/documents` 下的孤儿附件目录。
 
-[审批删除级联]
-- Date: 2026-09-29
-- Context: Agent 处理孤儿审批无产品级清理入口时新增
-- Category: 排错调试
-- Instructions:
-  - `DELETE /api/approvals/:id` 支持级联：管理员删除属于变更流程的审批时，会一并删除关联变更记录、同一变更下的所有审批及二者的通知；无关联变更的审批直接删除。
-  - 非管理员仅能作废自己提交、未完成且不在变更流程中的审批（否则返回 400/403）。
-  - 变更记录删除（`DELETE /api/change-records/:id`）仍会反向级联清理其审批与通知，两个方向保持一致。
-
 [业务实体删除与通知级联]
 - Date: 2026-09-29
 - Context: Agent 巡检孤儿数据与通知一致性时补充
 - Category: 排错调试
 - Instructions:
+  - 审批删除（`DELETE /api/approvals/:id`）：管理员删除变更流程审批时，一并删除关联变更记录、同一变更下的**所有**审批及二者的通知；非管理员仅能作废自己提交、未完成且不在变更流程中的审批（否则 400/403）。
+  - 变更记录删除（`DELETE /api/change-records/:id`）反向级联：收集 `id===approvalId` 或 `category==='change' && relatedId===recordId` 的**全部**同变更审批及其通知，两个方向保持一致，避免遗留孤儿审批。
   - 删除会产生通知的业务实体时，必须同步清理其通知：通知统一带 `sourceType`/`sourceId`，用 `removeNotificationsBySource(db, sourceType, sourceId)` 精确移除。
   - 所有由业务实体产生的通知都必须打来源标记，否则删除实体后会残留孤儿通知：`aiInspectionTask`、`configBackupPlan`、`inspectionPlan`（含到期提醒与异常提醒）、`asset`（维保到期、离线告警）、`sparePart`（库存提醒）、`changeRecord`、`approval`、`incident`、`workReport`。
   - 智能巡检对象删除会连带清理其任务与配置备份计划，需先收集这些子实体 ID，再分别清理对应通知，避免遗留空通知。
   - 资产删除（普通与 `?cascade=1` 强制级联）都要清理 `asset` 来源通知，并连带清理其巡检对象派生任务/备份计划的通知；备件删除清理 `sparePart` 来源通知。
   - 强制删除项目（`?force=1`）会级联清理 `assetRelations`（按资产 ID，无 `projectId` 字段）并失效拓扑/流量运行时状态，落库成功后清理资料附件磁盘目录。
   - 历史通知若缺少 `sourceType`/`sourceId`，运行 `node scripts/backfill-notification-sources.js`（管理员接口 `POST /api/system/backfill-notification-sources` 的封装）按内容特征回填；脚本幂等，可重复执行。
+
+[周期计划时间校验与父记录改项目级联]
+- Date: 2026-09-30
+- Context: Agent 加固调度器健壮性与跨项目数据一致性时确认
+- Category: 排错调试
+- Instructions:
+  - 周期任务/配置备份计划写入前必须用 `parseValidScheduleTime` 严格校验 `executedAt`（非法或为空即 400），区别于 `parseAiInspectionScheduleTime` 的「非法即视为立即到期」；否则调度器无法推进时间会每周期重跑。
+  - 周期巡检任务的 `cycle` 仅允许 `daily/weekly/monthly/quarterly`；周期任务禁止清空计划时间。仅在显式修改 `executedAt` 时才重置历史结果，编辑标题/执行人等元数据不得清空历史。
+  - 巡检/备份构建阶段抛错也要调用 `advanceAiTaskNextExecution` 推进周期；`executeAiInspectionTask` 返回 null（对象/模板已删）时标记任务「失败」+`lastError`，避免无限重试。
+  - 父记录改归属项目必须同步子记录 `projectId`：巡检计划→`inspectionExecutions`；备件→`sparePartMovements`；巡检对象→派生 `aiInspectionTasks`/`aiInspectionResults`/`configBackupPlans`/`configBackupRecords`（统一用重建数组表达改动，不依赖共享引用 + `_dirty`）。
+  - 对外返回对象前必须剥离内部 `_dirty` 标记（含 AI 巡检结果脱敏函数）。
 
 [故障 SLA 人工控制与跃迁通知]
 - Date: 2026-09-29
