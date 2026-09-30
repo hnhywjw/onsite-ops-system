@@ -1536,7 +1536,10 @@ function sanitizeAiInspectionResultForViewer(result, viewer) {
   if (!result) return result;
   // 原始探测输出（CLI 回显、配置片段）只对管理员与工程师可见。
   const privileged = Boolean(viewer) && (viewer.role === 'admin' || viewer.role === 'engineer');
-  if (privileged) return result;
+  if (privileged) {
+    const { _dirty, ...rest } = result;
+    return rest;
+  }
   const {
     probeError,
     rawOutput,
@@ -5150,6 +5153,22 @@ function parseAiInspectionScheduleTime(executedAt) {
   return Number.isFinite(timestamp) ? timestamp : nowMs();
 }
 
+// 严格校验计划执行时间，非法或为空返回 null（区别于 parseAiInspectionScheduleTime 的「非法即视为立即到期」）。
+// 写入周期任务/备份计划前必须用它拦掉非法时间，否则调度器会因无法推进 executedAt 而每个周期重复执行。
+function parseValidScheduleTime(value) {
+  const raw = String(value || '').trim();
+  if (!raw) return null;
+  const localMatch = raw.match(/^(\d{4})-(\d{2})-(\d{2})T(\d{2}):(\d{2})(?::(\d{2}))?$/);
+  if (localMatch) {
+    const [, year, month, day, hour, minute, second = '0'] = localMatch;
+    const offsetH = getSystemTimezoneOffsetMs() / 3600000;
+    const timestamp = Date.UTC(Number(year), Number(month) - 1, Number(day), Number(hour) - offsetH, Number(minute), Number(second));
+    return Number.isFinite(timestamp) ? timestamp : null;
+  }
+  const timestamp = Date.parse(raw);
+  return Number.isFinite(timestamp) ? timestamp : null;
+}
+
 function addAiTaskCycleOnce(task) {
   if (!task.cycle || !task.executedAt) return false;
   const parts = String(task.executedAt).match(/^(\d{4})-(\d{2})-(\d{2})T(\d{2}):(\d{2})(?::(\d{2}))?$/);
@@ -5844,6 +5863,8 @@ async function processPendingConfigBackupPlans(db) {
     } catch (error) {
       plan.lastStatus = '失败';
       console.error('配置备份计划执行异常:', error.message);
+      // 记录构建阶段抛错时也必须推进到下一个周期，否则该计划会被每个调度周期反复触发。
+      advanceAiTaskNextExecution(plan);
     } finally {
       // 无论成功失败都要复位状态，避免单条计划卡在「执行中」并阻断后续计划。
       plan.status = plan.cycle ? '待执行' : '已完成';
@@ -5861,6 +5882,12 @@ async function processPendingAiInspectionTasks(db) {
     try {
       const result = await executeAiInspectionTask(db, task, { persist: true });
       if (result?.changed) changed = true;
+      if (!result) {
+        // 巡检对象或模板已被删除时无法执行，标记失败，避免每个调度周期无限重试。
+        task.status = '失败';
+        task.lastError = '巡检对象或模板不存在';
+        changed = true;
+      }
     } catch (error) {
       console.error('巡检任务执行异常:', error.message);
     }
@@ -6009,6 +6036,32 @@ function canManageInspectionRecord(user, item) {
   // 无创建者的存量记录仅管理员可改删，避免同项目工程师横向越权。
   if (!item.createdBy) return false;
   return item.createdBy === user.id;
+}
+
+// 巡检对象改归属项目后，同步其派生任务/结果/备份计划/备份记录的 projectId，避免出现跨项目孤儿引用。
+function syncAiInspectionTargetProject(target, projectId, db) {
+  // 统一用重建数组（新对象）表达改动：aiInspectionResults 在快照克隆中只做数组浅拷贝，
+  // 元素为共享引用，原地改写无法被脏检测与并发增量合并可靠捕获。
+  if (Array.isArray(db.aiInspectionTasks)) {
+    db.aiInspectionTasks = db.aiInspectionTasks.map(item =>
+      (item && item.targetId === target.id && item.projectId !== projectId) ? { ...item, projectId } : item);
+  }
+  if (Array.isArray(db.aiInspectionResults)) {
+    db.aiInspectionResults = db.aiInspectionResults.map(item =>
+      (item && item.targetId === target.id && item.projectId !== projectId) ? { ...item, projectId } : item);
+  }
+  const planIds = new Set();
+  if (Array.isArray(db.configBackupPlans)) {
+    db.configBackupPlans = db.configBackupPlans.map(item => {
+      if (!item || item.targetId !== target.id) return item;
+      planIds.add(item.id);
+      return item.projectId !== projectId ? { ...item, projectId } : item;
+    });
+  }
+  if (Array.isArray(db.configBackupRecords) && planIds.size) {
+    db.configBackupRecords = db.configBackupRecords.map(item =>
+      (item && planIds.has(item.planId) && item.projectId !== projectId) ? { ...item, projectId } : item);
+  }
 }
 
 function refreshInspectionPlanFromExecutions(db, planId) {
@@ -6198,7 +6251,7 @@ function buildWorkloadMetrics(db, filters = {}) {
   const changeCount = db.changeRecords.filter(item => matches(item.projectId, item.createdBy, item.createdAt)).length;
   const knowledgeCount = db.knowledgeBase.filter(item => matches(item.projectId || (db.users.find(user => user.id === item.createdBy)?.projectId || ''), item.createdBy, item.createdAt)).length;
   const documentCount = db.documents.filter(item => matches(item.projectId, item.createdBy, item.createdAt)).length;
-  const resolvedIncidentCount = db.incidentRecords.filter(item => matches(item.projectId, item.createdBy, item.occurredAt || item.createdAt) && ['已关闭', '已恢复', '已解决'].includes(String(item.status || ''))).length;
+  const resolvedIncidentCount = db.incidentRecords.filter(item => matches(item.projectId, item.createdBy, item.occurredAt || item.createdAt) && ['已关闭', '已恢复'].includes(String(item.status || ''))).length;
   const workloadCategories = summarizeWorkloadCategories(logs);
   return normalizeWorkMetricsSnapshot({
     logCount: logs.length,
@@ -10272,7 +10325,14 @@ const requestHandler = async (req, res) => {
       }
       if (user.role === 'admin' && body.projectId !== undefined) {
         if (!requireExistingProject(body.projectId, db)) return json(res, 400, { message: '关联项目不存在' });
+        const previousProjectId = target.projectId;
         target.projectId = body.projectId;
+        if (previousProjectId !== body.projectId) {
+          // 执行记录冗余了计划的项目归属，改项目后同步，避免旧项目仍能看到该计划的执行记录。
+          for (const execution of db.inspectionExecutions || []) {
+            if (execution.planId === target.id && execution.projectId !== body.projectId) execution.projectId = body.projectId;
+          }
+        }
         // 管理员改项目但未同时指定资产时，原关联资产可能属于旧项目；跨项目引用会让报表统计对不上，
         // 此处按新项目复校验，不一致即清空，与其它同类接口保持一致。
         if (body.assetId === undefined && target.assetId) {
@@ -10491,7 +10551,16 @@ const requestHandler = async (req, res) => {
         if (body.location !== undefined) target.location = body.location;
         if (body.notes !== undefined) target.notes = body.notes;
         if (body.assetId !== undefined) target.assetId = body.assetId;
-        if (user.role === 'admin' && body.projectId !== undefined) target.projectId = nextProjectId;
+        if (user.role === 'admin' && body.projectId !== undefined) {
+          const previousProjectId = target.projectId;
+          target.projectId = nextProjectId;
+          if (previousProjectId !== nextProjectId) {
+            // 出入库流水冗余了备件归属项目，改项目后同步，避免旧项目仍能看到该备件的流水。
+            for (const movement of lockDb.sparePartMovements || []) {
+              if (movement.sparePartId === target.id && movement.projectId !== nextProjectId) movement.projectId = nextProjectId;
+            }
+          }
+        }
         // 项目变更后原关联资产可能已不属于该项目，无法确认归属时清空关联，避免跨项目脏引用。
         if (target.assetId) {
           const linkedAsset = (lockDb.assets || []).find(a => a.id === String(target.assetId));
@@ -10780,11 +10849,18 @@ const requestHandler = async (req, res) => {
           return { status: 403, message: '该变更记录已进入审批流程，仅管理员可删除' };
         }
         lockDb.changeRecords = (lockDb.changeRecords || []).filter(item => item.id !== recordId);
-        if (target.approvalId) {
-          lockDb.approvals = (lockDb.approvals || []).filter(item => item.id !== target.approvalId);
+        // 同一变更可能关联多条审批（主审批 + 后续追加的变更审批），全部一并清理，避免遗留指向已删变更的孤儿审批。
+        const affectedApprovalIds = new Set();
+        for (const entry of lockDb.approvals || []) {
+          if (entry.id === target.approvalId || (entry.category === 'change' && entry.relatedId === recordId)) {
+            affectedApprovalIds.add(entry.id);
+          }
+        }
+        if (affectedApprovalIds.size) {
+          lockDb.approvals = (lockDb.approvals || []).filter(item => !affectedApprovalIds.has(item.id));
         }
         // 级联清理该变更及其审批产生的通知，避免遗留空通知。
-        removeNotificationsBySource(lockDb, 'approval', target.approvalId);
+        for (const affectedId of affectedApprovalIds) removeNotificationsBySource(lockDb, 'approval', affectedId);
         removeNotificationsBySource(lockDb, 'changeRecord', recordId);
         appendAuditLog(lockDb, user, 'delete', 'changeRecord', recordId, `删除变更记录 ${target.title}`, target.projectId);
         await writeDb(lockDb);
@@ -11221,7 +11297,11 @@ const requestHandler = async (req, res) => {
         if (body.assetId && (!linkedAsset || linkedAsset.projectId !== nextProjectId)) return json(res, 400, { message: '关联资产不存在或归属不一致' });
         target.assetId = body.assetId;
       }
-      if (user.role === 'admin' && body.projectId !== undefined) target.projectId = nextProjectId;
+      if (user.role === 'admin' && body.projectId !== undefined) {
+        const previousProjectId = target.projectId;
+        target.projectId = nextProjectId;
+        if (previousProjectId !== nextProjectId) syncAiInspectionTargetProject(target, nextProjectId, db);
+      }
       target.systemVersion = linkedAsset ? String(linkedAsset.version || '').trim() : String(body.systemVersion || target.systemVersion || '').trim();
       if (body.backupMode !== undefined) target.backupMode = ['cli', 'web'].includes(body.backupMode) ? body.backupMode : 'cli';
       if (body.backupCommand !== undefined) {
@@ -11378,8 +11458,12 @@ const requestHandler = async (req, res) => {
       if (hasInvalidAiInspectionMetricValue(body.metrics)) return json(res, 400, { message: '指标值必须为有效数字' });
       const metrics = normalizeAiInspectionValues(body.metrics);
       if (!metrics.length) return json(res, 400, { message: '请填写至少一个巡检指标' });
-      let executedAt = body.executedAt || now().slice(0, 16);
       const cycle = String(body.cycle || '').trim();
+      if (cycle && !['daily', 'weekly', 'monthly', 'quarterly'].includes(cycle)) {
+        return json(res, 400, { message: '无效的巡检周期' });
+      }
+      let executedAt = String(body.executedAt || '').trim() || now().slice(0, 16);
+      if (parseValidScheduleTime(executedAt) === null) return json(res, 400, { message: '计划执行时间格式无效' });
       const scheduledTask = { cycle, executedAt };
       ensureAiTaskFutureExecution(scheduledTask);
       executedAt = scheduledTask.executedAt;
@@ -11436,7 +11520,13 @@ const requestHandler = async (req, res) => {
       const body = await readBody(req);
       if (body.title !== undefined) target.title = String(body.title || '').trim();
       if (body.executor !== undefined) target.executor = String(body.executor || '').trim();
-      if (body.cycle !== undefined) target.cycle = String(body.cycle || '').trim();
+      if (body.cycle !== undefined) {
+        const nextCycle = String(body.cycle || '').trim();
+        if (nextCycle && !['daily', 'weekly', 'monthly', 'quarterly'].includes(nextCycle)) {
+          return json(res, 400, { message: '无效的巡检周期' });
+        }
+        target.cycle = nextCycle;
+      }
       if (body.status === '已停用') {
         target.status = '已停用';
       } else if (body.status === '已启用') {
@@ -11444,7 +11534,11 @@ const requestHandler = async (req, res) => {
       }
       // 执行时间与状态互不排斥，需独立处理，避免同时提交时执行时间被静默忽略。
       if (body.executedAt !== undefined) {
-        target.executedAt = String(body.executedAt || '').trim();
+        const nextExecutedAt = String(body.executedAt || '').trim();
+        if (nextExecutedAt && parseValidScheduleTime(nextExecutedAt) === null) {
+          return json(res, 400, { message: '计划执行时间格式无效' });
+        }
+        target.executedAt = nextExecutedAt;
         const scheduledTime = parseAiInspectionScheduleTime(target.executedAt);
         const hasResult = (db.aiInspectionResults || []).find(item => item.taskId === taskId);
         if (scheduledTime > Date.now()) {
@@ -11456,7 +11550,9 @@ const requestHandler = async (req, res) => {
           target.status = '待执行';
         }
       }
-      if (target.cycle && target.status !== '已停用' && target.status !== '执行中' && ensureAiTaskFutureExecution(target)) {
+      if (target.cycle && !target.executedAt) return json(res, 400, { message: '周期巡检任务需要计划执行时间' });
+      // 仅在显式修改计划时间时重置历史结果；否则仅编辑标题/执行人不应清空已跑出的历史结果。
+      if (body.executedAt !== undefined && target.cycle && target.status !== '已停用' && target.status !== '执行中' && ensureAiTaskFutureExecution(target)) {
         db.aiInspectionResults = (db.aiInspectionResults || []).filter(item => item.taskId !== taskId);
         target.status = '待执行';
       }
@@ -11505,13 +11601,15 @@ const requestHandler = async (req, res) => {
       if (!target.assetId || !requireExistingAsset(target.assetId, db)) return json(res, 400, { message: '巡检对象必须关联有效资产' });
       const cycle = String(body.cycle || '').trim();
       if (!['daily', 'weekly', 'monthly', 'quarterly'].includes(cycle)) return json(res, 400, { message: '请选择备份周期' });
+      const planExecutedAt = String(body.executedAt || '').trim() || now().slice(0, 16);
+      if (parseValidScheduleTime(planExecutedAt) === null) return json(res, 400, { message: '计划执行时间格式无效' });
       const plan = {
         id: id('cfgPlan'),
         projectId: target.projectId,
         targetId: target.id,
         name: String(body.name || `${target.name} 配置备份`).trim(),
         cycle,
-        executedAt: String(body.executedAt || now().slice(0, 16)).trim(),
+        executedAt: planExecutedAt,
         status: '待执行',
         lastBackupAt: '',
         lastStatus: '',
@@ -11553,7 +11651,11 @@ const requestHandler = async (req, res) => {
       if (body.status === '已启用') plan.status = '待执行';
       if (body.name !== undefined) plan.name = String(body.name || '').trim();
       if (body.cycle !== undefined && ['daily', 'weekly', 'monthly', 'quarterly'].includes(String(body.cycle || '').trim())) plan.cycle = String(body.cycle || '').trim();
-      if (body.executedAt !== undefined) plan.executedAt = String(body.executedAt || '').trim();
+      if (body.executedAt !== undefined) {
+        const nextExecutedAt = String(body.executedAt || '').trim();
+        if (parseValidScheduleTime(nextExecutedAt) === null) return json(res, 400, { message: '计划执行时间格式无效' });
+        plan.executedAt = nextExecutedAt;
+      }
       if (plan.cycle && plan.status !== '已停用') ensureAiTaskFutureExecution(plan);
       appendAuditLog(db, user, 'update', 'configBackupPlan', plan.id, `修改配置备份计划 ${plan.name}`, plan.projectId);
       await writeDb(db);
