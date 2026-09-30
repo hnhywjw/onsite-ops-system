@@ -167,3 +167,5 @@ Agent 在任务执行过程中发现的条目应遵循以下格式：
   - `*.tar.gz` 被 `.gitignore` 忽略，产物作为 GitHub Release 资产上传，不提交进仓库；`.sha256` 文件同样仅作发布资产。
   - 推送：`git push origin HEAD:main`（用户要求推送目标为 `main`，本地工作分支为 `release-v1.0.10`，两者可 fast-forward），再 `git push origin v<ver>`。
   - 创建 Release：`gh release create v<ver> --repo hnhywjw/onsite-ops-system --title "..." --notes-file <notes.md> <production.tar.gz> <upgrade.tar.gz> <sha256>`。
+  - 用户要求 Release 说明里必须写清楚安装部署说明：Notes 需包含更新内容、交付物与 SHA256、环境要求、Docker Compose 安装步骤、反向代理示例、手动部署、升级部署（含升级包签名要求）与验收清单；用 `gh release edit v<ver> --notes-file <notes.md>` 更新。
+  - 部署文档中引用安装包/升级包文件名时，版本号必须与当前发布版本一致（历史 `PRODUCTION_DEPLOY.md` 升级章节曾残留旧版本文件名）。

@@ -270,12 +270,12 @@ docker compose --env-file .env.production -f docker-compose.prod.yml exec onsite
 
 ```bash
 cd /opt/onsite-ops-system
-tar -xzf onsite-ops-system-v1.0.12-production.tar.gz
+tar -xzf onsite-ops-system-v1.0.15-production.tar.gz
 ```
 
 ### 7.2.1 使用离线升级包
 
-已运行的系统可在「系统治理」页面上传 `onsite-ops-upgrade-v1.0.12.tar.gz`。
+已运行的系统可在「系统治理」页面上传 `onsite-ops-upgrade-v1.0.15.tar.gz`。
 
 GitHub 提供的升级包含 `manifest.json` 与 SHA256 清单。生产环境上传前，须用本机 `UPGRADE_SIGNING_KEY`（不少于 32 位）重新执行 `npm run build-upgrade`，生成带 HMAC 签名的包。页面会轮询 `/api/system/upgrade/status`，容器重启后由 `docker-entrypoint.sh` 替换 `server.js`、`public/`、`scripts/` 等文件。
 
