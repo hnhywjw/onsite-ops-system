@@ -8240,6 +8240,7 @@
       if (!el) return;
       const config = state.systemConfig || {};
       el.style.color = '';
+      el.style.lineHeight = '1.8';
       if (!config.httpsCertUploadedAt || !config.httpsKeyUploadedAt) {
         el.textContent = '未上传证书';
         return;
@@ -8247,17 +8248,19 @@
       const validFrom = formatCertificateDate(config.httpsCertValidFrom);
       const validTo = formatCertificateDate(config.httpsCertValidTo);
       const daysRemaining = certificateDaysRemaining(config.httpsCertValidTo);
-      const parts = [
-        `${config.httpsCertFilename || 'login-cert.pem'} / ${config.httpsKeyFilename || 'login-key.pem'}`,
-        `上传时间 ${config.httpsCertUploadedAt}`
-      ];
-      if (validFrom || validTo) parts.push(`有效期 ${validFrom || '-'} 至 ${validTo || '-'}`);
+      const expired = Date.parse(String(config.httpsCertValidTo || '')) <= Date.now();
+      const expiring = daysRemaining !== null && (expired || daysRemaining <= 7);
+      let validityText = '';
+      if (validFrom || validTo) validityText = `有效期 ${validFrom || '-'} 至 ${validTo || '-'}`;
       if (daysRemaining !== null) {
-        const expired = Date.parse(String(config.httpsCertValidTo || '')) <= Date.now();
-        parts.push(expired ? '证书已过期' : `剩余 ${Math.max(daysRemaining, 1)} 天`);
-        if (expired || daysRemaining <= 7) el.style.color = '#dc2626';
+        validityText += validityText ? '，' : '';
+        validityText += expired ? '证书已过期' : `剩余 ${Math.max(daysRemaining, 1)} 天`;
       }
-      el.textContent = parts.join('，');
+      // 有效期单独一行并用蓝色标注，与上方的文件信息区分；临期或过期改为红色强调。
+      const validityHtml = validityText
+        ? `<div style="color:${expiring ? '#dc2626' : '#2563eb'};">${esc(validityText)}</div>`
+        : '';
+      el.innerHTML = `<div>${esc(`${config.httpsCertFilename || 'login-cert.pem'} / ${config.httpsKeyFilename || 'login-key.pem'}，上传时间 ${config.httpsCertUploadedAt}`)}</div>${validityHtml}`;
     }
 
     function updateSystemCurrentTimeDisplay() {

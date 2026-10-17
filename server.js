@@ -1003,7 +1003,11 @@ function normalizeSystemConfig(rawSystemConfig = {}) {
 
 function presentSystemConfig(user, config) {
   const normalized = normalizeSystemConfig(config || {});
-  if (user && user.role === 'admin') return normalized;
+  if (user && user.role === 'admin') {
+    // 历史证书上传时未记录有效期，管理端展示前从磁盘证书补齐。
+    const validity = resolveHttpsCertificateValidity(normalized);
+    return { ...normalized, httpsCertValidFrom: validity.validFrom, httpsCertValidTo: validity.validTo };
+  }
   return {
     webIdleLogoutMinutes: normalized.webIdleLogoutMinutes,
     timezoneOffset: normalized.timezoneOffset,
