@@ -31,25 +31,15 @@ Agent 在任务执行过程中发现的条目应遵循以下格式：
 
 ## 条目
 
-[GitHub 手动提交版本号同步]
-- Date: 2026-07-09
-- Context: 用户说明手动提交到 GitHub 时的版本管理要求
-- Category: 工作流协作
-- Instructions:
-  - 每次用户要求手动提交到 GitHub 时，需要同步修改项目版本号。
-
 [生产部署数据库要求]
 - Date: 2026-09-08
-  - Context: Agent 在把整库 JSON 改为 MySQL 集合表，并修复基础数据分页截断时更新
-  - Category: 环境配置
-  - Instructions:
-    - 服务启动依赖 MySQL，连接参数通过 `MYSQL_HOST`、`MYSQL_PORT`、`MYSQL_USER`、`MYSQL_PASSWORD`、`MYSQL_DATABASE` 提供。
-    - 首次启动时若 MySQL 中无业务数据，系统会自动导入 `data/db.json` 作为初始数据。
-  - 生产环境默认关闭文件存储回退，仅在 `ALLOW_FILE_DB_FALLBACK=true` 时才允许回退到 `data/db.json`。
-  - 业务集合写入 `col_*` InnoDB 表；旧版 `app_state` 仅在集合表为空时迁移一次。
-  - 前端基础数据加载走 `?all=1` 全量接口；智能巡检结果/报告改为分页接口（pageSize=5），避免一次拉取数万条结果。
-  - `readDb()` 使用内存缓存，命中后不再全表读取 MySQL，也不再对整库 `JSON.stringify`；写入只持久化脏集合。
-  - 未设置 `ENCRYPTION_KEY` 时，运行时密钥会写入并复用 `data/encryption.key`，避免重启后无法解密凭据。
+- Context: Agent 在把整库 JSON 改为 MySQL 集合表并修复分页截断时更新
+- Category: 环境配置
+- Instructions:
+  - 服务启动依赖 MySQL，连接参数由 `MYSQL_HOST`/`MYSQL_PORT`/`MYSQL_USER`/`MYSQL_PASSWORD`/`MYSQL_DATABASE` 提供；首次启动无业务数据时自动导入 `data/db.json`。
+  - 生产默认关闭文件回退，仅 `ALLOW_FILE_DB_FALLBACK=true` 时回退 `data/db.json`；业务集合写入 `col_*` InnoDB 表，旧版 `app_state` 仅在集合表为空时迁移一次。
+  - 基础数据走 `?all=1` 全量接口；智能巡检结果/报告分页（pageSize=5）。`readDb()` 走内存缓存，写入只持久化脏集合。
+  - 未设置 `ENCRYPTION_KEY` 时运行时密钥写入并复用 `data/encryption.key`，避免重启后无法解密凭据。
 
 [启动、校验与测试流程]
 - Date: 2026-09-30（合并自 2026-06-19/06-20/08-19/08-20/09-12）
@@ -61,26 +51,21 @@ Agent 在任务执行过程中发现的条目应遵循以下格式：
   - 静态校验 `npm run lint` + `npm run typecheck`；核心回归 `npm run regression`；浏览器冒烟 `npm run e2e`；发布后冒烟 `npm run smoke`，后三者都依赖本地 `3000` 服务可访问。
   - 修改 `server.js` 后必须重启 `3000` 服务再跑回归，否则命中旧进程；`npm run e2e` 必须与 `npm run regression` 顺序执行，并发会导致登录链路假失败。
   - 登录验证码为点阵 SVG，regression / e2e / smoke 用 `scripts/captcha-glyphs.js` 的 `decodeCaptchaFromSvg` 解码。
-
-[Git 推送目标分支]
-- Date: 2026-07-02
-- Context: 用户指定 GitHub 推送目标分支
-- Category: 工作流协作
-- Instructions:
-  - 所有 git push 操作必须推送到 `main` 分支，不要使用 `master`。
+  - `server.js` 顶层 `require('./scripts/captcha-glyphs')`，`Dockerfile` 必须 `COPY scripts ./scripts`；v1.0.12 起镜像缺失 `scripts/` 会 `MODULE_NOT_FOUND` 退出并无限重启。
+  - 镜像构建后校验 `docker compose exec -T <svc> node -e "console.log(require('/app/package.json').version)"`；`up` 不支持 `--no-cache`，跳过缓存用 `build --no-cache` 后 `up -d --force-recreate --no-deps`。
+  - 页面版本号来自 `/api/ready` 与 `/api/system/info` 返回的 `package.json` 版本，判断升级生效以接口返回和容器内文件为准。
+  - 验证落库失败回滚：非生产环境用 `FORCE_DB_WRITE_FAILURE_FILE=/path/flag npm start`，文件存在时 `writeDb` 写 MySQL 前抛错；创建文件即注入，移走即恢复，`NODE_ENV=production` 下忽略。
 
 [回归测试的环境状态治理]
 - Date: 2026-09-29（合并自 2026-09-15）
 - Context: Agent 修复资产布局图问题后连续运行回归与 e2e 时发现
 - Category: 排错调试
 - Instructions:
-  - `npm run regression` 中途失败会残留测试用户/项目/资产，多次中断会污染库并让后续断言连锁失败；此时可登录后调用 `POST /api/system/backups/{filename}/restore`，恢复到 `data/backups` 下本轮最早的 `backup-*.json` 快照（回归脚本在用例前会创建一次 `backup-*.json`，即本轮最干净的基线）。
-  - 恢复接口需要管理员二次验证与 CSRF：请求体传 `{"password":"Admin123!"}`，请求头带登录响应返回的 `csrfToken`（`X-CSRF-Token`），文件名需 `encodeURIComponent`（含 `+` 时尤其重要）。
-  - 忘记密码限流（`FP_MAX_ATTEMPTS=5`，锁 30 分钟）是内存态，短时间连续多次运行回归会触发 429 假失败；重启 `npm start` 服务即可清零。
-  - `npm run regression` 若紧随 `npm start` 重启后立即运行，偶发在最早期请求直接报 `fetch failed`（连接竞态）；等待 `GET /api/health` 返回 200 后重跑即过。
-  - `scripts/regression.js` 与 `scripts/e2e.js` 创建的测试项目、`AI 周期巡检回归任务` 等不在用例结束时清理，会随每次运行累积；项目筛选选项来自登录时 `pageSize=100` 的列表，库内项目接近或超过 100 时新建项目会落到该页之外导致偶发失败。排障前先核对库内高频测试名（如「AI 周期巡检回归任务」「布局隔离项目」「提醒回归项目」「时区提醒项目」）规模。
-  - `npm run e2e` 有多处偶发 30s 超时/竞态，均由测试数据累积拖慢渲染或登录自动登出竞态引起，重跑一次即可确认、与本轮业务代码无关：自动登出提示断言、`selectOption('#workReportFilterProject')`、`page.click('#refreshWorkloadBtn')`、资料子标签点击、登录后 `page.waitForFunction`（`scripts/e2e.js:169`）；AI 巡检任务探测处 `page.waitForFunction` 的 `{ timeout: 90000 }` 被误传为第二参数，实际按默认 30s 生效。
-  - `npm run e2e` 工作汇报用例按合成日期（`2099-11-*`）创建「E2E工作汇报日志」，工作量按日志聚合；日志清理必须按「事件+日期+用户」精确匹配。曾因 `cleanupData` 只删汇报不删日志、内联删除又只按事件名匹配，残留日志令同名日期工时翻倍、工作量导出断言失败。
+  - `npm run regression` 中途失败会残留测试用户/项目/资产并连锁失败；可调用 `POST /api/system/backups/{filename}/restore` 恢复到本轮最早的 `backup-*.json`（需管理员密码与 `X-CSRF-Token`，文件名 `encodeURIComponent`）。
+  - 忘记密码限流（`FP_MAX_ATTEMPTS=5`，锁 30 分钟）是内存态，连续回归会触发 429 假失败，重启 `npm start` 清零；重启后立即回归偶发 `fetch failed`，等 `/api/health` 200 后重跑。
+  - `regression.js`/`e2e.js` 创建的测试项目与「AI 周期巡检回归任务」不自动清理会累积；项目筛选取登录时 `pageSize=100` 列表，库内项目接近 100 时新项目落到页外导致偶发失败。
+  - `npm run e2e` 偶发 30s 超时/竞态（自动登出断言、`#workReportFilterProject`、`#refreshWorkloadBtn`、资料子标签、`scripts/e2e.js:169` 的 `waitForFunction`）重跑即过；AI 巡检探测处 `{ timeout: 90000 }` 被误传为第二参数。
+  - 工作汇报用例按合成日期（`2099-11-*`）创建日志，清理必须按「事件+日期+用户」精确匹配，否则同名日期工时翻倍。
 
 [数组集合原地修改必须打脏标记]
 - Date: 2026-09-29
@@ -95,26 +80,22 @@ Agent 在任务执行过程中发现的条目应遵循以下格式：
 - Context: Agent 巡检测试数据残留、磁盘占用与导出凭据时发现
 - Category: 运维部署
 - Instructions:
-  - 备份统一保留 `LOCAL_BACKUP_RETENTION_DAYS` 天（默认 180），由 `cleanupExpiredBackupFiles` 在可恢复区 `data/backups` 与归档区 `data/archive/backups` 一并清理超期文件；`runAutoBackup`（每日/启动）与 `runMaintenanceTasks`（每周）都会触发。
-  - 不再有「30 天归档 + 7 天删除」的旧策略：`data/backups` 内的快照（`auto-backup-*`/`backup-before-*`/`backup-*`）满 180 天直接删除，归档区仅保留历史文件并同样按 180 天清理。
-  - 备份列表 `listBackupFiles` 同时返回可恢复区与归档区文件（带 `archived`/`size`/`href`）；归档文件可下载/恢复/删除，接口需带 `?archived=1` 且管理员密码二次验证。
-  - `/api/system/export` 与备份下载返回完整快照（含 `passwordHash`、`snmpCommunity`、资料密钥），与磁盘备份/恢复语义一致，保证跨环境导入后账号仍可登录；`redactSnapshotSecrets` 已移除。
-  - 初始化（`/api/system/reset`）会清空指向已删项目的 `ssoDefaultProjectId` 并删除 `data/uploads/documents` 下附件，两处均在 `writeDb` 成功之后执行。
-  - 导入快照（`/api/system/import`）会整体替换数据，落库成功后需调用 `pruneDocumentAttachmentDirs` 清理旧数据集残留、已不被引用的资料附件目录；凡是替换或删除数据集的路径都要同步清理 `data/uploads/documents` 下的孤儿附件目录。
+  - 备份统一保留 `LOCAL_BACKUP_RETENTION_DAYS` 天（默认 180），`cleanupExpiredBackupFiles` 同时清理 `data/backups` 与 `data/archive/backups`，由每日/启动备份和每周维护触发。
+  - 备份列表同时返回可恢复区与归档区文件（带 `archived`/`size`/`href`）；归档文件下载/恢复/删除需 `?archived=1` 且管理员密码二次验证。
+  - `/api/system/export` 与备份下载返回完整快照（含 `passwordHash`、`snmpCommunity`、资料密钥），保证跨环境导入后账号可登录。
+  - 初始化（`/api/system/reset`）清空指向已删项目的 `ssoDefaultProjectId` 并删除资料附件，均在 `writeDb` 成功后执行；导入快照（`/api/system/import`）落库成功后调用 `pruneDocumentAttachmentDirs` 清理孤儿附件目录。
 
 [业务实体删除与通知级联]
 - Date: 2026-09-29
 - Context: Agent 巡检孤儿数据与通知一致性时补充
 - Category: 排错调试
 - Instructions:
-  - 审批删除（`DELETE /api/approvals/:id`）：管理员删除变更流程审批时，一并删除关联变更记录、同一变更下的**所有**审批及二者的通知；非管理员仅能作废自己提交、未完成且不在变更流程中的审批（否则 400/403）。
-  - 变更记录删除（`DELETE /api/change-records/:id`）反向级联：收集 `id===approvalId` 或 `category==='change' && relatedId===recordId` 的**全部**同变更审批及其通知，两个方向保持一致，避免遗留孤儿审批。
-  - 删除会产生通知的业务实体时，必须同步清理其通知：通知统一带 `sourceType`/`sourceId`，用 `removeNotificationsBySource(db, sourceType, sourceId)` 精确移除。
-  - 所有由业务实体产生的通知都必须打来源标记，否则删除实体后会残留孤儿通知：`aiInspectionTask`、`configBackupPlan`、`inspectionPlan`（含到期提醒与异常提醒）、`asset`（维保到期、离线告警）、`sparePart`（库存提醒）、`changeRecord`、`approval`、`incident`、`workReport`。
-  - 智能巡检对象删除会连带清理其任务与配置备份计划，需先收集这些子实体 ID，再分别清理对应通知，避免遗留空通知。
-  - 资产删除（普通与 `?cascade=1` 强制级联）都要清理 `asset` 来源通知，并连带清理其巡检对象派生任务/备份计划的通知；备件删除清理 `sparePart` 来源通知。
-  - 强制删除项目（`?force=1`）会级联清理 `assetRelations`（按资产 ID，无 `projectId` 字段）并失效拓扑/流量运行时状态，落库成功后清理资料附件磁盘目录。
-  - 历史通知若缺少 `sourceType`/`sourceId`，运行 `node scripts/backfill-notification-sources.js`（管理员接口 `POST /api/system/backfill-notification-sources` 的封装）按内容特征回填；脚本幂等，可重复执行。
+  - 审批删除：管理员删除变更流程审批时一并删除关联变更记录、同一变更下所有审批及其通知；非管理员仅能作废自己提交、未完成且不在变更流程中的审批。
+  - 变更记录删除反向级联：收集 `id===approvalId` 或 `category==='change' && relatedId===recordId` 的全部同变更审批及通知，两个方向保持一致。
+  - 删除业务实体必须用 `removeNotificationsBySource(db, sourceType, sourceId)` 清理通知；所有实体通知都要打 `sourceType`/`sourceId`（`aiInspectionTask`、`configBackupPlan`、`inspectionPlan`、`asset`、`sparePart`、`changeRecord`、`approval`、`incident`、`workReport`）。
+  - 智能巡检对象删除先收集其任务与配置备份计划 ID，再分别清理通知；资产删除（含 `?cascade=1`）清理 `asset` 及其派生通知；备件删除清理 `sparePart` 通知。
+  - 强制删除项目（`?force=1`）级联清理 `assetRelations`（按资产 ID）并失效拓扑/流量运行时状态，落库后清理资料附件目录。
+  - 历史通知缺少来源标记时运行 `node scripts/backfill-notification-sources.js`（或 `POST /api/system/backfill-notification-sources`）按内容回填，脚本幂等。
 
 [周期计划时间校验与父记录改项目级联]
 - Date: 2026-09-30
@@ -142,39 +123,28 @@ Agent 在任务执行过程中发现的条目应遵循以下格式：
 - Instructions:
   - GitHub 凭据存放在 `/root/.config/gh/hosts.yml`（位于仓库之外），`git push` 与 `gh` 经 `gh auth git-credential` 免密可用；token 值禁止写入仓库文件或在对话中回显。
   - 该 token 仅含 `repo` scope，缺少 `read:org`；仓库读写、push、release 上传正常，涉及组织数据的 `gh` 子命令可能报 scope 错误。
-  - `gh auth login --with-token` 会校验 scope 并因缺少 `read:org` 失败，更新凭据时直接改 `hosts.yml` 即可。
-  - 家目录可能随环境重建而丢失；若 `gh auth status` 显示未登录，需要用户重新提供 token。
-
-[写失败回滚验证开关]
-- Date: 2026-09-26
-- Context: Agent 为验证 `writeDb` 落库失败回滚逻辑新增可控注入开关
-- Category: 测试方法
-- Instructions:
-  - 非生产环境下用 `FORCE_DB_WRITE_FAILURE_FILE=/path/flag npm start` 启动；当该文件存在时，`writeDb` 在写 MySQL 前抛错，用于验证内存回滚与持久层一致。
-  - 创建标志文件即注入失败，重命名或移走文件即恢复，不受后台定时写库干扰（数字计数会被启动时的调度器写库消耗，故改用文件开关）。
-  - `NODE_ENV=production` 下该开关被忽略，生产环境不会启用注入。
+  - `gh auth login --with-token` 因缺少 `read:org` 失败，更新凭据直接改 `hosts.yml`；家目录随环境重建丢失时需用户重新提供 token。
 
 [版本发布与 GitHub Release 流程]
 - Date: 2026-09-30
 - Context: Agent 发布 v1.0.15 时按 v1.0.14 既有产物结构复现
 - Category: 运维部署/工作流协作
 - Instructions:
+  - 用户要求手动提交到 GitHub 时同步 bump 版本号；所有 `git push` 目标为 `main` 分支。
   - 发布前同步版本号：`package.json`、`package-lock.json`（2 处）、`README.md`（当前版本/下载链接/新增更新说明）、`PRODUCTION_DEPLOY.md`（标题/部署版本/包名/Release 链接/验收版本）；`manifest.json` 被 `.gitignore` 忽略，由构建生成，无需手改。
   - 完整安装包用平铺目录打包（不含父目录、不含 `public/downloads`）：
     `tar -czf onsite-ops-system-v<ver>-production.tar.gz --exclude=public/downloads README.md PRODUCTION_DEPLOY.md DEPLOY.md .env.production.example Dockerfile docker-compose.yml docker-compose.prod.yml docker-entrypoint.sh package.json package-lock.json server.js pptx-template.json build-upgrade.js public scripts`
   - 离线升级包用 `npm run build-upgrade` 生成（写入 `manifest.json` + `onsite-ops-upgrade-v<ver>.tar.gz`）；有 `UPGRADE_SIGNING_KEY`（≥32 位）时 manifest 带 HMAC 签名，否则输出未签名包并提示。
   - 校验和文件为两行（完整包 + 升级包）：`sha256sum <production.tar.gz> <upgrade.tar.gz> > onsite-ops-system-v<ver>.sha256`。
   - `*.tar.gz` 被 `.gitignore` 忽略，产物作为 GitHub Release 资产上传，不提交进仓库；`.sha256` 文件同样仅作发布资产。
-  - 推送：`git push origin HEAD:main`（用户要求推送目标为 `main`，本地工作分支为 `release-v1.0.10`，两者可 fast-forward），再 `git push origin v<ver>`。
+  - 推送：`git push origin HEAD:main`，再 `git push origin v<ver>`。
   - 创建 Release：`gh release create v<ver> --repo hnhywjw/onsite-ops-system --title "..." --notes-file <notes.md> <production.tar.gz> <upgrade.tar.gz> <sha256>`。
-  - 用户要求 Release 说明里必须写清楚安装部署说明：Notes 需包含更新内容、交付物与 SHA256、环境要求、Docker Compose 安装步骤、反向代理示例、手动部署、升级部署（含升级包签名要求）与验收清单；用 `gh release edit v<ver> --notes-file <notes.md>` 更新。
-  - 部署文档中引用安装包/升级包文件名时，版本号必须与当前发布版本一致（历史 `PRODUCTION_DEPLOY.md` 升级章节曾残留旧版本文件名）。
+  - Release Notes 必须含更新内容、交付物与 SHA256、环境要求、Docker Compose 安装、反向代理示例、手动部署、升级部署（含签名要求）与验收清单；用 `gh release edit v<ver> --notes-file <notes.md>` 更新。文档中引用的包文件名版本号必须与当前发布版本一致。
 
 [全量开发包与私有仓库]
 - Date: 2026-09-30
 - Context: Agent 按要求导出可再次导入开发平台的全量包并上传 GitHub
 - Category: 运维部署/工作流协作
 - Instructions:
-  - 全量开发包用于新 Devbox 导入后继续开发，含源码、`.git`、`.monkeycode`、`node_modules`、当前 MySQL 导出（`mysqldump --databases onsite_ops_system`）、`data/db.json` 与密钥文件；排除 `data/backups`、`data/archive`、`public/downloads`、历史 `onsite-ops-*.tar.gz`/`.sha256`。
-  - 因包含数据库导出与密钥（`data/encryption.key`、`data/upgrade-signing.key`、`data/https/`），只上传到**私有仓库** `hnhywjw/onsite-ops-system-devbox`（`gh repo create --private`），不得上传到公开仓库 `hnhywjw/onsite-ops-system`。
-  - 空仓库直接建 Release 会报 422「Repository is empty」，需先推一个 README 初始化 `main` 分支，再 `gh release create`。
+  - 全量开发包含源码、`.git`、`.monkeycode`、`node_modules`、MySQL 导出、`data/db.json` 与密钥；排除 `data/backups`、`data/archive`、`public/downloads`、历史 `onsite-ops-*.tar.gz`/`.sha256`。
+  - 因含数据库导出与密钥，只上传到**私有仓库** `hnhywjw/onsite-ops-system-devbox`，不得上传公开仓库；空仓库需先推 README 初始化 `main`，否则 `gh release create` 报 422。
