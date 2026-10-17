@@ -333,22 +333,27 @@ async function main() {
   assert(blockedLogin.status === 429, '登录限流未生效');
   const persistentBlockedLogin = await login('admin', 'wrong-password', { headers: throttledHeaders });
   assert(persistentBlockedLogin.status === 429, '登录限流持久化未生效');
+  // 伪造成 X-Forwarded-For 首段不应重置限流桶，真实客户端取可信代理追加的最后一跳
+  const spoofedForwardedLogin = await login('admin', 'wrong-password', { headers: { 'x-forwarded-for': '203.0.113.77, 198.51.100.10' } });
+  assert(spoofedForwardedLogin.status === 429, '伪造 X-Forwarded-For 首段不应绕过登录限流');
   const admin = await login('admin', 'Admin123!');
   assert(admin.status === 200, '管理员登录失败');
   assert(admin.data.sessionToken === undefined, '登录响应不应返回 sessionToken');
   assert(Number(admin.data.systemConfig?.webIdleLogoutMinutes) >= 1, '登录响应未返回控制台超时配置');
   let cookie = admin.cookie;
   assert(String(admin.headers['set-cookie'] || '').includes('SameSite=Lax'), '登录 Cookie 应为 SameSite=Lax');
+  // 每轮回归用独立客户端 IP，避免反复运行累积触发忘记密码的进程内限流
+  const forgotTestIp = `198.18.${(Date.now() % 200) + 1}.${Math.floor(Math.random() * 250) + 1}`;
   const forgotMissingCaptcha = await request('/api/captcha');
   const forgotMissing = await request('/api/forgot-password/reset', {
     method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
+    headers: { 'Content-Type': 'application/json', 'x-forwarded-for': forgotTestIp },
     body: JSON.stringify({ username: 'no-such-user', securityAnswer: 'x', newPassword: 'Newpass1!', captchaToken: forgotMissingCaptcha.data.token, captcha: decodeCaptchaFromSvg(forgotMissingCaptcha.data) })
   });
   const forgotWrongCaptcha = await request('/api/captcha');
   const forgotWrong = await request('/api/forgot-password/reset', {
     method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
+    headers: { 'Content-Type': 'application/json', 'x-forwarded-for': forgotTestIp },
     body: JSON.stringify({ username: 'admin', securityAnswer: 'wrong-answer', newPassword: 'Newpass1!', captchaToken: forgotWrongCaptcha.data.token, captcha: decodeCaptchaFromSvg(forgotWrongCaptcha.data) })
   });
   assert(forgotMissing.status === 200 && forgotWrong.status === 200, '忘记密码失败应返回 200');
@@ -356,20 +361,20 @@ async function main() {
   assert(forgotMissing.data.message === forgotWrong.data.message, '忘记密码失败响应应一致');
   const forgotResetNoCaptcha = await request('/api/forgot-password/reset', {
     method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
+    headers: { 'Content-Type': 'application/json', 'x-forwarded-for': forgotTestIp },
     body: JSON.stringify({ username: 'admin', securityAnswer: 'wrong-answer', newPassword: 'Newpass1!' })
   });
   assert(forgotResetNoCaptcha.status === 401, '忘记密码重置缺少验证码应被拒绝');
   const forgotVerifyMissingCaptcha = await request('/api/captcha');
   const forgotVerifyMissing = await request('/api/forgot-password/verify', {
     method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
+    headers: { 'Content-Type': 'application/json', 'x-forwarded-for': forgotTestIp },
     body: JSON.stringify({ username: 'no-such-user', captchaToken: forgotVerifyMissingCaptcha.data.token, captcha: decodeCaptchaFromSvg(forgotVerifyMissingCaptcha.data) })
   });
   const forgotVerifyExistingCaptcha = await request('/api/captcha');
   const forgotVerifyExisting = await request('/api/forgot-password/verify', {
     method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
+    headers: { 'Content-Type': 'application/json', 'x-forwarded-for': forgotTestIp },
     body: JSON.stringify({ username: 'admin', captchaToken: forgotVerifyExistingCaptcha.data.token, captcha: decodeCaptchaFromSvg(forgotVerifyExistingCaptcha.data) })
   });
   assert(forgotVerifyMissing.status === 200 && forgotVerifyExisting.status === 200, '忘记密码验证应返回 200');
@@ -377,7 +382,7 @@ async function main() {
   assert(forgotVerifyMissing.data.question === forgotVerifyExisting.data.question, '忘记密码验证响应应一致');
   const forgotVerifyNoCaptcha = await request('/api/forgot-password/verify', {
     method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
+    headers: { 'Content-Type': 'application/json', 'x-forwarded-for': forgotTestIp },
     body: JSON.stringify({ username: 'admin' })
   });
   assert(forgotVerifyNoCaptcha.status === 401, '忘记密码验证缺少验证码应被拒绝');
@@ -1506,8 +1511,20 @@ async function main() {
   assert(autoExecution.status === 201, '创建自动顺延执行记录失败');
   const autoPlans = await request('/api/inspection-plans', { headers: { cookie } });
   const autoPlanAfter = (autoPlans.data.data || []).find(item => item.id === autoPlan.data.id);
-  assert(autoPlanAfter && autoPlanAfter.nextDate === '2025-01-03' && autoPlanAfter.status === '已执行', `巡检计划未按周期顺延: ${autoPlanAfter && `${autoPlanAfter.nextDate}/${autoPlanAfter.status}`}`);
+  assert(autoPlanAfter && autoPlanAfter.nextDate === '2025-01-03' && autoPlanAfter.status === '待执行', `巡检计划未按周期顺延或到期状态未回退: ${autoPlanAfter && `${autoPlanAfter.nextDate}/${autoPlanAfter.status}`}`);
   await request(`/api/inspection-plans/${autoPlan.data.id}`, { method: 'DELETE', headers: { cookie } });
+
+  // 到期未执行的计划状态应回到「待执行」，避免长期停留在上一轮结果
+  const stalePlan = await request('/api/inspection-plans', {
+    method: 'POST',
+    headers: { cookie, 'Content-Type': 'application/json' },
+    body: JSON.stringify({ projectId, assetId, title: '回归到期回退计划', cycle: 'weekly', nextDate: '2025-02-03', owner: 'admin', status: '已执行' })
+  });
+  assert(stalePlan.status === 201 && stalePlan.data.status === '已执行', '创建到期回退巡检计划失败');
+  const stalePlanList = await request('/api/inspection-plans', { headers: { cookie } });
+  const stalePlanAfter = (stalePlanList.data.data || []).find(item => item.id === stalePlan.data.id);
+  assert(stalePlanAfter && stalePlanAfter.status === '待执行', `到期未执行的巡检计划状态未回退: ${stalePlanAfter && stalePlanAfter.status}`);
+  await request(`/api/inspection-plans/${stalePlan.data.id}`, { method: 'DELETE', headers: { cookie } });
 
   let change = null;
   if (customerId) {
@@ -1694,6 +1711,13 @@ async function main() {
   });
   assert(aiTask.status === 201, '创建 AI 巡检任务失败');
   assert(aiTask.data.result?.level === '异常' || aiTask.data.result?.level === '严重', 'AI 巡检结果等级不符合预期');
+  // 执行权限收紧到创建者：同项目其它工程师不得执行他人巡检任务
+  const engineerExecuteAiTask = await request(`/api/ai-inspection/tasks/${aiTask.data.task.id}/execute`, {
+    method: 'POST',
+    headers: { cookie: engineerCookie, 'Content-Type': 'application/json' },
+    body: '{}'
+  });
+  assert(engineerExecuteAiTask.status === 403, '非创建者不应执行他人巡检任务');
   const aiFutureTask = await request('/api/ai-inspection/tasks', {
     method: 'POST',
     headers: { cookie, 'Content-Type': 'application/json' },
@@ -1763,6 +1787,20 @@ async function main() {
     body: JSON.stringify({ targetId: backupTarget.data.id, name: '回归配置备份计划', cycle: 'daily', executedAt: '2099-06-19T14:00' })
   });
   assert(backupPlan.status === 201, '创建配置备份计划失败');
+  // 执行权限收紧到创建者：同项目其它工程师不得执行他人配置备份计划，但可在项目内新建计划
+  const engineerExecuteBackup = await request(`/api/ai-inspection/config-backup/plans/${backupPlan.data.id}/execute`, {
+    method: 'POST',
+    headers: { cookie: engineerCookie, 'Content-Type': 'application/json' },
+    body: '{}'
+  });
+  assert(engineerExecuteBackup.status === 403, '非创建者不应执行他人配置备份计划');
+  const engineerBackupPlan = await request('/api/ai-inspection/config-backup/plans', {
+    method: 'POST',
+    headers: { cookie: engineerCookie, 'Content-Type': 'application/json' },
+    body: JSON.stringify({ targetId: backupTarget.data.id, name: '工程师自建备份计划', cycle: 'daily', executedAt: '2099-06-19T14:00' })
+  });
+  assert(engineerBackupPlan.status === 201, '同项目工程师应可基于巡检对象新建备份计划');
+  await request(`/api/ai-inspection/config-backup/plans/${engineerBackupPlan.data.id}`, { method: 'DELETE', headers: { cookie: engineerCookie } });
   const backupExecute = await request(`/api/ai-inspection/config-backup/plans/${backupPlan.data.id}/execute`, { method: 'POST', headers: { cookie, 'Content-Type': 'application/json' }, body: '{}' });
   assert(backupExecute.status === 200 && backupExecute.data.record?.status === '成功', '立即执行配置备份失败');
   const backupRecords = await request('/api/ai-inspection/config-backup/records', { headers: { cookie } });
@@ -2116,7 +2154,7 @@ async function main() {
   const delDoc1 = await request(`/api/documents/${docId1}`, { method: 'DELETE', headers: { cookie } });
   assert(delDoc1.status === 200, '清理设备资料失败');
 
-  const auditAfterDocs = await request('/api/audit-logs?pageSize=100&sortBy=createdAt&sortDirection=desc', { headers: { cookie } });
+  const auditAfterDocs = await request('/api/audit-logs?all=1&sortBy=createdAt&sortDirection=desc', { headers: { cookie } });
   const docCreateLog = (auditAfterDocs.data.data || []).find(item => item.targetType === 'document' && item.action === 'create');
   assert(docCreateLog, '创建资料未写入操作日志');
   const docDeleteLog = (auditAfterDocs.data.data || []).find(item => item.targetType === 'document' && item.action === 'delete');

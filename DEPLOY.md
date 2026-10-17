@@ -265,6 +265,8 @@ server {
 }
 ```
 
+代理与系统不在同一主机或容器时，需要把代理的出口地址加入 `TRUSTED_PROXY_IPS`（支持 CIDR，逗号分隔），否则系统只信任本机回环代理，登录限流会按代理 IP 合并计算。
+
 ### 5.2 Caddy 示例
 
 ```
@@ -345,6 +347,7 @@ CREATE, ALTER, SELECT, INSERT, UPDATE, DELETE, INDEX
 |------|--------|------|
 | `PORT` | `3000` | HTTP 服务端口 |
 | `HTTPS_PORT` | `3443` | 内置 HTTPS 登录端口 |
+| `TRUSTED_PROXY_IPS` | 空 | 反向代理与系统不在同一主机/容器时，填写代理出口 IP 或 CIDR（逗号分隔），才会信任 `X-Forwarded-For`/`X-Real-IP`。本机回环地址默认可信 |
 
 ### 8.3 安全
 

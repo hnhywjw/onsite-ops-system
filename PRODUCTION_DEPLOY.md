@@ -201,6 +201,8 @@ export INITIAL_ADMIN_SECURITY_ANSWER=replace-with-admin-security-answer
 export INITIAL_ENGINEER_SECURITY_ANSWER=replace-with-engineer-security-answer
 export ENCRYPTION_KEY=replace-with-at-least-32-chars-random-key
 export UPGRADE_SIGNING_KEY=replace-with-at-least-32-chars-random-key
+# 反向代理与系统不在同一主机/容器时填写代理出口 IP 或 CIDR（逗号分隔）
+export TRUSTED_PROXY_IPS=
 ```
 
 ### 5.4 启动

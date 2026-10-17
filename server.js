@@ -180,6 +180,11 @@ const allowedBackupCommands = (process.env.CONFIG_BACKUP_ALLOWED_COMMANDS || 'sh
   .split(',')
   .map(item => item.trim())
   .filter(Boolean);
+// 反向代理不在本机时，需显式声明其出口地址/CIDR，才会信任 X-Forwarded-* 与 X-Real-IP。
+const trustedProxyEntries = String(process.env.TRUSTED_PROXY_IPS || '')
+  .split(',')
+  .map(item => item.trim())
+  .filter(Boolean);
 let mysqlPool = null;
 let mysqlReadyPromise = null;
 let httpsServer = null;
@@ -5269,26 +5274,69 @@ function isAiTaskOverdueBeyondCycle(task, referenceMs = Date.now()) {
   return parseAiInspectionScheduleTime(next.executedAt) <= referenceMs;
 }
 
-// 仅当直连来源是本机反向代理时才信任转发头，避免客户端伪造 X-Forwarded-*。
+// 判断单个地址是否命中某条代理规则，支持精确 IP 与 IPv4/IPv6 CIDR。
+function ipMatchesProxyEntry(ip, entry) {
+  const rawAddress = String(ip || '').trim().replace(/^\[|\]$/g, '').split('%')[0];
+  const address = extractIpv4FromMapped(rawAddress) || rawAddress;
+  const rule = String(entry || '').trim();
+  if (!address || !rule || net.isIP(address) === 0) return false;
+  const slashIndex = rule.indexOf('/');
+  if (slashIndex === -1) {
+    const ruleAddress = rule.replace(/^\[|\]$/g, '');
+    return address.toLowerCase() === (extractIpv4FromMapped(ruleAddress) || ruleAddress).toLowerCase();
+  }
+  const rawBase = rule.slice(0, slashIndex).trim();
+  const base = extractIpv4FromMapped(rawBase) || rawBase;
+  const bits = Number(rule.slice(slashIndex + 1));
+  if (!Number.isInteger(bits)) return false;
+  const baseVersion = net.isIP(base);
+  const addressVersion = net.isIP(address);
+  if (baseVersion !== addressVersion) return false;
+  if (baseVersion === 4 && bits >= 0 && bits <= 32) {
+    const mask = bits === 0 ? 0 : (0xffffffff << (32 - bits)) >>> 0;
+    return (ipv4ToInt(address) & mask) === (ipv4ToInt(base) & mask);
+  }
+  if (baseVersion === 6 && bits >= 0 && bits <= 128) {
+    const baseBuffer = ipv6ToBuffer(base);
+    const addressBuffer = ipv6ToBuffer(address);
+    if (!baseBuffer || !addressBuffer) return false;
+    const fullBytes = Math.floor(bits / 8);
+    if (fullBytes && baseBuffer.compare(addressBuffer, 0, fullBytes, 0, fullBytes) !== 0) return false;
+    const remainingBits = bits % 8;
+    if (!remainingBits) return true;
+    const mask = (0xff << (8 - remainingBits)) & 0xff;
+    return (baseBuffer[fullBytes] & mask) === (addressBuffer[fullBytes] & mask);
+  }
+  return false;
+}
+
+function isTrustedProxyAddress(address) {
+  const ip = String(address || '').trim().replace(/^\[|\]$/g, '');
+  if (!ip || net.isIP(ip) === 0) return false;
+  // 本机反向代理默认可信；跨主机代理必须显式配置 TRUSTED_PROXY_IPS。
+  if (isLoopbackIp(ip)) return true;
+  return trustedProxyEntries.some(entry => ipMatchesProxyEntry(ip, entry));
+}
+
+// 仅当直连来源是可信代理时才信任转发头，避免客户端伪造 X-Forwarded-*。
 function isTrustedProxyRequest(req) {
-  const remoteAddress = req.socket?.remoteAddress || '';
-  return remoteAddress === '127.0.0.1' || remoteAddress === '::1' || remoteAddress === '::ffff:127.0.0.1';
+  return isTrustedProxyAddress(req.socket?.remoteAddress || '');
 }
 
 function getRequestClientIp(req) {
-  const remoteAddress = req.socket?.remoteAddress || '';
-  if (isTrustedProxyRequest(req)) {
-    // X-Forwarded-For 的首段由客户端自填，取最后一跳（可信代理追加）才能避免伪造限流键。
-    const forwardedList = String(req.headers['x-forwarded-for'] || '')
-      .split(',')
-      .map(item => item.trim().replace(/^\[|\]$/g, ''))
-      .filter(Boolean);
-    const forwarded = forwardedList[forwardedList.length - 1];
-    if (forwarded && net.isIP(forwarded)) return forwarded;
-    const realIp = String(req.headers['x-real-ip'] || '').trim().replace(/^\[|\]$/g, '');
-    if (realIp && net.isIP(realIp)) return realIp;
+  const remoteAddress = String(req.socket?.remoteAddress || '').trim();
+  if (!isTrustedProxyAddress(remoteAddress)) return remoteAddress || 'unknown';
+  // 从右往左跳过可信代理，第一个不可信地址才是真实客户端，避免伪造首段绕过限流。
+  const forwardedChain = String(req.headers['x-forwarded-for'] || '')
+    .split(',')
+    .map(item => item.trim().replace(/^\[|\]$/g, ''))
+    .filter(item => net.isIP(item) > 0);
+  for (let index = forwardedChain.length - 1; index >= 0; index -= 1) {
+    if (!isTrustedProxyAddress(forwardedChain[index])) return forwardedChain[index];
   }
-  return remoteAddress || 'unknown';
+  const realIp = String(req.headers['x-real-ip'] || '').trim().replace(/^\[|\]$/g, '');
+  if (net.isIP(realIp) > 0) return realIp;
+  return forwardedChain[0] || remoteAddress || 'unknown';
 }
 
 function getLoginRateLimitKey(req, username) {
@@ -5967,10 +6015,10 @@ function checkExpiryNotifications(db) {
   let changed = false;
   const now = Date.now();
   const thirtyDaysMs = 30 * 24 * 60 * 60 * 1000;
+  const todayKey = formatDateKey(new Date());
 
   for (const project of db.projects || []) {
     if (!project.projectEndDate) continue;
-    const todayKey = formatDateKey(new Date());
     const endDate = parseDateOnly(project.projectEndDate);
     const today = parseDateOnly(todayKey);
     if (!endDate || !today) continue;
@@ -5990,7 +6038,6 @@ function checkExpiryNotifications(db) {
 
   for (const asset of db.assets || []) {
     if (!asset.maintainExpiryDate) continue;
-    const todayKey = formatDateKey(new Date());
     const expiryDate = parseDateOnly(asset.maintainExpiryDate);
     const today = parseDateOnly(todayKey);
     if (!expiryDate || !today) continue;
@@ -6011,7 +6058,12 @@ function checkExpiryNotifications(db) {
     // 仅停用的计划不再提醒。已执行的计划会把 nextDate 顺延到下一轮，
     // 若按状态跳过会导致首轮执行后永久失去后续提醒。
     if (!plan.nextDate || String(plan.status || '') === '已停用') continue;
-    const todayKey = formatDateKey(new Date());
+    // 到期未执行则回落到「待执行」，状态与待办口径保持一致。
+    const resolvedStatus = resolveInspectionPlanStatus(plan, todayKey);
+    if (resolvedStatus !== String(plan.status || '')) {
+      plan.status = resolvedStatus;
+      changed = true;
+    }
     const nextDate = parseDateOnly(plan.nextDate);
     const today = parseDateOnly(todayKey);
     if (!nextDate || !today) continue;
@@ -6090,12 +6142,6 @@ function countActiveAdminsExcluding(db, excludeUserId) {
   return (db.users || []).filter(item => item.role === 'admin' && item.status === 'active' && item.id !== excludeUserId).length;
 }
 
-function canOperateInspectionRecord(user, item) {
-  if (!user || !item) return false;
-  if (user.role === 'admin') return true;
-  return Boolean(user.projectId) && item.projectId === user.projectId;
-}
-
 function canManageInspectionRecord(user, item) {
   if (!user || !item) return false;
   if (user.role === 'admin') return true;
@@ -6103,6 +6149,13 @@ function canManageInspectionRecord(user, item) {
   // 无创建者的存量记录仅管理员可改删，避免同项目工程师横向越权。
   if (!item.createdBy) return false;
   return item.createdBy === user.id;
+}
+
+// 项目内可见即可操作（仅用于以已有巡检对象为模板新建计划等非执行类动作）。
+function canAccessInspectionRecord(user, item) {
+  if (!user || !item) return false;
+  if (user.role === 'admin') return true;
+  return Boolean(user.projectId) && item.projectId === user.projectId;
 }
 
 // 巡检对象改归属项目后，同步其派生任务/结果/备份计划/备份记录的 projectId，避免出现跨项目孤儿引用。
@@ -6147,6 +6200,14 @@ function refreshInspectionPlanFromExecutions(db, planId) {
   if (latestExecution.nextDate) {
     plan.nextDate = latestExecution.nextDate;
   }
+}
+
+// 计划到期仍未执行时，状态从上一轮结果回到「待执行」，避免状态与实际待办不一致。
+function resolveInspectionPlanStatus(plan, todayKey) {
+  const status = String(plan?.status || '');
+  if (status !== '已执行' && status !== '已完成') return status;
+  if (!plan.nextDate || plan.nextDate >= todayKey) return status;
+  return '待执行';
 }
 
 // 按巡检周期从指定日期推进到下一定检日，用于执行记录未填下次巡检日时自动顺延。
@@ -10380,8 +10441,9 @@ const requestHandler = async (req, res) => {
     if (req.method === 'GET' && pathname === '/api/inspection-plans') {
       const user = requireAuth(req, res, db);
       if (!user) return;
+      const todayKey = formatDateKey(new Date());
       const list = filterByProjectScope(db.inspectionPlans || [], user, item => item.projectId)
-        .map(plan => sanitizeInspectionPlanForViewer(plan, user));
+        .map(plan => sanitizeInspectionPlanForViewer({ ...plan, status: resolveInspectionPlanStatus(plan, todayKey) }, user));
       const query = Object.fromEntries(reqUrl.searchParams);
       const sorted = parseSortQuery(query, list, 'createdAt');
       return json(res, 200, paginateResult(sorted, query));
@@ -11620,7 +11682,7 @@ const requestHandler = async (req, res) => {
       const taskId = pathname.split('/')[4];
       const task = (db.aiInspectionTasks || []).find(item => item.id === taskId);
       if (!task) return json(res, 404, { message: '巡检任务不存在' });
-      if (!canOperateInspectionRecord(user, task)) return json(res, 403, { message: '无权执行该巡检任务' });
+      if (!canManageInspectionRecord(user, task)) return json(res, 403, { message: '无权执行该巡检任务' });
       if (task.status === '已完成' || task.status === '失败') {
         db.aiInspectionResults = (db.aiInspectionResults || []).filter(item => item.taskId !== taskId);
         task.status = '待执行';
@@ -11718,7 +11780,7 @@ const requestHandler = async (req, res) => {
       const body = await readBody(req);
       const target = (db.aiInspectionTargets || []).find(item => item.id === body.targetId);
       if (!target) return json(res, 404, { message: '巡检对象不存在' });
-      if (!canOperateInspectionRecord(user, target)) return json(res, 403, { message: '无权操作该巡检对象' });
+      if (!canAccessInspectionRecord(user, target)) return json(res, 403, { message: '无权操作该巡检对象' });
       if (!target.assetId || !requireExistingAsset(target.assetId, db)) return json(res, 400, { message: '巡检对象必须关联有效资产' });
       const cycle = String(body.cycle || '').trim();
       if (!['daily', 'weekly', 'monthly', 'quarterly'].includes(cycle)) return json(res, 400, { message: '请选择备份周期' });
@@ -11751,7 +11813,7 @@ const requestHandler = async (req, res) => {
       const planId = pathname.split('/')[5];
       const plan = (db.configBackupPlans || []).find(item => item.id === planId);
       if (!plan) return json(res, 404, { message: '配置备份计划不存在' });
-      if (!canOperateInspectionRecord(user, plan)) return json(res, 403, { message: '无权执行该配置备份计划' });
+      if (!canManageInspectionRecord(user, plan)) return json(res, 403, { message: '无权执行该配置备份计划' });
       plan.status = '执行中';
       const record = await executeConfigBackupPlan(db, plan, { operatorId: user.id });
       plan.status = plan.cycle ? '待执行' : '已完成';
