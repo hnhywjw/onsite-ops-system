@@ -12,6 +12,7 @@ RUN npm ci --omit=dev
 
 COPY server.js ./
 COPY public ./public
+COPY scripts ./scripts
 COPY pptx-template.json ./
 COPY docker-entrypoint.sh ./
 

@@ -1,14 +1,14 @@
-# 驻场运维管理系统 v1.0.15 生产安装部署说明
+# 驻场运维管理系统 v1.0.16 生产安装部署说明
 
-本文档用于在生产环境部署 `onsite-ops-system-v1.0.15`。
+本文档用于在生产环境部署 `onsite-ops-system-v1.0.16`。
 
 ## 1. 交付物
 
-完整安装包：`onsite-ops-system-v1.0.15-production.tar.gz`
+完整安装包：`onsite-ops-system-v1.0.16-production.tar.gz`
 
-离线升级包：`onsite-ops-upgrade-v1.0.15.tar.gz`
+离线升级包：`onsite-ops-upgrade-v1.0.16.tar.gz`
 
-GitHub Release：https://github.com/hnhywjw/onsite-ops-system/releases/tag/v1.0.15
+GitHub Release：https://github.com/hnhywjw/onsite-ops-system/releases/tag/v1.0.16
 
 包内核心文件：
 
@@ -60,7 +60,7 @@ build-upgrade.js
 ```bash
 mkdir -p /opt/onsite-ops-system
 cd /opt/onsite-ops-system
-tar -xzf onsite-ops-system-v1.0.15-production.tar.gz
+tar -xzf onsite-ops-system-v1.0.16-production.tar.gz
 ```
 
 ### 3.1.1 创建数据目录并授权
@@ -270,12 +270,12 @@ docker compose --env-file .env.production -f docker-compose.prod.yml exec onsite
 
 ```bash
 cd /opt/onsite-ops-system
-tar -xzf onsite-ops-system-v1.0.15-production.tar.gz
+tar -xzf onsite-ops-system-v1.0.16-production.tar.gz
 ```
 
 ### 7.2.1 使用离线升级包
 
-已运行的系统可在「系统治理」页面上传 `onsite-ops-upgrade-v1.0.15.tar.gz`。
+已运行的系统可在「系统治理」页面上传 `onsite-ops-upgrade-v1.0.16.tar.gz`。
 
 GitHub 提供的升级包含 `manifest.json` 与 SHA256 清单。生产环境上传前，须用本机 `UPGRADE_SIGNING_KEY`（不少于 32 位）重新执行 `npm run build-upgrade`，生成带 HMAC 签名的包。页面会轮询 `/api/system/upgrade/status`，容器重启后由 `docker-entrypoint.sh` 替换 `server.js`、`public/`、`scripts/` 等文件。
 
@@ -306,7 +306,7 @@ curl http://127.0.0.1:3000/api/ready
 - 管理员账号可登录
 - `/api/health` 返回正常
 - `/api/ready` 返回正常
-- 系统版本显示为 `v1.0.15`
+- 系统版本显示为 `v1.0.16`
 - 项目、资产、日志页面可读取数据
 - 自动化巡检页面可打开
 - 配置备份页面可打开

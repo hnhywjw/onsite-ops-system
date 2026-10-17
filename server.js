@@ -1083,8 +1083,50 @@ function getHttpsCertificateSummary(config = {}) {
   if (!config.httpsCertUploadedAt || !config.httpsKeyUploadedAt) {
     return '未上传证书';
   }
-  const validity = config.httpsCertValidTo ? `，有效期至 ${config.httpsCertValidTo}` : '';
-  return `${config.httpsCertFilename || 'login-cert.pem'} / ${config.httpsKeyFilename || 'login-key.pem'}，上传时间 ${config.httpsCertUploadedAt}${validity}`;
+  const { validFrom, validTo } = resolveHttpsCertificateValidity(config);
+  const period = validFrom && validTo
+    ? `，有效期 ${formatCertificateTime(validFrom)} 至 ${formatCertificateTime(validTo)}`
+    : (validTo ? `，有效期至 ${formatCertificateTime(validTo)}` : '');
+  return `${config.httpsCertFilename || 'login-cert.pem'} / ${config.httpsKeyFilename || 'login-key.pem'}，上传时间 ${config.httpsCertUploadedAt}${period}`;
+}
+
+const HTTPS_CERT_EXPIRY_WARNING_DAYS = 7;
+
+function formatCertificateTime(value) {
+  const ms = Date.parse(String(value || ''));
+  return Number.isFinite(ms) ? new Date(ms).toISOString().slice(0, 10) : String(value || '');
+}
+
+// 证书有效期优先取配置；历史数据缺少该字段时回读磁盘证书，避免升级后状态显示为空。
+function resolveHttpsCertificateValidity(config = {}) {
+  let validFrom = String(config.httpsCertValidFrom || '').trim();
+  let validTo = String(config.httpsCertValidTo || '').trim();
+  if ((!validFrom || !validTo) && hasHttpsCertificateFiles()) {
+    try {
+      const summary = parseCertificateSummary(fs.readFileSync(httpsCertPath, 'utf8'));
+      validFrom = validFrom || summary.validFrom;
+      validTo = validTo || summary.validTo;
+    } catch (_) {
+      // 证书文件损坏时保留已有字段，由上传校验负责拦截。
+    }
+  }
+  return { validFrom, validTo };
+}
+
+function getHttpsCertificateExpiryNotice(config = {}) {
+  if (!hasHttpsCertificateFiles()) return null;
+  const { validFrom, validTo } = resolveHttpsCertificateValidity(config);
+  const validToMs = Date.parse(validTo);
+  if (!Number.isFinite(validToMs)) return null;
+  const daysRemaining = Math.ceil((validToMs - nowMs()) / (24 * 60 * 60 * 1000));
+  return {
+    validFrom,
+    validTo,
+    enabled: config.httpsLoginEnabled === true,
+    daysRemaining,
+    expiring: daysRemaining <= HTTPS_CERT_EXPIRY_WARNING_DAYS,
+    expired: validToMs <= nowMs()
+  };
 }
 
 function getLoginRateLimitStateStore(db) {
@@ -8159,6 +8201,18 @@ const requestHandler = async (req, res) => {
       });
     }
 
+    // 登录页需要在未认证状态读取证书到期提示；证书有效期本身由 TLS 握手公开，不含密钥信息。
+    if (req.method === 'GET' && pathname === '/api/https-certificate/notice') {
+      return json(res, 200, {
+        notice: getHttpsCertificateExpiryNotice(db.systemConfig),
+        warningDays: HTTPS_CERT_EXPIRY_WARNING_DAYS
+      }, {
+        'Cache-Control': 'no-store, no-cache, must-revalidate',
+        Pragma: 'no-cache',
+        Expires: '0'
+      });
+    }
+
     if (req.method === 'POST' && pathname === '/api/login') {
       const body = await readBody(req);
       const username = String(body.username || '').trim();
@@ -9683,7 +9737,12 @@ const requestHandler = async (req, res) => {
       const user = requireAuth(req, res, db);
       if (!user) return;
       let assets = db.assets || [];
-      if (user.role !== 'admin') assets = assets.filter(a => a.projectId === user.projectId);
+      if (user.role === 'admin') {
+        const filterProjectId = reqUrl.searchParams.get('projectId');
+        if (filterProjectId) assets = assets.filter(a => a.projectId === filterProjectId);
+      } else {
+        assets = assets.filter(a => a.projectId === user.projectId);
+      }
       const assetIds = new Set(assets.map(a => a.id));
       const relations = (db.assetRelations || []).filter(r => assetIds.has(r.sourceAssetId) && assetIds.has(r.targetAssetId));
       return json(res, 200, { assets: assets.map(item => sanitizeAssetForApi(item, user)), relations });

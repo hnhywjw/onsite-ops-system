@@ -1296,6 +1296,16 @@
     </div>
   </div>
 
+  <div id="httpsCertExpiryModal" class="modal-overlay hidden">
+    <div class="modal-box" style="max-width:440px;">
+      <h3>HTTPS 登录证书即将到期</h3>
+      <div id="httpsCertExpiryText" style="font-size:13px;color:#475569;line-height:1.8;"></div>
+      <div class="btn-row">
+        <button class="primary" type="button" onclick="closeModal('httpsCertExpiryModal')">我知道了</button>
+      </div>
+    </div>
+  </div>
+
   <div id="ldapModal" class="modal-overlay hidden">
     <div class="modal-box">
       <h3>LDAP 登录</h3>
@@ -2394,7 +2404,10 @@
         </div>
         <div class="subtab-panel hidden" data-section="assets" data-subtab="list">
           <div class="card">
-            <h3 style="margin-top:0;">资产列表</h3>
+            <div style="display:flex;justify-content:space-between;align-items:center;gap:12px;margin-bottom:12px;">
+              <h3 style="margin:0;">资产列表</h3>
+              <select id="assetProjectFilter" class="hidden" title="按项目名称筛选" style="font-size:13px;padding:6px 8px;border:1px solid var(--line);border-radius:8px;max-width:260px;"></select>
+            </div>
             <div class="table-wrap">
               <table class="asset-table">
                 <colgroup>
@@ -2433,6 +2446,7 @@
             <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:12px;">
               <div style="display:flex;align-items:center;gap:8px;">
                 <h3 style="margin:0;">资产拓扑图</h3>
+                <select id="topologyProjectFilter" class="hidden" title="按项目名称筛选" style="font-size:13px;padding:6px 8px;border:1px solid var(--line);border-radius:8px;max-width:220px;"></select>
                 <span id="topoAlignBar" style="display:none;gap:4px;">
                   <button class="topo-align-btn" title="左对齐" data-align="left">&#x2190;</button>
                   <button class="topo-align-btn" title="水平居中" data-align="center-h">&#x2194;</button>
@@ -2473,7 +2487,7 @@
                 <p style="margin:6px 0 0;font-size:12px;color:#6b7280;">按机柜查看设备槽位 · 悬停查看摘要 · 点击查看 SNMP 实时详情</p>
               </div>
               <div>
-                <select id="cabinetLayoutProjectFilter" class="hidden" style="font-size:13px;padding:6px 8px;margin-right:8px;border:1px solid var(--line);border-radius:8px;width:110px;max-width:110px;text-overflow:ellipsis;"></select>
+                <select id="cabinetLayoutProjectFilter" class="hidden" title="按项目名称筛选" style="font-size:13px;padding:6px 8px;margin-right:8px;border:1px solid var(--line);border-radius:8px;max-width:220px;text-overflow:ellipsis;"></select>
                 <input id="cabinetLayoutSearchInput" type="search" placeholder="搜索设备名定位" class="hidden" style="font-size:13px;padding:6px 8px;margin-right:8px;border:1px solid var(--line);border-radius:8px;width:160px;" />
                 <button class="secondary hidden" id="cabinetLayoutBatchBtn" type="button" style="font-size:13px;padding:6px 12px;margin-right:8px;">批量归位</button>
                 <button class="secondary" id="cabinetLayoutRefreshBtn" type="button" style="font-size:13px;padding:6px 12px;">刷新</button>
@@ -3553,6 +3567,8 @@
       kbFilterProjectId: '',
       kbFilterUserId: '',
       assetPage: 1,
+      assetFilterProjectId: '',
+      topoFilterProjectId: '',
       selectedAssetIds: [],
       cabinetLayoutDevice: null,
       projectPage: 1,
@@ -4072,8 +4088,32 @@
       els.appView.classList.add('hidden');
       refreshCaptcha();
       applyRegistrationVisibility();
+      checkHttpsCertificateExpiryNotice();
       if (localStorage.getItem('rememberedUsername')) {
         document.getElementById('loginUsername').value = localStorage.getItem('rememberedUsername') || '';
+      }
+    }
+
+    async function checkHttpsCertificateExpiryNotice() {
+      try {
+        const data = await api('/api/https-certificate/notice');
+        const notice = data && data.notice;
+        if (!notice || !notice.enabled || !notice.expiring) return;
+        // 同一张证书在同一浏览器会话内只提醒一次，避免登录失败重试时反复弹窗。
+        const notifyKey = `httpsCertExpiryNotified:${notice.validTo || ''}`;
+        if (sessionStorage.getItem(notifyKey)) return;
+        sessionStorage.setItem(notifyKey, '1');
+        const validTo = formatCertificateDate(notice.validTo) || notice.validTo || '-';
+        const daysRemaining = Number(notice.daysRemaining);
+        const textEl = document.getElementById('httpsCertExpiryText');
+        if (textEl) {
+          textEl.textContent = notice.expired
+            ? `当前 HTTPS 登录证书已于 ${validTo} 过期，请尽快在“系统治理 - HTTPS 登录”中上传新证书，否则浏览器会提示连接不安全。`
+            : `当前 HTTPS 登录证书将于 ${validTo} 到期，剩余 ${Number.isFinite(daysRemaining) ? Math.max(daysRemaining, 1) : 1} 天，请及时上传新证书。`;
+        }
+        openModal('httpsCertExpiryModal');
+      } catch (_) {
+        // 证书提示是辅助信息，接口异常时不阻塞登录页。
       }
     }
 
@@ -6167,7 +6207,9 @@
 
     async function loadTopoLayout() {
       try {
-        const data = await api('/api/assets/topology-layout');
+        const projectId = currentTopologyProjectId();
+        const query = projectId ? `?projectId=${encodeURIComponent(projectId)}` : '';
+        const data = await api(`/api/assets/topology-layout${query}`);
         if (data && data.positions) {
           Object.assign(state.topoNodePositions, data.positions);
         }
@@ -6179,7 +6221,7 @@
       try {
         await api('/api/assets/topology-layout', {
           method: 'POST',
-          body: JSON.stringify({ positions: state.topoNodePositions })
+          body: JSON.stringify({ projectId: currentTopologyProjectId(), positions: state.topoNodePositions })
         });
         showToast('拓扑布局已保存', 'success');
       } catch (e) {
@@ -6191,7 +6233,9 @@
       if (!canEditData()) return;
       if (!await showConfirm('确认重置该项目的拓扑布局吗？节点将回到自动排列。')) return;
       try {
-        await api('/api/assets/topology-layout', { method: 'DELETE' });
+        const projectId = currentTopologyProjectId();
+        const query = projectId ? `?projectId=${encodeURIComponent(projectId)}` : '';
+        await api(`/api/assets/topology-layout${query}`, { method: 'DELETE' });
         state.topoNodePositions = {};
         showToast('拓扑布局已重置', 'success');
         await renderTopology();
@@ -6493,6 +6537,61 @@
       if (panel && !panel.classList.contains('hidden') && state.user) loadCabinetLayout();
     }
 
+    // 管理员在资产列表/拓扑图/布局图中按项目查看，避免跨项目数据混在一起。
+    let assetListFilterSignature = '';
+    let topologyFilterSignature = '';
+
+    function fillAssetFilterSelect(selectId, filterKey, signature, onSignatureChange, onChange) {
+      const select = document.getElementById(selectId);
+      if (!select) return;
+      if (!state.user || state.user.role !== 'admin') {
+        state[filterKey] = '';
+        select.classList.add('hidden');
+        if (select.innerHTML) select.innerHTML = '';
+        return;
+      }
+      select.classList.remove('hidden');
+      const nextSignature = state.projects.map(p => `${p.id}:${formatProjectDisplay(p)}`).join('|');
+      const current = state[filterKey] || '';
+      if (signature !== nextSignature || !select.options.length) {
+        onSignatureChange(nextSignature);
+        select.innerHTML = '<option value="">全部项目</option>' + state.projects
+          .map(p => `<option value="${p.id}">${esc(formatProjectDisplay(p))}</option>`)
+          .join('');
+      }
+      const valid = current && state.projects.some(p => p.id === current);
+      state[filterKey] = valid ? current : '';
+      select.value = state[filterKey];
+      if (!select.dataset.bound) {
+        select.dataset.bound = '1';
+        select.addEventListener('change', () => {
+          state[filterKey] = select.value || '';
+          onChange();
+        });
+      }
+    }
+
+    function renderAssetListProjectFilter() {
+      fillAssetFilterSelect('assetProjectFilter', 'assetFilterProjectId', assetListFilterSignature, next => {
+        assetListFilterSignature = next;
+      }, () => {
+        state.assetPage = 1;
+        renderAssets();
+      });
+    }
+
+    function renderTopologyProjectFilter() {
+      fillAssetFilterSelect('topologyProjectFilter', 'topoFilterProjectId', topologyFilterSignature, next => {
+        topologyFilterSignature = next;
+      }, () => {
+        renderTopology();
+      });
+    }
+
+    function currentTopologyProjectId() {
+      return state.user && state.user.role === 'admin' ? (state.topoFilterProjectId || '') : '';
+    }
+
     let cabinetLayoutRefreshTimer = null;
     function scheduleCabinetLayoutRefresh() {
       if (cabinetLayoutRefreshTimer) return;
@@ -6596,6 +6695,7 @@
     async function renderTopology() {
       const panel = document.querySelector('.subtab-panel[data-section="assets"][data-subtab="topology"]');
       if (!panel || panel.classList.contains('hidden')) return;
+      renderTopologyProjectFilter();
       state.topoData = { assets: [], relations: [] };
       state.topoNodePositions = {};
       state.topoMonitorStatus = {};
@@ -6621,7 +6721,9 @@
 
     async function fetchTopologyData() {
       try {
-        const data = await api('/api/assets/topology');
+        const projectId = currentTopologyProjectId();
+        const query = projectId ? `?projectId=${encodeURIComponent(projectId)}` : '';
+        const data = await api(`/api/assets/topology${query}`);
         state.topoData = data;
         renderTopoCanvas();
       } catch (_) {}
@@ -7288,7 +7390,11 @@
         return cabinet ? `${cabinet} ${u}` : u;
       }
       const pageSize = 10;
-      const sourceAssets = filterByUserProject(state.assets).slice();
+      renderAssetListProjectFilter();
+      let sourceAssets = filterByUserProject(state.assets).slice();
+      if (state.assetFilterProjectId) {
+        sourceAssets = sourceAssets.filter(item => item.projectId === state.assetFilterProjectId);
+      }
       if (state.assetProjectSort) {
         sourceAssets.sort((a, b) => {
           const pa = (a.projectId || '').toLowerCase();
@@ -8115,9 +8221,43 @@
         tzSelect.value = String(Number.isFinite(tzOffset) ? tzOffset : 480);
       }
       updateSystemCurrentTimeDisplay();
-      httpsCertificateStatus.textContent = state.systemConfig?.httpsCertUploadedAt && state.systemConfig?.httpsKeyUploadedAt
-        ? `${state.systemConfig.httpsCertFilename || 'login-cert.pem'} / ${state.systemConfig.httpsKeyFilename || 'login-key.pem'}，上传时间 ${state.systemConfig.httpsCertUploadedAt}`
-        : '未上传证书';
+      renderHttpsCertificateStatus();
+    }
+
+    function formatCertificateDate(value) {
+      const ms = Date.parse(String(value || ''));
+      return Number.isFinite(ms) ? new Date(ms).toISOString().slice(0, 10) : '';
+    }
+
+    function certificateDaysRemaining(validTo) {
+      const ms = Date.parse(String(validTo || ''));
+      if (!Number.isFinite(ms)) return null;
+      return Math.ceil((ms - Date.now()) / (24 * 60 * 60 * 1000));
+    }
+
+    function renderHttpsCertificateStatus() {
+      const el = document.getElementById('httpsCertificateStatus');
+      if (!el) return;
+      const config = state.systemConfig || {};
+      el.style.color = '';
+      if (!config.httpsCertUploadedAt || !config.httpsKeyUploadedAt) {
+        el.textContent = '未上传证书';
+        return;
+      }
+      const validFrom = formatCertificateDate(config.httpsCertValidFrom);
+      const validTo = formatCertificateDate(config.httpsCertValidTo);
+      const daysRemaining = certificateDaysRemaining(config.httpsCertValidTo);
+      const parts = [
+        `${config.httpsCertFilename || 'login-cert.pem'} / ${config.httpsKeyFilename || 'login-key.pem'}`,
+        `上传时间 ${config.httpsCertUploadedAt}`
+      ];
+      if (validFrom || validTo) parts.push(`有效期 ${validFrom || '-'} 至 ${validTo || '-'}`);
+      if (daysRemaining !== null) {
+        const expired = Date.parse(String(config.httpsCertValidTo || '')) <= Date.now();
+        parts.push(expired ? '证书已过期' : `剩余 ${Math.max(daysRemaining, 1)} 天`);
+        if (expired || daysRemaining <= 7) el.style.color = '#dc2626';
+      }
+      el.textContent = parts.join('，');
     }
 
     function updateSystemCurrentTimeDisplay() {
@@ -12408,6 +12548,7 @@
     document.getElementById('assetExportBtn').addEventListener('click', () => {
       const selectedIds = state.selectedAssetIds || [];
       let assets = filterByUserProject(state.assets);
+      if (state.assetFilterProjectId) assets = assets.filter(item => item.projectId === state.assetFilterProjectId);
       if (selectedIds.length) assets = assets.filter(item => selectedIds.includes(item.id));
       if (!assets.length) { showToast('没有可导出的资产'); return; }
       const rows = assets.map(item => ({

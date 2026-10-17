@@ -461,7 +461,7 @@ async function main() {
       const loginView = document.getElementById('loginView');
       const appView = document.getElementById('appView');
       return Boolean(loginView && !loginView.classList.contains('hidden') && appView && appView.classList.contains('hidden'));
-    }, { timeout: 30000 });
+    }, null, { timeout: 30000 });
     await page.waitForSelector('#loginForm input[name="username"]', { state: 'visible', timeout: 30000 });
     const autoLogoutMessage = await page.locator('#loginMessage').textContent().then(text => String(text || '').trim());
     assert(autoLogoutMessage.includes('自动退出登录'), `自动登出提示不正确: ${autoLogoutMessage}`);
@@ -931,7 +931,7 @@ async function main() {
     await page.waitForFunction(() => {
       const message = document.querySelector('#aiInspectionTaskMessage');
       return message && /探测失败|得分/.test(message.textContent || '');
-    }, { timeout: 90000 });
+    }, null, { timeout: 90000 });
 
     await page.click('section[data-tab="aiInspection"] button[data-subtab="reports"]');
     await waitForBrowserRequest(

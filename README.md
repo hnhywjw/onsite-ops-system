@@ -105,16 +105,23 @@ docker compose --env-file .env.production -f docker-compose.prod.yml up -d --bui
 
 ## 版本
 
-当前版本：`1.0.15`
+当前版本：`1.0.16`
 
 ### 软件包下载
 
-最新版本：**[v1.0.15](https://github.com/hnhywjw/onsite-ops-system/releases/tag/v1.0.15)**
+最新版本：**[v1.0.16](https://github.com/hnhywjw/onsite-ops-system/releases/tag/v1.0.16)**
 
-- 完整安装包 `onsite-ops-system-v1.0.15-production.tar.gz`
-- 离线升级包 `onsite-ops-upgrade-v1.0.15.tar.gz`
+- 完整安装包 `onsite-ops-system-v1.0.16-production.tar.gz`
+- 离线升级包 `onsite-ops-upgrade-v1.0.16.tar.gz`
 - SHA256 校验文件
 - 部署说明见仓库 `PRODUCTION_DEPLOY.md`
+
+### v1.0.16 更新说明
+
+功能与修复：
+- HTTPS 登录证书显示起止有效期与剩余天数，到期前 7 天在登录页弹窗提醒（同一证书同一会话只提醒一次）
+- 资产列表、资产拓扑图、资产布局图新增项目筛选，管理员可按项目查看，拓扑布局与重置按项目独立保存
+- 修复生产镜像缺少 `scripts` 目录导致容器启动即重启的问题，Dockerfile 补齐 `COPY scripts ./scripts`
 
 ### v1.0.15 更新说明
 

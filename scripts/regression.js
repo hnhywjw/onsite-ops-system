@@ -319,6 +319,11 @@ async function main() {
   assert(!String(captchaProbe.data.svgMarkup || captchaProbe.data.svg || '').includes('<text'), '验证码 SVG 不应包含 text 节点');
   assert(captchaProbe.data.svgMarkup === undefined, '验证码接口不应返回 svgMarkup 原文');
   assert(decodeCaptchaFromSvg(captchaProbe.data).length === 4, '验证码 SVG 未能解析出 4 位字符');
+  const certNotice = await request('/api/https-certificate/notice');
+  assert(certNotice.status === 200 && certNotice.data.warningDays === 7, '证书到期提示接口异常');
+  if (certNotice.data.notice) {
+    assert(Boolean(certNotice.data.notice.validTo), '证书到期提示应包含到期时间');
+  }
   const throttledHeaders = { 'x-forwarded-for': '198.51.100.10' };
   for (let index = 0; index < 5; index += 1) {
     const failedLogin = await login('admin', 'wrong-password', { headers: throttledHeaders });
@@ -395,6 +400,13 @@ async function main() {
   const topology = await request('/api/assets/topology', { headers: { cookie } });
   assert(topology.status === 200 && Array.isArray(topology.data.assets), '查询资产拓扑失败');
   assert(topology.data.assets.every(item => item.snmpCommunity === undefined), '资产拓扑不应返回 snmpCommunity');
+  const topologyProjectId = (snapshot.projects || [])[0]?.id;
+  if (topologyProjectId) {
+    const filteredTopology = await request(`/api/assets/topology?projectId=${encodeURIComponent(topologyProjectId)}`, { headers: { cookie } });
+    assert(filteredTopology.status === 200, '按项目查询资产拓扑失败');
+    assert(filteredTopology.data.assets.every(item => item.projectId === topologyProjectId), '资产拓扑项目筛选未生效');
+    assert(filteredTopology.data.assets.length <= topology.data.assets.length, '资产拓扑项目筛选结果不应超过全部资产');
+  }
   const pagedProjects = await request('/api/projects?pageSize=1', { headers: { cookie } });
   assert(Array.isArray(pagedProjects.data.data) && pagedProjects.data.data.length === 1, '分页 pageSize=1 应只返回 1 条');
   const allProjects = await request('/api/projects?all=1', { headers: { cookie } });
