@@ -4084,6 +4084,13 @@
       stopSystemLoadAutoRefresh();
       stopIdleLogoutTracking();
       stopAllBackgroundPolling();
+      // 退出后清空资产视图的项目筛选，避免下一个登录用户继承上一个用户的选择。
+      state.assetFilterProjectId = '';
+      state.topoFilterProjectId = '';
+      state.assetFilterProjectIdTouched = false;
+      state.topoFilterProjectIdTouched = false;
+      cabinetLayoutFilterTouched = false;
+      cabinetLayoutFilterSignature = '';
       els.loginView.classList.remove('hidden');
       els.appView.classList.add('hidden');
       refreshCaptcha();
@@ -6508,6 +6515,7 @@
     }
 
     let cabinetLayoutFilterSignature = '';
+    let cabinetLayoutFilterTouched = false;
     function renderCabinetLayoutProjectFilter() {
       const filter = document.getElementById('cabinetLayoutProjectFilter');
       if (!filter) return;
@@ -6520,16 +6528,18 @@
         filter.classList.add('hidden');
         if (filter.innerHTML) filter.innerHTML = '';
         cabinetLayoutFilterSignature = '';
+        cabinetLayoutFilterTouched = false;
         return;
       }
       // 轮询会反复调用本函数，项目列表未变化时不重建下拉，避免打断管理员选择。
       const signature = state.projects.map(p => `${p.id}:${formatProjectDisplay(p)}`).join('|');
-      if (signature === cabinetLayoutFilterSignature) return;
+      if (signature === cabinetLayoutFilterSignature && filter.options.length) return;
       cabinetLayoutFilterSignature = signature;
-      const current = filter.value;
+      const current = cabinetLayoutFilterTouched ? filter.value : defaultProjectFilterId();
       filter.classList.remove('hidden');
       filter.innerHTML = '<option value="">全部项目</option>' + state.projects.map(p => `<option value="${p.id}">${esc(formatProjectDisplay(p))}</option>`).join('');
-      if (current) filter.value = current;
+      if (current && state.projects.some(p => p.id === current)) filter.value = current;
+      else filter.value = '';
     }
 
     function refreshCabinetLayoutIfActive() {
@@ -6540,6 +6550,11 @@
     // 管理员在资产列表/拓扑图/布局图中按项目查看，避免跨项目数据混在一起。
     let assetListFilterSignature = '';
     let topologyFilterSignature = '';
+
+    // 三个资产视图默认落在当前用户关联项目上；管理员可再切换到其它项目或全部项目。
+    function defaultProjectFilterId() {
+      return String((state.user && state.user.projectId) || '');
+    }
 
     function fillAssetFilterSelect(selectId, filterKey, signature, onSignatureChange, onChange) {
       const select = document.getElementById(selectId);
@@ -6552,6 +6567,8 @@
       }
       select.classList.remove('hidden');
       const nextSignature = state.projects.map(p => `${p.id}:${formatProjectDisplay(p)}`).join('|');
+      const touchedKey = `${filterKey}Touched`;
+      if (!state[touchedKey]) state[filterKey] = defaultProjectFilterId();
       const current = state[filterKey] || '';
       if (signature !== nextSignature || !select.options.length) {
         onSignatureChange(nextSignature);
@@ -6565,6 +6582,7 @@
       if (!select.dataset.bound) {
         select.dataset.bound = '1';
         select.addEventListener('change', () => {
+          state[touchedKey] = true;
           state[filterKey] = select.value || '';
           onChange();
         });
@@ -7220,7 +7238,10 @@
 
     document.getElementById('topoRefreshBtn').addEventListener('click', () => renderTopology());
     document.getElementById('cabinetLayoutRefreshBtn').addEventListener('click', () => loadCabinetLayout());
-    document.getElementById('cabinetLayoutProjectFilter').addEventListener('change', () => loadCabinetLayout());
+    document.getElementById('cabinetLayoutProjectFilter').addEventListener('change', () => {
+      cabinetLayoutFilterTouched = true;
+      loadCabinetLayout();
+    });
     document.getElementById('cabinetLayoutSearchInput').addEventListener('input', () => applyCabinetLayoutSearch());
     document.getElementById('cabinetLayoutEditBtn').addEventListener('click', () => {
       const device = state.cabinetLayoutDevice;
