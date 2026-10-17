@@ -273,6 +273,8 @@ cd /opt/onsite-ops-system
 tar -xzf onsite-ops-system-v1.0.16-production.tar.gz
 ```
 
+从 v1.0.8 及更早版本升级时，页面升级入口只接受旧格式压缩包，须按本节用完整安装包替换文件，再执行 7.3 重建镜像。仅执行 `docker compose restart` 会继续使用旧镜像，页面版本不会变化。
+
 ### 7.2.1 使用离线升级包
 
 已运行的系统可在「系统治理」页面上传 `onsite-ops-upgrade-v1.0.16.tar.gz`。
