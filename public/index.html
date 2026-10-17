@@ -2404,7 +2404,7 @@
         </div>
         <div class="subtab-panel hidden" data-section="assets" data-subtab="list">
           <div class="card">
-            <div style="display:flex;justify-content:space-between;align-items:center;gap:12px;margin-bottom:12px;">
+            <div style="display:flex;align-items:center;gap:8px;margin-bottom:12px;">
               <h3 style="margin:0;">资产列表</h3>
               <select id="assetProjectFilter" class="hidden" title="按项目名称筛选" style="font-size:13px;padding:6px 8px;border:1px solid var(--line);border-radius:8px;max-width:260px;"></select>
             </div>
@@ -2483,11 +2483,13 @@
           <div class="card">
             <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:12px;">
               <div>
-                <h3 style="margin:0;">资产布局图</h3>
+                <div style="display:flex;align-items:center;gap:8px;">
+                  <h3 style="margin:0;">资产布局图</h3>
+                  <select id="cabinetLayoutProjectFilter" class="hidden" title="按项目名称筛选" style="font-size:13px;padding:6px 8px;border:1px solid var(--line);border-radius:8px;max-width:220px;text-overflow:ellipsis;"></select>
+                </div>
                 <p style="margin:6px 0 0;font-size:12px;color:#6b7280;">按机柜查看设备槽位 · 悬停查看摘要 · 点击查看 SNMP 实时详情</p>
               </div>
               <div>
-                <select id="cabinetLayoutProjectFilter" class="hidden" title="按项目名称筛选" style="font-size:13px;padding:6px 8px;margin-right:8px;border:1px solid var(--line);border-radius:8px;max-width:220px;text-overflow:ellipsis;"></select>
                 <input id="cabinetLayoutSearchInput" type="search" placeholder="搜索设备名定位" class="hidden" style="font-size:13px;padding:6px 8px;margin-right:8px;border:1px solid var(--line);border-radius:8px;width:160px;" />
                 <button class="secondary hidden" id="cabinetLayoutBatchBtn" type="button" style="font-size:13px;padding:6px 12px;margin-right:8px;">批量归位</button>
                 <button class="secondary" id="cabinetLayoutRefreshBtn" type="button" style="font-size:13px;padding:6px 12px;">刷新</button>
