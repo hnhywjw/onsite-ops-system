@@ -1470,6 +1470,44 @@ async function main() {
     body: JSON.stringify({ planId: plan.data.id, executedAt: '2026-06-19T13:00', executor: 'admin', result: '正常', checklist: '回归检查', issue: '发现端口异常', suggestion: '更换交换机', nextDate: '2026-07-01' })
   });
   assert(execution.status === 201, '创建巡检执行记录失败');
+  // 计划的下次巡检日必须保留真实值，不能被滚动到未来（否则首页逾期统计恒为 0）
+  const plansAfterExecution = await request('/api/inspection-plans', { headers: { cookie } });
+  const refreshedPlan = (plansAfterExecution.data.data || []).find(item => item.id === plan.data.id);
+  assert(refreshedPlan && refreshedPlan.nextDate === '2026-07-01', `巡检计划下次巡检日被改写: ${refreshedPlan && refreshedPlan.nextDate}`);
+
+  // 逾期计划应产生提醒且同一到期日只提醒一次
+  const reminderPlan = await request('/api/inspection-plans', {
+    method: 'POST',
+    headers: { cookie, 'Content-Type': 'application/json' },
+    body: JSON.stringify({ projectId, assetId, title: '回归逾期提醒计划', cycle: 'weekly', nextDate: '2025-01-06', owner: 'admin' })
+  });
+  assert(reminderPlan.status === 201, '创建逾期巡检计划失败');
+  const notificationsFirst = await request('/api/notifications?all=1', { headers: { cookie } });
+  const reminderNotes = (notificationsFirst.data.data || []).filter(item => item.category === 'inspection-overdue' && item.sourceId === reminderPlan.data.id);
+  assert(reminderNotes.length === 1, `逾期巡检提醒数量不正确: ${reminderNotes.length}`);
+  const notificationsSecond = await request('/api/notifications?all=1', { headers: { cookie } });
+  const reminderNotesAgain = (notificationsSecond.data.data || []).filter(item => item.category === 'inspection-overdue' && item.sourceId === reminderPlan.data.id);
+  assert(reminderNotesAgain.length === 1, '同一到期日不应重复产生巡检提醒');
+  const reminderPlanDelete = await request(`/api/inspection-plans/${reminderPlan.data.id}`, { method: 'DELETE', headers: { cookie } });
+  assert(reminderPlanDelete.status === 200, '删除逾期巡检计划失败');
+
+  // 执行记录未填下次巡检日时，应按周期从执行日期自动顺延
+  const autoPlan = await request('/api/inspection-plans', {
+    method: 'POST',
+    headers: { cookie, 'Content-Type': 'application/json' },
+    body: JSON.stringify({ projectId, assetId, title: '回归自动顺延计划', cycle: 'daily', nextDate: '2025-01-01', owner: 'admin' })
+  });
+  assert(autoPlan.status === 201, '创建自动顺延巡检计划失败');
+  const autoExecution = await request('/api/inspection-executions', {
+    method: 'POST',
+    headers: { cookie, 'Content-Type': 'application/json' },
+    body: JSON.stringify({ planId: autoPlan.data.id, executedAt: '2025-01-02T09:00', executor: 'admin', result: '正常', checklist: '回归检查' })
+  });
+  assert(autoExecution.status === 201, '创建自动顺延执行记录失败');
+  const autoPlans = await request('/api/inspection-plans', { headers: { cookie } });
+  const autoPlanAfter = (autoPlans.data.data || []).find(item => item.id === autoPlan.data.id);
+  assert(autoPlanAfter && autoPlanAfter.nextDate === '2025-01-03' && autoPlanAfter.status === '已执行', `巡检计划未按周期顺延: ${autoPlanAfter && `${autoPlanAfter.nextDate}/${autoPlanAfter.status}`}`);
+  await request(`/api/inspection-plans/${autoPlan.data.id}`, { method: 'DELETE', headers: { cookie } });
 
   let change = null;
   if (customerId) {
@@ -1548,6 +1586,12 @@ async function main() {
     body: JSON.stringify({ projectId, assetId, title: '回归故障', faultType: '网络中断', severity: '中', slaStatus: '正常', status: '处理中', occurredAt: '2026-06-19T13:10', resolution: '待处理' })
   });
   assert(incident.status === 201, '创建故障记录失败');
+  const incidentWithoutTime = await request('/api/incidents', {
+    method: 'POST',
+    headers: { cookie, 'Content-Type': 'application/json' },
+    body: JSON.stringify({ projectId, assetId, title: '回归无发生时间故障', faultType: '网络中断' })
+  });
+  assert(incidentWithoutTime.status === 400, '缺少故障发生时间应返回 400');
   const incidentDelete = await request(`/api/incidents/${incident.data.id}`, { method: 'DELETE', headers: { cookie } });
   assert(incidentDelete.status === 200, '删除故障记录失败');
 
@@ -2435,6 +2479,18 @@ async function main() {
   const numericImported = (numericImportedList.data.data || []).find(item => item.name === '20260001');
   assert(numericImported, '数字资产名称未按字符串落地');
   if (numericImported) await request(`/api/assets/${numericImported.id}`, { method: 'DELETE', headers: { cookie } });
+
+  // Excel 日期序列号必须按 UTC 纪元换算，避免非 UTC 时区整体偏移一天
+  const excelDateName = `导入Excel日期-${Date.now()}`;
+  const excelDateImport = await request('/api/assets/import', {
+    method: 'POST', headers: { cookie, 'Content-Type': 'application/json' },
+    body: JSON.stringify({ assets: [{ '关联项目': importProjectName, '资产名称': excelDateName, '资产类型': '服务器', '维保到期日': 46000 }] })
+  });
+  assert(excelDateImport.status === 200 && excelDateImport.data.created === 1, `Excel 日期导入失败: ${JSON.stringify(excelDateImport.data)}`);
+  const excelDateImportedList = await request('/api/assets?all=1', { headers: { cookie } });
+  const excelDateImported = (excelDateImportedList.data.data || []).find(item => item.name === excelDateName);
+  assert(excelDateImported && excelDateImported.maintainExpiryDate === '2025-12-09', `Excel 日期序列号换算错误: ${excelDateImported && excelDateImported.maintainExpiryDate}`);
+  if (excelDateImported) await request(`/api/assets/${excelDateImported.id}`, { method: 'DELETE', headers: { cookie } });
 
   // 非法 JSON 请求体属于客户端错误，应返回 400 而不是 500
   const invalidJson = await request('/api/assets/import', {

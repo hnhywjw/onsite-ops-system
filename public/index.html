@@ -7418,6 +7418,9 @@
       if (state.assetFilterProjectId) {
         sourceAssets = sourceAssets.filter(item => item.projectId === state.assetFilterProjectId);
       }
+      // 项目筛选变化后丢弃不可见的勾选项，避免批量删除/导出误操作其它项目的资产。
+      const visibleAssetIds = new Set(sourceAssets.map(item => item.id));
+      state.selectedAssetIds = (state.selectedAssetIds || []).filter(id => visibleAssetIds.has(id));
       if (state.assetProjectSort) {
         sourceAssets.sort((a, b) => {
           const pa = (a.projectId || '').toLowerCase();
@@ -7561,7 +7564,8 @@
       return filterByUserProject(state.inspectionPlans)
         .filter(item => {
           if (!item.nextDate) return false;
-          if (isInspectionPlanDone(item.status)) return false;
+          // 逾期只看计划的下次巡检日；已执行计划的下次巡检日会顺延，不会再命中这里。
+          if (String(item.status || '') === '已停用') return false;
           return item.nextDate <= nowDateStr;
         })
         .map(item => {
@@ -7956,7 +7960,7 @@
       const incidentTotalPages = Math.max(1, Math.ceil(sourceIncidents.length / incidentPageSize));
       state.incidentPage = Math.min(Math.max(1, state.incidentPage || 1), incidentTotalPages);
       const incidentStart = (state.incidentPage - 1) * incidentPageSize;
-      const incidentRows = sourceIncidents.slice().sort((a, b) => b.occurredAt.localeCompare(a.occurredAt)).slice(incidentStart, incidentStart + incidentPageSize);
+      const incidentRows = sourceIncidents.slice().sort((a, b) => String(b.occurredAt || b.createdAt || '').localeCompare(String(a.occurredAt || a.createdAt || ''))).slice(incidentStart, incidentStart + incidentPageSize);
       document.getElementById('incidentTable').innerHTML = incidentRows.map(item => `<tr><td>${esc(item.title)}</td><td>${esc(item.faultType || '-')}</td><td>${esc(item.severity || '-')}</td><td>${esc(item.slaStatus)}</td><td>${esc(item.status)}</td><td>${esc(item.resolution || '-')}</td><td>${esc(item.occurredAt || '-')}</td><td>${esc(formatProjectDisplayById(item.projectId))}</td><td><div class="toolbar">${canMutateOwnedRecord(item, 'createdBy') ? `<button class="secondary" data-action="edit-incident" data-id="${item.id}" type="button">修改</button><button class="secondary" data-action="delete-incident" data-id="${item.id}" type="button">删除</button>` : '-'}</div></td></tr>`).join('') || '<tr><td colspan="9">暂无数据</td></tr>';
       document.getElementById('incidentPageInfo').textContent = `第 ${state.incidentPage} / ${incidentTotalPages} 页`;
       document.getElementById('incidentPrevBtn').disabled = state.incidentPage <= 1;
@@ -9224,7 +9228,7 @@
       const executionRate = duePlans.length ? `${Math.round((executedPlanCount / duePlans.length) * 100)}%` : '0%';
       const abnormalCount = periodExecutions.filter(item => item.result === '异常').length;
       const todayKey = formatLocalDateKey(new Date());
-      const overdueCount = userPlans.filter(item => item.nextDate && item.nextDate < todayKey && !isInspectionPlanDone(item.status)).length;
+      const overdueCount = userPlans.filter(item => item.nextDate && item.nextDate < todayKey && String(item.status || '') !== '已停用').length;
       const totalProjects = userProjects.length;
       const userLogs = filterByUserProject(state.logs);
       const totalLogs = userLogs.length;

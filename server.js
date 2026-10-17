@@ -171,8 +171,6 @@ function shouldInjectDbWriteFailure() {
   }
 }
 const allowedUserRoles = ['admin', 'engineer', 'viewer', 'auditor', 'customer'];
-// 巡检计划进入这些状态即视为本轮已处理，不再计入待办与逾期提醒。
-const inspectionPlanDoneStatuses = ['已完成', '已执行', '异常待处理'];
 const incidentStatusOptions = ['处理中', '已恢复', '已关闭'];
 const incidentSlaStatusOptions = ['正常', '预警', '超时'];
 const incidentSeverityOptions = ['低', '中', '高'];
@@ -5280,8 +5278,15 @@ function isTrustedProxyRequest(req) {
 function getRequestClientIp(req) {
   const remoteAddress = req.socket?.remoteAddress || '';
   if (isTrustedProxyRequest(req)) {
-    const forwarded = String(req.headers['x-forwarded-for'] || '').split(',')[0].trim();
-    if (forwarded) return forwarded;
+    // X-Forwarded-For 的首段由客户端自填，取最后一跳（可信代理追加）才能避免伪造限流键。
+    const forwardedList = String(req.headers['x-forwarded-for'] || '')
+      .split(',')
+      .map(item => item.trim().replace(/^\[|\]$/g, ''))
+      .filter(Boolean);
+    const forwarded = forwardedList[forwardedList.length - 1];
+    if (forwarded && net.isIP(forwarded)) return forwarded;
+    const realIp = String(req.headers['x-real-ip'] || '').trim().replace(/^\[|\]$/g, '');
+    if (realIp && net.isIP(realIp)) return realIp;
   }
   return remoteAddress || 'unknown';
 }
@@ -5435,6 +5440,17 @@ function buildClearSessionCookie(req, systemConfig = {}) {
   const sameSite = configured === 'none' && secure ? 'None' : 'Lax';
   const partitioned = sameSite === 'None' ? '; Partitioned' : '';
   return `sessionToken=; HttpOnly; Path=/; Max-Age=0; SameSite=${sameSite}${secure ? '; Secure' : ''}${partitioned}`;
+}
+
+// OIDC state 必须与发起登录的浏览器绑定，否则攻击者可用自己的 state 诱导受害者完成登录回调（登录 CSRF）。
+function buildOidcStateCookie(req, systemConfig, state, maxAgeSeconds = 600) {
+  const secure = shouldUseSecureCookies(req, systemConfig);
+  return `oidcState=${String(state || '')}; HttpOnly; Path=/api/auth/oidc; SameSite=Lax; Max-Age=${maxAgeSeconds}${secure ? '; Secure' : ''}`;
+}
+
+function buildClearOidcStateCookie(req, systemConfig) {
+  const secure = shouldUseSecureCookies(req, systemConfig);
+  return `oidcState=; HttpOnly; Path=/api/auth/oidc; SameSite=Lax; Max-Age=0${secure ? '; Secure' : ''}`;
 }
 
 function resolveSafeChildPath(baseDir, relativePath) {
@@ -5992,15 +6008,21 @@ function checkExpiryNotifications(db) {
   }
 
   for (const plan of db.inspectionPlans || []) {
-    if (!plan.nextDate || inspectionPlanDoneStatuses.includes(String(plan.status || ''))) continue;
+    // 仅停用的计划不再提醒。已执行的计划会把 nextDate 顺延到下一轮，
+    // 若按状态跳过会导致首轮执行后永久失去后续提醒。
+    if (!plan.nextDate || String(plan.status || '') === '已停用') continue;
     const todayKey = formatDateKey(new Date());
     const nextDate = parseDateOnly(plan.nextDate);
     const today = parseDateOnly(todayKey);
     if (!nextDate || !today) continue;
     const daysLeft = Math.round((nextDate.getTime() - today.getTime()) / 86400000);
     if (daysLeft <= 7) {
+      // 按「计划 + 本轮到期日」去重，保证每个巡检周期都能产生一条提醒。
       const existingNotifications = (db.notifications || []).filter(
-        n => n.category === 'inspection-overdue' && n.projectId === plan.projectId && String(n.content || '').includes(plan.title || '-') && getNotificationCreatedAtMs(n) > (now - thirtyDaysMs)
+        n => n.category === 'inspection-overdue'
+          && n.sourceType === 'inspectionPlan'
+          && n.sourceId === plan.id
+          && String(n.content || '').includes(plan.nextDate)
       );
       if (existingNotifications.length === 0) {
         createNotification(db, plan.projectId, '巡检计划提醒', `巡检计划 ${plan.title || '-'} 将于 ${plan.nextDate} 到期（${daysLeft < 0 ? '已逾期 ' + Math.abs(daysLeft) + ' 天' : daysLeft === 0 ? '今日到期' : '剩余 ' + daysLeft + ' 天'}）`, daysLeft <= 0 ? 'warning' : 'info', 'inspection-overdue', 'inspectionPlan', plan.id);
@@ -6127,6 +6149,20 @@ function refreshInspectionPlanFromExecutions(db, planId) {
   }
 }
 
+// 按巡检周期从指定日期推进到下一定检日，用于执行记录未填下次巡检日时自动顺延。
+function computeNextInspectionDateKey(cycle, baseDateKey) {
+  const base = parseDateOnly(baseDateKey);
+  if (!base) return '';
+  if (cycle === 'daily') return dateToKey(addDays(base, 1));
+  if (cycle === 'weekly') return dateToKey(addDays(base, 7));
+  if (cycle === 'monthly' || cycle === 'quarterly') {
+    const next = new Date(base.getTime());
+    next.setUTCMonth(next.getUTCMonth() + (cycle === 'quarterly' ? 3 : 1));
+    return dateToKey(next);
+  }
+  return dateToKey(addDays(base, 30));
+}
+
 function startOfWeek(date) {
   const d = new Date(Date.UTC(date.getUTCFullYear(), date.getUTCMonth(), date.getUTCDate()));
   const day = d.getUTCDay() || 7;
@@ -6183,24 +6219,6 @@ function endOfMonth(date) {
 
 function dateToKey(date) {
   return `${date.getUTCFullYear()}-${String(date.getUTCMonth() + 1).padStart(2, '0')}-${String(date.getUTCDate()).padStart(2, '0')}`;
-}
-
-function computeRolledInspectionNextDate(plan, today) {
-  if (!plan || !plan.nextDate || plan.nextDate >= today) return plan && plan.nextDate ? plan.nextDate : '';
-  const cycleAdd = { daily: 1, weekly: 7, monthly: 30, quarterly: 91 }[plan.cycle] || 30;
-  let d = parseDateOnly(plan.nextDate);
-  if (!d) return plan.nextDate;
-  if (plan.cycle === 'monthly' || plan.cycle === 'quarterly') {
-    const incMonths = plan.cycle === 'quarterly' ? 3 : 1;
-    while (dateToKey(d) < today) {
-      d.setUTCMonth(d.getUTCMonth() + incMonths);
-    }
-  } else {
-    while (dateToKey(d) < today) {
-      d.setUTCDate(d.getUTCDate() + cycleAdd);
-    }
-  }
-  return dateToKey(d);
 }
 
 function getDateRangeFromPeriod(period, anchorDate = '', rangeStart = '', rangeEnd = '') {
@@ -8447,7 +8465,10 @@ const requestHandler = async (req, res) => {
       authUrl.searchParams.set('nonce', nonce);
       authUrl.searchParams.set('code_challenge', codeChallenge);
       authUrl.searchParams.set('code_challenge_method', 'S256');
-      res.writeHead(302, buildSecurityHeaders({ Location: authUrl.toString() }));
+      res.writeHead(302, buildSecurityHeaders({
+        Location: authUrl.toString(),
+        'Set-Cookie': buildOidcStateCookie(req, db.systemConfig, state)
+      }));
       return res.end();
     }
 
@@ -8461,6 +8482,12 @@ const requestHandler = async (req, res) => {
       const stateData = (db.runtimeState.oidcState || {})[state];
       if (!stateData || (nowMs() - (stateData.createdAt || 0)) > 600000) {
         return json(res, 401, { message: '授权状态已过期' });
+      }
+      const stateCookie = parseCookies(req).oidcState || '';
+      if (!stateCookie || stateCookie !== state) {
+        delete db.runtimeState.oidcState[state];
+        await writeDb(db, { silent: true });
+        return json(res, 401, { message: '授权状态无效，请重新登录' }, { 'Set-Cookie': buildClearOidcStateCookie(req, db.systemConfig) });
       }
       delete db.runtimeState.oidcState[state];
       const oidcConfig = await fetchOidcConfig(issuer);
@@ -8517,7 +8544,10 @@ const requestHandler = async (req, res) => {
         }
         if (localUser.status === 'pending' || localUser.status === 'disabled' || localUser.status === 'rejected') {
           await writeDb(db);
-          res.writeHead(302, buildSecurityHeaders({ Location: '/?auth=pending' }));
+          res.writeHead(302, buildSecurityHeaders({
+            Location: '/?auth=pending',
+            'Set-Cookie': buildClearOidcStateCookie(req, db.systemConfig)
+          }));
           return res.end();
         }
         const token = crypto.randomBytes(24).toString('hex');
@@ -8527,7 +8557,10 @@ const requestHandler = async (req, res) => {
         await writeDb(db, { replaceCollections: ['sessions'] });
         res.writeHead(302, buildSecurityHeaders({
           Location: '/',
-          'Set-Cookie': buildSessionCookie(req, token, db.systemConfig)
+          'Set-Cookie': [
+            buildSessionCookie(req, token, db.systemConfig),
+            buildClearOidcStateCookie(req, db.systemConfig)
+          ]
         }));
         return res.end();
       } catch (err) {
@@ -9340,8 +9373,8 @@ const requestHandler = async (req, res) => {
         let maintainExpiryDate = '';
         if (rawDate != null && rawDate !== '') {
           if (typeof rawDate === 'number') {
-            const excelEpoch = new Date(1899, 11, 30);
-            const d = new Date(excelEpoch.getTime() + rawDate * 86400000);
+            // Excel 序列号以 UTC 纪元计日，必须用 UTC 构造，否则非 UTC 时区会整体偏移一天。
+            const d = new Date(Date.UTC(1899, 11, 30) + Math.round(rawDate) * 86400000);
             if (!Number.isNaN(d.getTime())) maintainExpiryDate = d.toISOString().slice(0, 10);
           } else {
             const str = String(rawDate).trim();
@@ -10150,12 +10183,21 @@ const requestHandler = async (req, res) => {
           fs.mkdirSync(docDir, { recursive: true });
           target.attachmentName = sanitizeUploadFilename(filePart.filename);
           const nextAttachmentPath = resolveSafeChildPath(docDir, target.attachmentName);
-          // 替换附件时删除旧文件，避免上传目录残留孤儿附件。
-          if (target.attachmentPath && target.attachmentPath !== nextAttachmentPath) {
-            try { fs.rmSync(target.attachmentPath, { force: true }); } catch (_) {}
+          const previousAttachmentPath = target.attachmentPath || '';
+          // 先写临时文件再原子重命名，避免中途失败导致旧附件已被删除、新附件写入一半。
+          const tempAttachmentPath = `${nextAttachmentPath}.tmp-${crypto.randomBytes(6).toString('hex')}`;
+          fs.writeFileSync(tempAttachmentPath, filePart.data);
+          try {
+            fs.renameSync(tempAttachmentPath, nextAttachmentPath);
+          } catch (error) {
+            try { fs.rmSync(tempAttachmentPath, { force: true }); } catch (_) {}
+            throw error;
+          }
+          // 新附件落盘成功后再清理旧文件，避免上传目录残留孤儿附件。
+          if (previousAttachmentPath && previousAttachmentPath !== nextAttachmentPath) {
+            try { fs.rmSync(previousAttachmentPath, { force: true }); } catch (_) {}
           }
           target.attachmentPath = nextAttachmentPath;
-          fs.writeFileSync(target.attachmentPath, filePart.data);
           target.attachmentSize = filePart.data.length;
         }
         // 与 JSON 分支保持一致：非设备类型资料必须存在附件。
@@ -10230,15 +10272,16 @@ const requestHandler = async (req, res) => {
       if (index === -1) return json(res, 404, { message: '资料不存在' });
       const target = db.documents[index];
       if (!canDeleteOwnedRecord(user, target, target.createdBy || '')) return json(res, 403, { message: '仅支持删除自己创建的资料' });
+      db.documents.splice(index, 1);
+      appendAuditLog(db, user, 'delete', 'document', docId, `删除资料 ${target.title}`, target.projectId);
+      await writeDb(db);
+      // 先落库再清理文件：写库失败时保留附件，避免记录还在但文件已丢失。
       if (target.attachmentPath) {
         try {
           const docDir = path.join(documentsUploadDir, docId);
           fs.rmSync(docDir, { recursive: true, force: true });
         } catch (_) {}
       }
-      db.documents.splice(index, 1);
-      appendAuditLog(db, user, 'delete', 'document', docId, `删除资料 ${target.title}`, target.projectId);
-      await writeDb(db);
       return json(res, 200, { ok: true });
     }
 
@@ -10337,9 +10380,8 @@ const requestHandler = async (req, res) => {
     if (req.method === 'GET' && pathname === '/api/inspection-plans') {
       const user = requireAuth(req, res, db);
       if (!user) return;
-      const today = formatDateKey(new Date());
       const list = filterByProjectScope(db.inspectionPlans || [], user, item => item.projectId)
-        .map(plan => sanitizeInspectionPlanForViewer({ ...plan, nextDate: computeRolledInspectionNextDate(plan, today) }, user));
+        .map(plan => sanitizeInspectionPlanForViewer(plan, user));
       const query = Object.fromEntries(reqUrl.searchParams);
       const sorted = parseSortQuery(query, list, 'createdAt');
       return json(res, 200, paginateResult(sorted, query));
@@ -10445,19 +10487,26 @@ const requestHandler = async (req, res) => {
         return json(res, 403, { message: '无权执行该巡检计划' });
       }
       if (!['正常', '异常'].includes(String(body.result || '正常'))) return json(res, 400, { message: '无效的巡检结果' });
+      const executedAt = body.executedAt || now().slice(0, 16);
+      const executedDateKey = String(executedAt).slice(0, 10);
+      let nextDate = body.nextDate || plan.nextDate || '';
+      // 未填下次巡检日或原日期已过期时按周期自动顺延，避免计划执行后仍停留在逾期状态。
+      if (!nextDate || nextDate < executedDateKey) {
+        nextDate = computeNextInspectionDateKey(plan.cycle, executedDateKey) || nextDate;
+      }
       const execution = {
         id: id('inspectionExec'),
         planId: plan.id,
         projectId: plan.projectId,
         assetId: plan.assetId || '',
-        executedAt: body.executedAt || now().slice(0, 16),
+        executedAt,
         executor: body.executor || user.name,
         checklist: body.checklist || '',
         result: body.result || '正常',
         issue: body.issue || '',
         suggestion: body.suggestion || '',
         attachment: normalizeInspectionAttachment(body.attachment),
-        nextDate: body.nextDate || plan.nextDate || '',
+        nextDate,
         createdBy: user.id,
         createdAt: now()
       };
@@ -10955,9 +11004,13 @@ const requestHandler = async (req, res) => {
       if (body.severity !== undefined && !incidentSeverityOptions.includes(String(body.severity))) return json(res, 400, { message: '无效的严重级别' });
       const incidentTitle = String(body.title || '').trim();
       if (!incidentTitle) return json(res, 400, { message: '故障标题不能为空' });
+      const incidentOccurredAt = String(body.occurredAt || '').trim();
+      if (!incidentOccurredAt || Number.isNaN(new Date(incidentOccurredAt).getTime())) {
+        return json(res, 400, { message: '请选择有效的故障发生时间' });
+      }
       const incidentAsset = requireExistingAsset(body.assetId, db);
       if (body.assetId && (!incidentAsset || incidentAsset.projectId !== projectId)) return json(res, 400, { message: '关联资产不存在或不属于当前项目' });
-      const item = { id: id('incident'), projectId, assetId: body.assetId || '', title: incidentTitle, faultType: body.faultType || '', severity: body.severity || '中', slaStatus: body.slaStatus || '正常', status: body.status || '处理中', description: body.description || '', occurredAt: body.occurredAt || '', resolution: body.resolution || '', createdBy: user.id, createdAt: now() };
+      const item = { id: id('incident'), projectId, assetId: body.assetId || '', title: incidentTitle, faultType: body.faultType || '', severity: body.severity || '中', slaStatus: body.slaStatus || '正常', status: body.status || '处理中', description: body.description || '', occurredAt: incidentOccurredAt, resolution: body.resolution || '', createdBy: user.id, createdAt: now() };
       db.incidentRecords.push(item);
       appendAuditLog(db, user, 'create', 'incident', item.id, `登记故障 ${item.title}`, projectId);
       if (item.slaStatus === '超时') createNotification(db, projectId, 'SLA 超时提醒', `${item.title} 已超时`, 'error', 'incident', 'incident', item.id);
@@ -10987,7 +11040,13 @@ const requestHandler = async (req, res) => {
       if (body.slaStatus !== undefined) target.slaStatus = body.slaStatus;
       if (body.status !== undefined) target.status = body.status;
       if (body.description !== undefined) target.description = body.description;
-      if (body.occurredAt !== undefined) target.occurredAt = body.occurredAt;
+      if (body.occurredAt !== undefined) {
+        const nextOccurredAt = String(body.occurredAt || '').trim();
+        if (!nextOccurredAt || Number.isNaN(new Date(nextOccurredAt).getTime())) {
+          return json(res, 400, { message: '请选择有效的故障发生时间' });
+        }
+        target.occurredAt = nextOccurredAt;
+      }
       if (body.resolution !== undefined) target.resolution = body.resolution;
       if (user.role === 'admin' && body.projectId !== undefined) {
         if (!requireExistingProject(body.projectId, db)) return json(res, 400, { message: '关联项目不存在' });
