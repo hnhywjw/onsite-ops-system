@@ -5580,7 +5580,8 @@ async function executeAiInspectionTask(db, task, options = {}) {
   if (existing && !task.cycle) {
     task.status = '已完成';
     task.completedAt = task.completedAt || existing.createdAt || now();
-    return existing;
+    // 调度器需要把「已存在结果」的任务状态落库，否则重新启用的单次任务会一直停留在「待执行」。
+    return options.persist === true ? { result: existing, changed: true } : existing;
   }
   task.status = '执行中';
   let realData = null;

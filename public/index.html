@@ -3934,10 +3934,17 @@
             <div class="alert-item-host">${esc(a.host || '')}</div>
             <div class="alert-item-time">${a.time}${a.count > 1 ? ' · 共' + a.count + '次告警' : ''}</div>
           </div>
-          <button class="alert-item-dismiss" onclick="event.stopPropagation();dismissAlert('${attrEsc(a.assetId)}')">确认</button>
+          <button class="alert-item-dismiss" type="button" data-action="dismiss-alert" data-asset-id="${attrEsc(a.assetId)}">确认</button>
         </div>
       `).join('') || '<div style="padding:16px;text-align:center;color:#9ca3af;font-size:13px;">暂无告警</div>';
     }
+
+    document.getElementById('alertList').addEventListener('click', event => {
+      const button = event.target.closest('button[data-action="dismiss-alert"]');
+      if (!button) return;
+      event.stopPropagation();
+      dismissAlert(button.dataset.assetId);
+    });
 
     document.getElementById('alertBadge').addEventListener('click', () => {
       toggleAlertPopup(true);
@@ -4341,9 +4348,12 @@
     function buildUserReportRows(period) {
       if (state.user.role === 'customer') return [];
       const range = getCurrentDateRange(period);
-      const targetUsers = state.user.role === 'admin'
+      // 个人报表按用户所属项目统计，未绑定项目（如管理员账号）无法生成，避免展示点击后必然失败的入口。
+      const projectIds = new Set((state.projects || []).map(item => item.id));
+      const targetUsers = (state.user.role === 'admin'
         ? state.users
-        : state.users.filter(item => item.id === state.user.id);
+        : state.users.filter(item => item.id === state.user.id))
+        .filter(item => item.projectId && projectIds.has(item.projectId));
       return targetUsers.map(user => {
         const metrics = buildFrontEndMetrics({ userId: user.id, projectId: user.projectId, rangeStart: range.rangeStart, rangeEnd: range.rangeEnd });
         return {
@@ -7611,7 +7621,7 @@
             const diff = Math.ceil((new Date(item.warrantyExpiryDate) - new Date()) / 86400000);
             warrantyDays = diff > 0 ? `${diff} 天` : (diff === 0 ? '今天到期' : '已过期');
           }
-          return `<tr><td>${esc(item.title)}</td><td>${typeLabels[item.type] || item.type}</td><td>${esc(formatProjectDisplayById(item.projectId))}</td><td>${brandModel}</td><td>${warrantyDays}</td><td>${esc(item.createdAt || '-')}</td><td><div class="toolbar" style="white-space:nowrap;">${viewBtn}${displayActions}</div></td></tr>`;
+          return `<tr><td>${esc(item.title)}</td><td>${esc(typeLabels[item.type] || item.type)}</td><td>${esc(formatProjectDisplayById(item.projectId))}</td><td>${brandModel}</td><td>${warrantyDays}</td><td>${esc(item.createdAt || '-')}</td><td><div class="toolbar" style="white-space:nowrap;">${viewBtn}${displayActions}</div></td></tr>`;
         }).join('') || '<tr><td colspan="7">暂无数据</td></tr>';
         const totalPages = Math.max(1, Math.ceil((result.total || 0) / pageSize));
         // 筛选后结果可能不足当前页，需钳制页码并重新加载，避免出现「第 3 / 1 页」的空页。
@@ -8000,7 +8010,7 @@
       state.aiInspectionTargetPage = Math.min(Math.max(1, state.aiInspectionTargetPage || 1), targetTotalPages);
       const targetStart = (state.aiInspectionTargetPage - 1) * targetPageSize;
       const targetRows = targetRowsAll.slice(targetStart, targetStart + targetPageSize);
-      document.getElementById('aiInspectionTargetTable').innerHTML = targetRows.map(item => `<tr><td>${esc(item.name)}</td><td>${esc(getAiInspectionCategoryLabel(item.category))}</td><td>${esc(item.address)}</td><td title="认证方式：${item.authType}">${esc(getAiInspectionProtocolLabel(item.protocol))}${item.port ? `:${esc(item.port)}` : ''}</td><td>${esc(item.systemVersion || '-')}</td><td>${esc(formatProjectDisplayById(item.projectId))}</td><td>${esc(item.createdAt || '-')}</td><td><div class="toolbar">${canMutateOwnedRecord(item, 'createdBy') ? `<button class="secondary" data-action="edit-ai-target" data-id="${item.id}" type="button">修改</button><button class="secondary" data-action="delete-ai-target" data-id="${item.id}" type="button">删除</button>` : '-'}</div></td></tr>`).join('') || '<tr><td colspan="8">暂无数据</td></tr>';
+      document.getElementById('aiInspectionTargetTable').innerHTML = targetRows.map(item => `<tr><td>${esc(item.name)}</td><td>${esc(getAiInspectionCategoryLabel(item.category))}</td><td>${esc(item.address)}</td><td title="认证方式：${attrEsc(item.authType)}">${esc(getAiInspectionProtocolLabel(item.protocol))}${item.port ? `:${esc(item.port)}` : ''}</td><td>${esc(item.systemVersion || '-')}</td><td>${esc(formatProjectDisplayById(item.projectId))}</td><td>${esc(item.createdAt || '-')}</td><td><div class="toolbar">${canMutateOwnedRecord(item, 'createdBy') ? `<button class="secondary" data-action="edit-ai-target" data-id="${attrEsc(item.id)}" type="button">修改</button><button class="secondary" data-action="delete-ai-target" data-id="${attrEsc(item.id)}" type="button">删除</button>` : '-'}</div></td></tr>`).join('') || '<tr><td colspan="8">暂无数据</td></tr>';
       document.getElementById('aiInspectionTargetPageInfo').textContent = `第 ${state.aiInspectionTargetPage} / ${targetTotalPages} 页`;
       document.getElementById('aiInspectionTargetPrevBtn').disabled = state.aiInspectionTargetPage <= 1;
       document.getElementById('aiInspectionTargetNextBtn').disabled = state.aiInspectionTargetPage >= targetTotalPages;
@@ -8096,7 +8106,7 @@
       document.getElementById('aiInspectionReportTable').innerHTML = reportRows.map(item => {
         const task = state.aiInspectionTasks.find(entry => entry.id === item.taskId);
         const target = state.aiInspectionTargets.find(entry => entry.id === item.targetId);
-        return `<tr><td>${esc(target?.name || '-')}</td><td>${esc(task?.title || '-')}</td><td>${esc(task?.executedAt || item.createdAt || '-')}</td><td>${esc(item.level)}</td><td>${esc(item.score)}</td><td>${esc(item.createdAt || '-')}</td><td><button class="secondary" onclick="downloadReport('/api/reports/ai-inspection/results/${item.id}/html','${esc(item.id)}_report.html')">下载HTML报告</button> <button class="secondary" onclick="downloadReport('/api/reports/ai-inspection/results/${item.id}/pptx','${esc(item.id)}_report.pptx')">下载PPT报告</button>${canMutateOwnedRecord(item, 'createdBy') ? ` <button class="secondary" data-action="delete-ai-result" data-id="${item.id}" type="button">删除</button>` : ''}</td></tr>`;
+        return `<tr><td>${esc(target?.name || '-')}</td><td>${esc(task?.title || '-')}</td><td>${esc(task?.executedAt || item.createdAt || '-')}</td><td>${esc(item.level)}</td><td>${esc(item.score)}</td><td>${esc(item.createdAt || '-')}</td><td><button class="secondary" type="button" data-action="download-ai-report" data-id="${attrEsc(item.id)}" data-format="html">下载HTML报告</button> <button class="secondary" type="button" data-action="download-ai-report" data-id="${attrEsc(item.id)}" data-format="pptx">下载PPT报告</button>${canMutateOwnedRecord(item, 'createdBy') ? ` <button class="secondary" data-action="delete-ai-result" data-id="${attrEsc(item.id)}" type="button">删除</button>` : ''}</td></tr>`;
       }).join('') || '<tr><td colspan="7">暂无可导出的巡检报告</td></tr>';
       document.getElementById('aiInspectionReportPageInfo').textContent = `第 ${state.aiInspectionReportPage} / ${reportTotalPages} 页`;
       document.getElementById('aiInspectionReportPrevBtn').disabled = state.aiInspectionReportPage <= 1;
@@ -9400,7 +9410,7 @@
           <td>${esc(item.totalHours)}</td>
           <td>${esc(item.metric3)}</td>
           <td>${esc(item.metric4)}</td>
-          <td>${dimension === 'inspection' ? `<button class="secondary" onclick='openReport(${JSON.stringify(item.htmlHref)})'>查看HTML</button> <button class="secondary" onclick='downloadReport(${JSON.stringify(item.csvHref)}, ${JSON.stringify(`inspection_report_${item.id}.csv`)})'>下载CSV</button>` : `<button class="secondary" onclick='openReport(${JSON.stringify(item.htmlHref)})'>查看HTML</button> <button class="secondary" onclick='downloadReport(${JSON.stringify(item.href)}, ${JSON.stringify(`report_${item.id}.pptx`)})'>${esc(item.actionLabel || '下载PPTX')}</button>`}</td>
+          <td>${dimension === 'inspection' ? `<button class="secondary" type="button" data-action="open-report" data-href="${attrEsc(item.htmlHref)}">查看HTML</button> <button class="secondary" type="button" data-action="download-report" data-href="${attrEsc(item.csvHref)}" data-filename="${attrEsc(`inspection_report_${item.id}.csv`)}">下载CSV</button>` : `<button class="secondary" type="button" data-action="open-report" data-href="${attrEsc(item.htmlHref)}">查看HTML</button> <button class="secondary" type="button" data-action="download-report" data-href="${attrEsc(item.href)}" data-filename="${attrEsc(`report_${item.id}.pptx`)}">${esc(item.actionLabel || '下载PPTX')}</button>`}</td>
         </tr>
       `).join('') || '<tr><td colspan="7">暂无数据</td></tr>';
       document.getElementById('reportPageInfo').textContent = `第 ${state.reportPage} / ${reportTotalPages} 页`;
@@ -10725,6 +10735,17 @@
       state.reportPage = Math.min(state.reportPage + 1, state.reportTotalPages || 1);
       refreshReports();
     });
+    document.getElementById('reportTable').addEventListener('click', async event => {
+      const button = event.target.closest('button[data-action]');
+      if (!button) return;
+      if (button.dataset.action === 'open-report') {
+        await openReport(button.dataset.href || '');
+        return;
+      }
+      if (button.dataset.action === 'download-report') {
+        await downloadReport(button.dataset.href || '', button.dataset.filename || 'report');
+      }
+    });
     document.getElementById('workloadPeriod').addEventListener('change', () => {
       toggleWorkloadCustomRange();
       refreshReports();
@@ -11671,6 +11692,14 @@
       const button = event.target.closest('button[data-action]');
       if (!button) return;
       try {
+        if (button.dataset.action === 'download-ai-report') {
+          const format = button.dataset.format === 'pptx' ? 'pptx' : 'html';
+          await downloadReport(
+            `/api/reports/ai-inspection/results/${encodeURIComponent(button.dataset.id)}/${format}`,
+            `${button.dataset.id}_report.${format}`
+          );
+          return;
+        }
         if (button.dataset.action === 'delete-ai-result') {
           if (!await showConfirm('确认删除该巡检结果吗？')) return;
           await api(`/api/ai-inspection/results/${button.dataset.id}`, { method: 'DELETE', body: '{}' });
