@@ -3603,6 +3603,9 @@
   </div>
 
   <script>
+    // 工作汇报列表每页固定 8 条，渲染与定位到指定汇报时共用同一值。
+    const WORK_REPORT_LIST_PAGE_SIZE = 8;
+
     const state = {
       user: null,
       csrfToken: '',
@@ -4876,7 +4879,7 @@
         const rows = (state.workReports || []).slice().sort((a, b) => String(b.rangeStart).localeCompare(String(a.rangeStart)));
         const idx = rows.findIndex(entry => entry.id === item.id);
         if (idx >= 0) {
-          state.workReportListPage = Math.floor(idx / 10) + 1;
+          state.workReportListPage = Math.floor(idx / WORK_REPORT_LIST_PAGE_SIZE) + 1;
           renderWorkReportList();
         }
       }
@@ -4931,7 +4934,7 @@
     }
 
     function renderWorkReportList() {
-      const pageSize = 10;
+      const pageSize = WORK_REPORT_LIST_PAGE_SIZE;
       const rows = (state.workReports || [])
         .slice()
         .sort((a, b) => String(b.rangeStart).localeCompare(String(a.rangeStart)));
