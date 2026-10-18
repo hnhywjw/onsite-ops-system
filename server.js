@@ -4871,6 +4871,20 @@ function isCsrfExemptPath(pathname) {
     || pathname.startsWith('/api/auth/oidc/');
 }
 
+// 强制绑定动态令牌期间仍需访问的接口：绑定/关闭、会话信息、退出、健康检查与验证码。
+function isTwoFactorEnrollmentExemptPath(pathname) {
+  return pathname === '/api/health'
+    || pathname === '/api/ready'
+    || pathname === '/api/captcha'
+    || pathname === '/api/session'
+    || pathname === '/api/login'
+    || pathname === '/api/login/2fa'
+    || pathname === '/api/logout'
+    || pathname === '/api/https-certificate/notice'
+    || pathname.startsWith('/api/account/2fa')
+    || pathname.startsWith('/api/auth/');
+}
+
 function validateCsrf(req, res, db, pathname) {
   if (!isUnsafeMethod(req.method) || isCsrfExemptPath(pathname)) return true;
   const sessionToken = getSessionToken(req);
@@ -8461,6 +8475,18 @@ const requestHandler = async (req, res) => {
     refreshMonitorTargetPolicy(db.systemConfig);
     if (!validateCsrf(req, res, db, pathname)) return;
 
+    // 管理员可要求账号必须启用动态令牌；未完成绑定前只放行绑定所需接口，
+    // 避免「已要求但可继续用密码操作」导致策略形同虚设。
+    if (pathname.startsWith('/api/') && !isTwoFactorEnrollmentExemptPath(pathname)) {
+      const gateUser = getAuthUser(req, db);
+      if (gateUser && gateUser.twoFactorEnforced && !gateUser.twoFactorEnabled && !String(gateUser.username || '').startsWith('oidc_')) {
+        return json(res, 403, {
+          code: 'two_factor_enrollment_required',
+          message: '管理员要求该账号启用动态令牌，请先完成绑定'
+        });
+      }
+    }
+
     tryLazyInitHttps(db);
 
     if (db.systemConfig?.httpLoginDisabled && !isEncryptedRequest(req)) {
@@ -8662,6 +8688,7 @@ const requestHandler = async (req, res) => {
       return json(res, 200, {
         enabled: Boolean(user.twoFactorEnabled),
         enabledAt: user.twoFactorEnabledAt || '',
+        enforced: Boolean(user.twoFactorEnforced),
         pending: Boolean(user.twoFactorPendingSecret),
         recoveryCodesRemaining: Array.isArray(user.twoFactorRecoveryCodeHashes) ? user.twoFactorRecoveryCodeHashes.length : 0
       });
@@ -8721,6 +8748,9 @@ const requestHandler = async (req, res) => {
       if (!user) return;
       if (!user.twoFactorEnabled) {
         return json(res, 400, { message: '动态令牌未启用' });
+      }
+      if (user.twoFactorEnforced) {
+        return json(res, 400, { message: '管理员已要求该账号启用动态令牌，无法自行关闭' });
       }
       const body = await readBody(req);
       if (!verifyTwoFactorPassword(user, body.password)) {
@@ -9360,6 +9390,7 @@ const requestHandler = async (req, res) => {
         };
         created.securityQuestion = String(body.securityQuestion || '').trim();
         created.securityAnswerHash = body.securityAnswer ? hash(body.securityAnswer) : '';
+        created.twoFactorEnforced = body.twoFactorEnforced === true;
         lockDb.users.push(created);
         appendAuditLog(lockDb, user, 'create', 'user', created.id, `创建人员 ${created.name}`, created.projectId);
         await writeDb(lockDb);
@@ -9390,7 +9421,11 @@ const requestHandler = async (req, res) => {
       clearTwoFactorFields(target);
       appendAuditLog(db, user, 'update', 'user', target.id, `重置动态令牌 ${target.name}`, target.projectId);
       await writeDb(db);
-      return json(res, 200, { message: '动态令牌已重置，该账号下次登录无需动态码' });
+      return json(res, 200, {
+        message: target.twoFactorEnforced
+          ? '动态令牌已重置，该账号下次登录后需重新绑定'
+          : '动态令牌已重置，该账号下次登录无需动态码'
+      });
     }
 
     if (req.method === 'PUT' && pathname.endsWith('/approve') && pathname.startsWith('/api/users/')) {
@@ -9577,6 +9612,12 @@ const requestHandler = async (req, res) => {
       }
       if (body.securityAnswer) {
         target.securityAnswerHash = hash(body.securityAnswer);
+      }
+      if (body.twoFactorEnforced !== undefined) {
+        target.twoFactorEnforced = body.twoFactorEnforced === true;
+        if (target.twoFactorEnforced) {
+          appendAuditLog(db, user, 'update', 'user', target.id, `要求 ${target.name} 启用动态令牌`, target.projectId);
+        }
       }
       if (body.password) {
         if (String(body.password).length < 8) {

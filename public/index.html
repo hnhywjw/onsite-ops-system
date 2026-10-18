@@ -1371,6 +1371,12 @@
         <label>身份证号<input id="edIdCard" /></label>
         <label>邮箱<input id="edEmail" type="email" /></label>
         <label>微信<input id="edWechat" /></label>
+        <label class="full">
+          二次认证
+          <span class="checkbox-label" style="display:flex;align-items:center;gap:6px;">
+            <input id="edTwoFactorEnforced" type="checkbox" /> 要求该账号启用动态令牌
+          </span>
+        </label>
         <label>开始日期<input id="edStartDate" type="date" /></label>
         <label>结束日期<input id="edEndDate" type="date" /></label>
       </div>
@@ -1378,6 +1384,21 @@
       <div class="btn-row">
         <button class="secondary" id="userEditCancelBtn" type="button">取消编辑</button>
         <button class="primary" id="userEditSaveBtn" type="button">保存修改</button>
+      </div>
+    </div>
+  </div>
+
+  <div id="resetTwoFactorModal" class="modal-overlay hidden">
+    <div class="modal-box" style="max-width:420px;">
+      <h3 style="margin-top:0;">重置动态令牌</h3>
+      <p class="muted" style="font-size:13px;margin:0 0 10px;">
+        即将清除 <strong id="resetTwoFactorTarget"></strong> 的动态令牌。重置后该账号可用密码直接登录，需要重新绑定才能继续使用二次认证。
+      </p>
+      <label>管理员密码<input id="resetTwoFactorPassword" type="password" autocomplete="current-password" placeholder="请输入当前管理员密码" /></label>
+      <div id="resetTwoFactorMessage" class="message"></div>
+      <div class="btn-row">
+        <button class="secondary" id="resetTwoFactorCancelBtn" type="button">取消</button>
+        <button class="primary" id="resetTwoFactorConfirmBtn" type="button">确认重置</button>
       </div>
     </div>
   </div>
@@ -2192,6 +2213,12 @@
               <label><span>微信</span><input name="wechat" /></label>
               <label><span>安全问题</span><input name="securityQuestion" placeholder="例如：您母亲的名字是？" /></label>
               <label><span>安全问题答案</span><input name="securityAnswer" type="password" placeholder="创建人员时建议填写，用于密码找回" /></label>
+              <label style="align-self:end;">
+                <span>二次认证</span>
+                <span class="checkbox-label" style="height:38px;display:flex;align-items:center;">
+                  <input name="twoFactorEnforced" type="checkbox" /> 要求该账号启用动态令牌
+                </span>
+              </label>
               <label>
                 <span>关联项目 <em style="color:#dc2626;font-style:normal;">*</em></span>
                 <select name="projectId" id="userProjectId" required></select>
@@ -2215,7 +2242,7 @@
             <div id="userListMessage"></div>
             <div class="table-wrap">
               <table>
-                <thead><tr><th>姓名</th><th>账号</th><th>角色</th><th>项目名称 <span class="sort-arrow" data-sort-target="userProjectSort" style="cursor:pointer;user-select:none;font-size:15px;">↑↓</span></th><th>驻场日期</th><th>操作</th></tr></thead>
+                <thead><tr><th>姓名</th><th>账号</th><th>角色</th><th>动态令牌</th><th>项目名称 <span class="sort-arrow" data-sort-target="userProjectSort" style="cursor:pointer;user-select:none;font-size:15px;">↑↓</span></th><th>驻场日期</th><th>操作</th></tr></thead>
                 <tbody id="userTable"></tbody>
               </table>
               <div class="pagination-bar">
@@ -3744,7 +3771,9 @@
       if (!response.ok) {
         const errorMessage = data.message || '请求失败';
         if (!silent) showGlobalError(errorMessage);
-        throw new Error(errorMessage);
+        const error = new Error(errorMessage);
+        if (data && typeof data === 'object' && data.code) error.code = data.code;
+        throw error;
       }
       return data;
     }
@@ -6228,20 +6257,27 @@
           item.status === 'pending' ? `<button class="secondary" data-action="approve-user" data-id="${item.id}" type="button" style="background:#d1fae5;color:#065f46;">通过</button><button class="secondary" data-action="reject-user" data-id="${item.id}" type="button" style="background:#fee2e2;color:#991b1b;">拒绝</button>` : '',
           item.status === 'rejected' ? `<button class="secondary" data-action="restore-user" data-id="${item.id}" type="button" style="background:#dbeafe;color:#1e40af;">恢复</button>` : '',
           `<button class="secondary" data-action="edit-user" data-id="${item.id}" type="button">修改</button>`,
+          item.twoFactorEnabled ? `<button class="secondary" data-action="reset-2fa" data-id="${item.id}" type="button" style="background:#fef3c7;color:#92400e;">重置令牌</button>` : '',
           item.id !== state.user.id ? (item.status === 'disabled' ? `<button class="secondary" data-action="enable-user" data-id="${item.id}" type="button" style="background:#d1fae5;color:#065f46;">启用</button>` : (item.status === 'active' ? `<button class="secondary" data-action="disable-user" data-id="${item.id}" type="button" style="background:#fef3c7;color:#92400e;">禁用</button>` : '')) : '',
           `<button class="secondary" data-action="delete-user" data-id="${item.id}" type="button" style="background:#fee2e2;color:#dc2626;border-color:#fecaca;">删除</button>`
         ].filter(Boolean).join('') : '';
+        const twoFactorTag = item.twoFactorEnabled
+          ? '<span class="badge" style="background:#d1fae5;color:#065f46;">已启用</span>'
+          : (item.twoFactorEnforced
+            ? '<span class="badge" style="background:#fef3c7;color:#92400e;">待绑定</span>'
+            : '<span class="badge" style="background:#e2e8f0;color:#475569;">未启用</span>');
         return `
         <tr>
           <td>${esc(item.name)} ${statusTag}</td>
           <td>${esc(item.username)}</td>
           <td>${esc(roleLabel(item.role))}</td>
+          <td>${twoFactorTag}</td>
           <td>${esc(formatProjectDisplayById(item.projectId))}</td>
           <td>${esc(item.startDate || '-')} ~ ${esc(item.endDate || '-')}</td>
           <td><div class="toolbar"><button class="secondary" data-action="view-user-detail" data-id="${item.id}" type="button">${expanded ? '收起' : '详情'}</button>${adminActions}</div></td>
         </tr>
-        ${expanded ? `<tr><td colspan="6"><div class="card" style="margin: 8px 0;"><div class="muted" style="margin-bottom: 8px;">联系方式详情</div><div class="grid-form" style="grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));"><div><div class="muted">电话</div><div>${esc(item.phone || '-')}</div></div><div><div class="muted">微信</div><div>${esc(item.wechat || '-')}</div></div><div><div class="muted">邮箱</div><div>${esc(item.email || '-')}</div></div><div><div class="muted">身份证号</div><div>${esc(item.idCard || '-')}</div></div></div></div></td></tr>` : ''}`;
-      }).join('') || '<tr><td colspan="6">暂无数据</td></tr>';
+        ${expanded ? `<tr><td colspan="7"><div class="card" style="margin: 8px 0;"><div class="muted" style="margin-bottom: 8px;">联系方式详情</div><div class="grid-form" style="grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));"><div><div class="muted">电话</div><div>${esc(item.phone || '-')}</div></div><div><div class="muted">微信</div><div>${esc(item.wechat || '-')}</div></div><div><div class="muted">邮箱</div><div>${esc(item.email || '-')}</div></div><div><div class="muted">身份证号</div><div>${esc(item.idCard || '-')}</div></div></div></div></td></tr>` : ''}`;
+      }).join('') || '<tr><td colspan="7">暂无数据</td></tr>';
       document.getElementById('userPageInfo').textContent = `第 ${state.userPage} / ${totalPages} 页`;
       document.getElementById('userPrevBtn').disabled = state.userPage <= 1;
       document.getElementById('userNextBtn').disabled = state.userPage >= totalPages;
@@ -8818,6 +8854,38 @@
       openModal('assetEditModal');
     }
 
+    let resetTwoFactorUserId = '';
+    function openResetTwoFactor(id) {
+      const user = state.users.find(item => item.id === id);
+      if (!user) return;
+      resetTwoFactorUserId = id;
+      document.getElementById('resetTwoFactorTarget').textContent = `${user.name}（${user.username}）`;
+      document.getElementById('resetTwoFactorPassword').value = '';
+      setMessage('resetTwoFactorMessage', '');
+      openModal('resetTwoFactorModal');
+    }
+
+    document.getElementById('resetTwoFactorCancelBtn').addEventListener('click', () => closeModal('resetTwoFactorModal'));
+    document.getElementById('resetTwoFactorConfirmBtn').addEventListener('click', () => withButtonLock(document.getElementById('resetTwoFactorConfirmBtn'), async () => {
+      const password = document.getElementById('resetTwoFactorPassword').value;
+      if (!password) {
+        setMessage('resetTwoFactorMessage', '请输入管理员密码', 'error');
+        return;
+      }
+      try {
+        const result = await api(`/api/users/${resetTwoFactorUserId}/reset-2fa`, {
+          method: 'POST',
+          body: JSON.stringify({ password })
+        });
+        closeModal('resetTwoFactorModal');
+        await loadBaseData();
+        openTabWithSubtab('users', 'list');
+        setMessage('userListMessage', result.message || '动态令牌已重置');
+      } catch (error) {
+        setMessage('resetTwoFactorMessage', error.message, 'error');
+      }
+    }));
+
     function editUser(id) {
       const user = state.users.find(item => item.id === id);
       if (!user) return;
@@ -8830,6 +8898,7 @@
       document.getElementById('edIdCard').value = user.idCard || '';
       document.getElementById('edEmail').value = user.email || '';
       document.getElementById('edWechat').value = user.wechat || '';
+      document.getElementById('edTwoFactorEnforced').checked = Boolean(user.twoFactorEnforced);
       document.getElementById('edStartDate').value = user.startDate || '';
       document.getElementById('edEndDate').value = user.endDate || '';
       const projectSelect = document.getElementById('edProjectId');
@@ -9874,6 +9943,17 @@
           setMessage('loginMessage', '登录状态已失效，请重新登录', 'error');
           return;
         }
+        if (error.code === 'two_factor_enrollment_required' && state.user) {
+          // 管理员要求启用动态令牌但尚未绑定：先展示主界面，再强制打开绑定面板。
+          showAppView();
+          renderNav();
+          setMessage('loginMessage', '');
+          setTimeout(() => {
+            const btn = document.getElementById('twoFactorBtn');
+            if (btn) btn.click();
+          }, 300);
+          return;
+        }
         if (preserveAppOnError && state.user) {
           showAppView();
           renderNav();
@@ -10492,12 +10572,16 @@
     async function refreshTwoFactorStatus() {
       const status = await api('/api/account/2fa', { silent: true });
       const statusText = document.getElementById('twoFactorStatus');
+      const disableBtn = document.getElementById('twoFactorDisableBtn');
+      if (disableBtn) disableBtn.classList.toggle('hidden', Boolean(status.enforced));
       if (status.enabled) {
-        statusText.textContent = `动态令牌：已启用${status.enabledAt ? `（${status.enabledAt}）` : ''}，剩余恢复码 ${status.recoveryCodesRemaining} 个`;
-        document.getElementById('twoFactorEnabledInfo').textContent = '关闭动态令牌或重新生成恢复码都需要当前动态码；关闭时本地账号还需要当前密码。';
+        statusText.textContent = `动态令牌：已启用${status.enforced ? '（管理员要求）' : ''}${status.enabledAt ? `（${status.enabledAt}）` : ''}，剩余恢复码 ${status.recoveryCodesRemaining} 个`;
+        document.getElementById('twoFactorEnabledInfo').textContent = status.enforced
+          ? '管理员已要求该账号启用动态令牌，当前无法自行关闭；如需更换手机，可先用动态码重新生成恢复码，或联系管理员重置后重新绑定。'
+          : '关闭动态令牌或重新生成恢复码都需要当前动态码；关闭时本地账号还需要当前密码。';
         showTwoFactorPanel('twoFactorEnabledPanel');
       } else {
-        statusText.textContent = '动态令牌：未启用';
+        statusText.textContent = status.enforced ? '动态令牌：未启用（管理员要求必须启用）' : '动态令牌：未启用';
         showTwoFactorPanel('twoFactorDisabledPanel');
       }
       return status;
@@ -11231,6 +11315,7 @@
         idCard: document.getElementById('edIdCard').value.trim(),
         email: document.getElementById('edEmail').value.trim(),
         wechat: document.getElementById('edWechat').value.trim(),
+        twoFactorEnforced: document.getElementById('edTwoFactorEnforced').checked,
         projectId: document.getElementById('edProjectId').value,
         startDate: document.getElementById('edStartDate').value,
         endDate: document.getElementById('edEndDate').value
@@ -11677,6 +11762,9 @@
         }
         if (button.dataset.action === 'edit-user') {
           editUser(button.dataset.id);
+        }
+        if (button.dataset.action === 'reset-2fa') {
+          openResetTwoFactor(button.dataset.id);
         }
         if (button.dataset.action === 'delete-user') {
           await removeUser(button.dataset.id);
@@ -12787,6 +12875,7 @@
 
     document.getElementById('userForm').addEventListener('submit', event => withSubmitLock(event, async () => {
       const data = Object.fromEntries(new FormData(event.target).entries());
+      data.twoFactorEnforced = document.getElementById('userForm').elements.twoFactorEnforced.checked;
       if (!data.id && !data.password) { setMessage('userMessage', '请输入密码', 'error'); return; }
       if (!data.id && data.password && (data.password.length < 8 || !/[a-zA-Z]/.test(data.password) || !/\d/.test(data.password) || !/[^a-zA-Z0-9]/.test(data.password))) { setMessage('userMessage', '密码至少8位，需包含字母、数字和特殊字符', 'error'); return; }
       if (!data.id && !String(data.securityQuestion || '').trim()) { setMessage('userMessage', '请填写安全问题', 'error'); return; }

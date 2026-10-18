@@ -469,6 +469,65 @@ async function main() {
     await request(`/api/users/${twoFactorUserId}`, { method: 'DELETE', headers: { cookie } });
   }
 
+  // 管理员强制启用动态令牌：未绑定前业务接口应被拦截，绑定后放行，重置后仍需重新绑定。
+  const enforcedUsername = `tfe_${Date.now()}_${Math.floor(Math.random() * 1000)}`;
+  const enforcedPassword = 'TotpEnforced1!';
+  const enforcedUser = await request('/api/users', {
+    method: 'POST',
+    headers: { cookie, 'Content-Type': 'application/json' },
+    body: JSON.stringify({ username: enforcedUsername, password: enforcedPassword, role: 'viewer', name: '强制令牌回归账号', twoFactorEnforced: true })
+  });
+  assert(enforcedUser.status === 201 && enforcedUser.data.twoFactorEnforced === true, '创建强制启用动态令牌账号失败');
+  const enforcedUserId = enforcedUser.data.id;
+  try {
+    const enforcedLogin = await login(enforcedUsername, enforcedPassword);
+    assert(enforcedLogin.status === 200 && enforcedLogin.cookie, '强制令牌账号登录失败');
+    const gated = await request('/api/projects', { headers: { cookie: enforcedLogin.cookie } });
+    assert(gated.status === 403 && gated.data.code === 'two_factor_enrollment_required', '未绑定动态令牌时业务接口未被拦截');
+    const enforcementStatus = await request('/api/account/2fa', { headers: { cookie: enforcedLogin.cookie } });
+    assert(enforcementStatus.status === 200 && enforcementStatus.data.enforced === true, '未绑定期间应仍可读取二次认证状态');
+    const enforcedSetup = await request('/api/account/2fa/setup', {
+      method: 'POST',
+      headers: { cookie: enforcedLogin.cookie, 'Content-Type': 'application/json' },
+      body: JSON.stringify({ password: enforcedPassword })
+    });
+    assert(enforcedSetup.status === 200 && enforcedSetup.data.secret, '未绑定期间应可发起动态令牌绑定');
+    const enforcedEnable = await request('/api/account/2fa/enable', {
+      method: 'POST',
+      headers: { cookie: enforcedLogin.cookie, 'Content-Type': 'application/json' },
+      body: JSON.stringify({ code: totpCode(enforcedSetup.data.secret) })
+    });
+    assert(enforcedEnable.status === 200, '强制账号绑定动态令牌失败');
+    const ungated = await request('/api/projects', { headers: { cookie: enforcedLogin.cookie } });
+    assert(ungated.status === 200, '绑定动态令牌后业务接口仍被拦截');
+    const enforcedDisable = await request('/api/account/2fa/disable', {
+      method: 'POST',
+      headers: { cookie: enforcedLogin.cookie, 'Content-Type': 'application/json' },
+      body: JSON.stringify({ password: enforcedPassword, code: totpCode(enforcedSetup.data.secret) })
+    });
+    assert(enforcedDisable.status === 400, '被强制启用的账号不应允许自行关闭动态令牌');
+    const adminReset = await request(`/api/users/${enforcedUserId}/reset-2fa`, {
+      method: 'POST',
+      headers: { cookie, 'Content-Type': 'application/json' },
+      body: JSON.stringify({ password: 'Admin123!' })
+    });
+    assert(adminReset.status === 200 && String(adminReset.data.message).includes('重新绑定'), '管理员重置动态令牌失败');
+    const afterResetLogin = await login(enforcedUsername, enforcedPassword);
+    assert(afterResetLogin.status === 200 && !afterResetLogin.data.twoFactorRequired, '重置后应可用密码直接登录');
+    const stillGated = await request('/api/projects', { headers: { cookie: afterResetLogin.cookie } });
+    assert(stillGated.status === 403, '重置后未重新绑定前仍应保持拦截');
+    const clearEnforcement = await request(`/api/users/${enforcedUserId}`, {
+      method: 'PUT',
+      headers: { cookie, 'Content-Type': 'application/json' },
+      body: JSON.stringify({ twoFactorEnforced: false })
+    });
+    assert(clearEnforcement.status === 200, '取消强制启用动态令牌失败');
+    const relaxed = await request('/api/projects', { headers: { cookie: afterResetLogin.cookie } });
+    assert(relaxed.status === 200, '取消强制启用后业务接口未恢复');
+  } finally {
+    await request(`/api/users/${enforcedUserId}`, { method: 'DELETE', headers: { cookie } });
+  }
+
   // 每轮回归用独立客户端 IP，避免反复运行累积触发忘记密码的进程内限流
   const forgotTestIp = `198.18.${(Date.now() % 200) + 1}.${Math.floor(Math.random() * 250) + 1}`;
   const forgotMissingCaptcha = await request('/api/captcha');
