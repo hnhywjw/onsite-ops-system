@@ -28,6 +28,7 @@
 .
 ├── README.md                    # 项目说明
 ├── PRODUCTION_DEPLOY.md         # 生产安装部署说明
+├── UPGRADE_GUIDE.md             # 构建与离线升级手册
 ├── .env.production.example      # 生产环境变量模板
 ├── Dockerfile                   # 容器镜像构建
 ├── docker-compose.prod.yml      # 生产 Docker Compose 编排
@@ -91,8 +92,9 @@ docker compose --env-file .env.production -f docker-compose.prod.yml up -d --bui
 - `INITIAL_ENGINEER_SECURITY_ANSWER`
 - `ENCRYPTION_KEY`
 - `UPGRADE_SIGNING_KEY`
+- `DOCUMENT_TOKEN_SECRET`
 
-完整部署步骤见 `PRODUCTION_DEPLOY.md`。
+完整部署步骤见 `PRODUCTION_DEPLOY.md`，本地构建安装包与离线升级包的操作见 `UPGRADE_GUIDE.md`。
 
 ## 安全说明
 

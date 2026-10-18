@@ -297,6 +297,8 @@ GitHub 提供的升级包含 `manifest.json` 与 SHA256 清单。生产环境上
 UPGRADE_SIGNING_KEY='生产环境密钥' npm run build-upgrade
 ```
 
+签名密钥的取值、构建参数、包结构与校验规则见 `UPGRADE_GUIDE.md`。
+
 ### 7.3 重建并重启
 
 ```bash
