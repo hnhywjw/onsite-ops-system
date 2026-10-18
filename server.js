@@ -8585,6 +8585,8 @@ function compareSemver(left, right) {
 
 const upgradeApplyFiles = ['server.js', 'package.json', 'Dockerfile', 'docker-compose.yml', 'docker-compose.prod.yml', 'pptx-template.json', 'docker-entrypoint.sh'];
 const upgradeApplyDirs = ['public', 'scripts'];
+// 入口脚本必须以可执行位落地，否则容器下次启动会报 permission denied。
+const upgradeExecutableFiles = new Set(['docker-entrypoint.sh']);
 
 function writeUpgradeSha256Sums(pendingDir) {
   const manifestPath = path.join(pendingDir, 'manifest.json');
@@ -8601,7 +8603,10 @@ function applyPendingUpgradeFiles(pendingDir, appDir) {
     const src = path.join(pendingDir, file);
     if (!fs.existsSync(src) || !fs.statSync(src).isFile()) continue;
     try {
-      fs.copyFileSync(src, path.join(appDir, file));
+      const dest = path.join(appDir, file);
+      fs.copyFileSync(src, dest);
+      // copyFileSync 会沿用源文件权限，升级包内若是 0644 会覆盖镜像里的 0755。
+      if (upgradeExecutableFiles.has(file)) fs.chmodSync(dest, 0o755);
       applied.push(file);
     } catch (error) {
       failed.push(`${file}: ${error.message}`);

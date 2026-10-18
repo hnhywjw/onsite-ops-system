@@ -369,7 +369,40 @@ sudo chown -R 1000:1000 data
 
 解压失败时不会写入 `UPGRADE_READY`，容器不会应用半成品包，清理后重新上传即可。避免在宿主机用 `sudo` 直接解压升级包，或在容器内以 `-u root` 执行操作。
 
-### 10.8 容器反复重启
+### 10.8 重启报 `/app/docker-entrypoint.sh permission denied`
+
+升级包里的 `docker-entrypoint.sh` 若没有可执行位，落地时会覆盖镜像内原本 0755 的脚本，容器下次启动直接失败：
+
+```text
+exec: "/app/docker-entrypoint.sh": permission denied
+```
+
+v1.0.16 之前的升级逻辑用 `copyFileSync` 落地文件，会沿用包内权限；当时的仓库把该脚本记录为 0644。容器已经在运行，因此上传升级包时不会报错，重启才暴露。
+
+恢复方式一，重建镜像：
+
+```bash
+cd /opt/onsite-ops-system
+docker compose --env-file .env.production -f docker-compose.prod.yml up -d --build
+```
+
+`Dockerfile` 中的 `RUN chmod +x /app/docker-entrypoint.sh` 会恢复权限。`data/` 是绑定挂载，数据不受影响。
+
+恢复方式二，不重建镜像，直接补回权限：
+
+```bash
+cd /opt/onsite-ops-system
+CID=$(docker compose --env-file .env.production -f docker-compose.prod.yml ps -aq onsite-ops-system)
+install -m 755 docker-entrypoint.sh /tmp/docker-entrypoint.sh
+docker cp /tmp/docker-entrypoint.sh "$CID":/app/docker-entrypoint.sh
+docker compose --env-file .env.production -f docker-compose.prod.yml start onsite-ops-system
+```
+
+`install -m 755` 先生成本机一份带可执行位的副本，`docker cp` 会沿用该权限。容器已停止时仍可执行 `docker cp`。
+
+后续版本已修复：仓库中该文件改为 100755，`npm run lint` 会检查可执行位，`build-upgrade.js` 打包前纠正权限，服务端落地后强制 `chmod 0o755`，`Dockerfile` 改用 `ENTRYPOINT ["/bin/sh", "/app/docker-entrypoint.sh"]` 兜底。
+
+### 10.9 容器反复重启
 
 查看 `docker compose logs`。常见原因是缺少 `DOCUMENT_TOKEN_SECRET`、`ENCRYPTION_KEY`、`UPGRADE_SIGNING_KEY`，或密钥长度不足 32 位。
 

@@ -81,6 +81,14 @@ for (const dir of includeDirs) {
 }
 files.sort();
 
+// 入口脚本在升级时会被覆盖到容器内，缺失可执行位会导致容器无法启动。
+// 这里统一纠正，避免 Windows 检出的仓库或权限丢失的副本打出不可用包。
+const entrypointPath = path.join(rootDir, 'docker-entrypoint.sh');
+if ((fs.statSync(entrypointPath).mode & 0o111) === 0) {
+  fs.chmodSync(entrypointPath, 0o755);
+  console.log('  Normalized docker-entrypoint.sh mode to 0755');
+}
+
 const sha256 = {};
 for (const file of files) {
   const abs = path.join(rootDir, file);

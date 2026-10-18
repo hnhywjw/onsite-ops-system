@@ -34,6 +34,11 @@ function collectIssues(filePath, content) {
 
 function main() {
   const issues = files.flatMap(filePath => collectIssues(filePath, fs.readFileSync(filePath, 'utf8')));
+  // 入口脚本会随升级包覆盖到容器内，缺少可执行位会导致容器无法启动。
+  const entrypointPath = path.join(root, 'docker-entrypoint.sh');
+  if ((fs.statSync(entrypointPath).mode & 0o111) === 0) {
+    issues.push(`${entrypointPath}:1 缺少可执行位，请执行 chmod +x docker-entrypoint.sh`);
+  }
   if (issues.length > 0) {
     process.stderr.write(issues.join('\n') + '\n');
     process.exit(1);

@@ -25,4 +25,5 @@ VOLUME ["/app/data"]
 EXPOSE 3000
 EXPOSE 3443
 
-ENTRYPOINT ["/app/docker-entrypoint.sh"]
+# 用 sh 显式调用，即使升级过程中丢失可执行位也能正常启动。
+ENTRYPOINT ["/bin/sh", "/app/docker-entrypoint.sh"]
