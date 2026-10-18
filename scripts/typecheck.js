@@ -12,12 +12,13 @@ function runNodeCheck(filePath) {
 }
 
 function getInlineScriptSource(html) {
-  const start = html.lastIndexOf('<script>');
   const end = html.lastIndexOf('</script>');
-  if (start === -1 || end === -1 || end <= start) {
+  const start = html.lastIndexOf('<script', end);
+  const openEnd = start === -1 ? -1 : html.indexOf('>', start);
+  if (start === -1 || end === -1 || openEnd === -1 || openEnd >= end) {
     throw new Error('未找到内联脚本');
   }
-  return html.slice(start + '<script>'.length, end);
+  return html.slice(openEnd + 1, end);
 }
 
 function compileInlineScript(source) {

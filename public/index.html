@@ -5,7 +5,7 @@
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
   <title>驻场运维管理系统</title>
   <link rel="icon" type="image/svg+xml" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 200 200'%3E%3Cdefs%3E%3ClinearGradient id='g' x1='0%25' y1='0%25' x2='100%25' y2='100%25'%3E%3Cstop offset='0%25' stop-color='%232563eb'/%3E%3Cstop offset='100%25' stop-color='%231d4ed8'/%3E%3C/linearGradient%3E%3C/defs%3E%3Crect x='40' y='50' width='120' height='100' rx='12' fill='url(%23g)'/%3E%3Crect x='55' y='60' width='90' height='8' rx='4' fill='white' opacity='.9'/%3E%3Ccircle cx='70' cy='80' r='6' fill='%2322c55e'/%3E%3Ccircle cx='70' cy='100' r='6' fill='%2322c55e'/%3E%3Ccircle cx='70' cy='120' r='6' fill='%23eab308'/%3E%3Crect x='85' y='76' width='50' height='6' rx='3' fill='white' opacity='.6'/%3E%3Crect x='85' y='96' width='50' height='6' rx='3' fill='white' opacity='.6'/%3E%3Crect x='85' y='116' width='50' height='6' rx='3' fill='white' opacity='.6'/%3E%3Cpath d='M30 90 L30 140 Q30 165 55 175 L100 190 L145 175 Q170 165 170 140 L170 90' fill='none' stroke='url(%23g)' stroke-width='8' stroke-linecap='round'/%3E%3C/svg%3E" />
-  <style>
+  <style nonce="__CSP_NONCE__">
     :root {
       color-scheme: light;
       --bg: #f3f6fb;
@@ -1182,8 +1182,8 @@
           <input name="password" id="loginPassword" type="password" placeholder="请输入密码" required />
         </div>
         <div style="display:flex; justify-content:space-between; margin-bottom:12px;">
-          <a class="forgot-link" href="#" onclick="openForgotPwdModal(); return false;">忘记密码</a>
-          <a class="forgot-link hidden" id="registerLink" href="#" onclick="openRegisterModal(); return false;">注册账号</a>
+          <a class="forgot-link" href="#" data-action="open-forgot-password">忘记密码</a>
+          <a class="forgot-link hidden" id="registerLink" href="#" data-action="open-register">注册账号</a>
         </div>
         <div class="captcha-row" style="justify-content:flex-start;">
           <div class="input-group" style="width:114px; height:38px; margin-bottom:0; flex-shrink:0;">
@@ -1211,11 +1211,11 @@
       <div class="divider">其他登录方式</div>
 
       <div class="sso-buttons">
-        <button class="sso-btn" onclick="ssoLogin()">
+        <button class="sso-btn" data-action="sso-login">
           <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="7" cy="12" r="3"/><path d="M10 12h11l-2 3 2 3h-3l-2-3H10"/></svg>
           <span>企业SSO</span>
         </button>
-        <button class="sso-btn" onclick="ldapCheck()">
+        <button class="sso-btn" data-action="ldap-check">
           <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="2" y="2" width="20" height="8" rx="2"/><rect x="2" y="14" width="20" height="8" rx="2"/><circle cx="6" cy="6" r="1" fill="currentColor"/><circle cx="6" cy="18" r="1" fill="currentColor"/></svg>
           <span>LDAP</span>
         </button>
@@ -1226,7 +1226,7 @@
         </div>
   </section>
 
-  <script>
+  <script nonce="__CSP_NONCE__">
     (async () => {
       const loginCaptcha = document.getElementById('captchaImg');
       const ldapCaptcha = document.getElementById('ldapCaptchaImg');
@@ -1280,8 +1280,8 @@
         </div>
         <div id="forgotPwdError1" class="modal-error"></div>
         <div class="btn-row">
-          <button class="secondary" onclick="closeModal('forgotPwdModal')">取消</button>
-          <button class="primary" onclick="forgotPwdVerify()">下一步</button>
+          <button class="secondary" data-action="close-modal" data-modal="forgotPwdModal">取消</button>
+          <button class="primary" data-action="forgot-password-verify">下一步</button>
         </div>
       </div>
       <div id="forgotPwdStep2" class="hidden">
@@ -1297,8 +1297,8 @@
         </div>
         <div id="forgotPwdError2" class="modal-error"></div>
         <div class="btn-row">
-          <button class="secondary" onclick="closeModal('forgotPwdModal')">取消</button>
-          <button class="primary" onclick="forgotPwdReset()">重置密码</button>
+          <button class="secondary" data-action="close-modal" data-modal="forgotPwdModal">取消</button>
+          <button class="primary" data-action="forgot-password-reset">重置密码</button>
         </div>
       </div>
     </div>
@@ -1325,8 +1325,8 @@
       </div>
       <div id="registerError" class="modal-error"></div>
       <div class="btn-row">
-        <button class="secondary" onclick="closeModal('registerModal')">取消</button>
-        <button class="primary" onclick="registerSubmit()">注册</button>
+        <button class="secondary" data-action="close-modal" data-modal="registerModal">取消</button>
+        <button class="primary" data-action="register-submit">注册</button>
       </div>
     </div>
   </div>
@@ -1336,7 +1336,7 @@
       <h3>HTTPS 登录证书即将到期</h3>
       <div id="httpsCertExpiryText" style="font-size:13px;color:#475569;line-height:1.8;"></div>
       <div class="btn-row">
-        <button class="primary" type="button" onclick="closeModal('httpsCertExpiryModal')">我知道了</button>
+        <button class="primary" type="button" data-action="close-modal" data-modal="httpsCertExpiryModal">我知道了</button>
       </div>
     </div>
   </div>
@@ -1354,8 +1354,8 @@
       </div>
       <div id="ldapError" class="modal-error"></div>
       <div class="btn-row">
-        <button class="secondary" onclick="closeModal('ldapModal')">取消</button>
-        <button class="primary" onclick="ldapLogin()">登录</button>
+        <button class="secondary" data-action="close-modal" data-modal="ldapModal">取消</button>
+        <button class="primary" data-action="ldap-login">登录</button>
       </div>
     </div>
   </div>
@@ -1440,7 +1440,7 @@
       </div>
       <div id="projectEditMessage" style="margin:8px 0;font-size:13px;"></div>
       <div class="btn-row">
-        <button class="secondary" type="button" onclick="closeModal('projectEditModal')">取消</button>
+        <button class="secondary" type="button" data-action="close-modal" data-modal="projectEditModal">取消</button>
         <button class="primary" id="projectEditSaveBtn" type="button">保存修改</button>
       </div>
     </div>
@@ -1451,7 +1451,7 @@
       <h3 style="margin-top:0;">资产详情</h3>
       <div id="assetDetailBody" style="max-height:60vh;overflow-y:auto;"></div>
       <div class="btn-row" style="margin-top:12px;">
-        <button class="secondary" type="button" onclick="closeModal('assetDetailModal')">关闭</button>
+        <button class="secondary" type="button" data-action="close-modal" data-modal="assetDetailModal">关闭</button>
       </div>
     </div>
   </div>
@@ -1463,7 +1463,7 @@
       <div id="cabinetLayoutDetailBody" style="font-size:13px;"></div>
       <div class="btn-row" style="margin-top:12px;">
         <button class="primary hidden" id="cabinetLayoutEditBtn" type="button">编辑资产</button>
-        <button class="secondary" type="button" onclick="closeModal('cabinetLayoutDetailModal')">关闭</button>
+        <button class="secondary" type="button" data-action="close-modal" data-modal="cabinetLayoutDetailModal">关闭</button>
       </div>
     </div>
   </div>
@@ -1487,7 +1487,7 @@
       </div>
       <div id="cabinetLayoutBatchMessage" class="message" style="margin-top:8px;"></div>
       <div class="btn-row" style="margin-top:12px;">
-        <button class="secondary" type="button" onclick="closeModal('cabinetLayoutBatchModal')">取消</button>
+        <button class="secondary" type="button" data-action="close-modal" data-modal="cabinetLayoutBatchModal">取消</button>
         <button class="primary" id="cabinetLayoutBatchSaveBtn" type="button">确认归位</button>
       </div>
     </div>
@@ -1549,7 +1549,7 @@
       </div>
       <div id="assetEditMessage" style="margin:8px 0;font-size:13px;"></div>
       <div class="btn-row">
-        <button class="secondary" type="button" onclick="closeModal('assetEditModal')">取消</button>
+        <button class="secondary" type="button" data-action="close-modal" data-modal="assetEditModal">取消</button>
         <button class="primary" id="assetEditSaveBtn" type="button">保存修改</button>
       </div>
     </div>
@@ -1593,7 +1593,7 @@
       </div>
       <div id="relMessage" style="margin:8px 0;font-size:13px;"></div>
       <div class="btn-row">
-        <button class="secondary" type="button" onclick="closeModal('assetRelationModal')">取消</button>
+        <button class="secondary" type="button" data-action="close-modal" data-modal="assetRelationModal">取消</button>
         <button class="primary" id="relSaveBtn" type="button">保存</button>
       </div>
     </div>
@@ -1628,7 +1628,7 @@
       </div>
       <div id="logEditMessage" style="margin:8px 0;font-size:13px;"></div>
       <div class="btn-row">
-        <button class="secondary" type="button" onclick="closeModal('logEditModal')">取消</button>
+        <button class="secondary" type="button" data-action="close-modal" data-modal="logEditModal">取消</button>
         <button class="primary" id="logEditSaveBtn" type="button">保存修改</button>
       </div>
     </div>
@@ -1647,7 +1647,7 @@
       </div>
       <div id="kbEditMessage" style="margin:8px 0;font-size:13px;"></div>
       <div class="btn-row">
-        <button class="secondary" type="button" onclick="closeModal('kbEditModal')">取消</button>
+        <button class="secondary" type="button" data-action="close-modal" data-modal="kbEditModal">取消</button>
         <button class="primary" id="kbEditSaveBtn" type="button">保存修改</button>
       </div>
     </div>
@@ -1667,7 +1667,7 @@
       </div>
       <div id="inspectionPlanEditMessage" style="margin:8px 0;font-size:13px;"></div>
       <div class="btn-row">
-        <button class="secondary" type="button" onclick="closeModal('inspectionPlanEditModal')">取消</button>
+        <button class="secondary" type="button" data-action="close-modal" data-modal="inspectionPlanEditModal">取消</button>
         <button class="primary" id="inspectionPlanEditSaveBtn" type="button">保存修改</button>
       </div>
     </div>
@@ -1689,7 +1689,7 @@
       </div>
       <div id="inspectionExecutionEditMessage" style="margin:8px 0;font-size:13px;"></div>
       <div class="btn-row">
-        <button class="secondary" type="button" onclick="closeModal('inspectionExecutionEditModal')">取消</button>
+        <button class="secondary" type="button" data-action="close-modal" data-modal="inspectionExecutionEditModal">取消</button>
         <button class="primary" id="inspectionExecutionEditSaveBtn" type="button">保存修改</button>
       </div>
     </div>
@@ -1710,7 +1710,7 @@
       </div>
       <div id="changeRecordEditMessage" style="margin:8px 0;font-size:13px;"></div>
       <div class="btn-row">
-        <button class="secondary" type="button" onclick="closeModal('changeRecordEditModal')">取消</button>
+        <button class="secondary" type="button" data-action="close-modal" data-modal="changeRecordEditModal">取消</button>
         <button class="primary" id="changeRecordEditSaveBtn" type="button">保存修改</button>
       </div>
     </div>
@@ -1733,7 +1733,7 @@
       </div>
       <div id="incidentEditMessage" style="margin:8px 0;font-size:13px;"></div>
       <div class="btn-row">
-        <button class="secondary" type="button" onclick="closeModal('incidentEditModal')">取消</button>
+        <button class="secondary" type="button" data-action="close-modal" data-modal="incidentEditModal">取消</button>
         <button class="primary" id="incidentEditSaveBtn" type="button">保存修改</button>
       </div>
     </div>
@@ -1754,7 +1754,7 @@
       </div>
       <div id="sparePartEditMessage" style="margin:8px 0;font-size:13px;"></div>
       <div class="btn-row">
-        <button class="secondary" type="button" onclick="closeModal('sparePartEditModal')">取消</button>
+        <button class="secondary" type="button" data-action="close-modal" data-modal="sparePartEditModal">取消</button>
         <button class="primary" id="sparePartEditSaveBtn" type="button">保存修改</button>
       </div>
     </div>
@@ -1791,7 +1791,7 @@
       </div>
       <div id="aiTargetEditMessage" style="margin:8px 0;font-size:13px;"></div>
       <div class="btn-row">
-        <button class="secondary" type="button" onclick="closeModal('aiTargetEditModal')">取消</button>
+        <button class="secondary" type="button" data-action="close-modal" data-modal="aiTargetEditModal">取消</button>
         <button class="primary" id="aiTargetEditSaveBtn" type="button">保存修改</button>
       </div>
     </div>
@@ -1810,7 +1810,7 @@
       </div>
       <div id="aiTemplateEditMessage" style="margin:8px 0;font-size:13px;"></div>
       <div class="btn-row">
-        <button class="secondary" type="button" onclick="closeModal('aiTemplateEditModal')">取消</button>
+        <button class="secondary" type="button" data-action="close-modal" data-modal="aiTemplateEditModal">取消</button>
         <button class="primary" id="aiTemplateEditSaveBtn" type="button">保存修改</button>
       </div>
     </div>
@@ -1831,7 +1831,7 @@
       </div>
       <div id="aiTaskEditMessage" style="margin:8px 0;font-size:13px;"></div>
       <div class="btn-row">
-        <button class="secondary" type="button" onclick="closeModal('aiTaskEditModal')">取消</button>
+        <button class="secondary" type="button" data-action="close-modal" data-modal="aiTaskEditModal">取消</button>
         <button class="primary" id="aiTaskEditSaveBtn" type="button">保存修改</button>
       </div>
     </div>
@@ -1842,7 +1842,7 @@
       <h3 id="unconfiguredTitle">功能未配置</h3>
       <p id="unconfiguredMessage" style="font-size:14px; color:var(--sub); line-height:1.6;"></p>
       <div class="btn-row">
-        <button class="primary" onclick="closeModal('unconfiguredModal')">知道了</button>
+        <button class="primary" data-action="close-modal" data-modal="unconfiguredModal">知道了</button>
       </div>
     </div>
   </div>
@@ -1871,7 +1871,7 @@
       </div>
       <div id="configBackupDiffContent" style="font-family:monospace;font-size:12px;line-height:1.6;max-height:60vh;overflow-y:auto;border:1px solid var(--border);border-radius:6px;padding:8px;background:#fafafa;white-space:pre-wrap;word-break:break-all;"></div>
       <div class="btn-row" style="justify-content:flex-end;margin-top:12px;">
-        <button class="secondary" onclick="closeModal('configBackupDiffModal')" type="button">关闭</button>
+        <button class="secondary" data-action="close-modal" data-modal="configBackupDiffModal" type="button">关闭</button>
       </div>
     </div>
   </div>
@@ -1883,8 +1883,8 @@
       <label>请输入访问密码<input id="documentPasswordInput" type="password" placeholder="请输入密码" /></label>
       <div id="documentPasswordMsg" class="modal-error"></div>
       <div class="btn-row">
-        <button class="secondary" onclick="closeModal('documentPasswordModal')">取消</button>
-        <button class="primary" id="documentPasswordConfirmBtn" onclick="verifyDocumentPassword()">确认</button>
+        <button class="secondary" data-action="close-modal" data-modal="documentPasswordModal">取消</button>
+        <button class="primary" id="documentPasswordConfirmBtn" data-action="verify-document-password">确认</button>
       </div>
     </div>
   </div>
@@ -1894,7 +1894,7 @@
       <h3 id="documentDetailTitle">资料详情</h3>
       <div id="documentDetailContent" style="max-height:50vh;overflow-y:auto;font-size:14px;line-height:2;"></div>
       <div class="btn-row" style="margin-top:16px;">
-        <button class="secondary" onclick="closeModal('documentDetailModal')">关闭</button>
+        <button class="secondary" data-action="close-modal" data-modal="documentDetailModal">关闭</button>
       </div>
     </div>
   </div>
@@ -1933,7 +1933,7 @@
       </div>
       <div id="documentEditMessage" style="margin:8px 0;font-size:13px;"></div>
       <div class="btn-row">
-        <button class="secondary" onclick="closeModal('documentEditModal')">取消</button>
+        <button class="secondary" data-action="close-modal" data-modal="documentEditModal">取消</button>
         <button class="primary" id="documentEditSaveBtn" type="button">保存修改</button>
       </div>
     </div>
@@ -1944,7 +1944,7 @@
       <h3>驳回审批</h3>
       <label style="display:grid;gap:6px;margin-bottom:12px;">驳回原因<textarea id="rejectionReasonInput" rows="4" placeholder="请填写驳回原因" style="width:100%;resize:vertical;"></textarea></label>
       <div class="btn-row">
-        <button class="secondary" onclick="closeModal('rejectionReasonModal')">取消</button>
+        <button class="secondary" data-action="close-modal" data-modal="rejectionReasonModal">取消</button>
         <button class="primary" id="rejectionReasonSubmitBtn" type="button">确认驳回</button>
       </div>
     </div>
@@ -3619,7 +3619,7 @@
     </div>
   </div>
 
-  <script>
+  <script nonce="__CSP_NONCE__">
     // 工作汇报列表每页固定 8 条，渲染与定位到指定汇报时共用同一值。
     const WORK_REPORT_LIST_PAGE_SIZE = 8;
 
@@ -13410,6 +13410,29 @@
     resetWorkReportForm();
     toggleWorkloadCustomRange();
     syncAiInspectionTargetProtocolOptions();
+
+    // CSP 已移除内联事件，登录页与弹窗按钮统一通过 data-action 委托调用原有处理函数。
+    document.addEventListener('click', event => {
+      const trigger = event.target.closest('[data-action]');
+      if (!trigger) return;
+      const action = trigger.dataset.action;
+      const handlers = {
+        'open-forgot-password': () => openForgotPwdModal(),
+        'open-register': () => openRegisterModal(),
+        'sso-login': () => ssoLogin(),
+        'ldap-check': () => ldapCheck(),
+        'close-modal': () => closeModal(trigger.dataset.modal || ''),
+        'forgot-password-verify': () => forgotPwdVerify(),
+        'forgot-password-reset': () => forgotPwdReset(),
+        'register-submit': () => registerSubmit(),
+        'ldap-login': () => ldapLogin(),
+        'verify-document-password': () => verifyDocumentPassword()
+      };
+      const handler = handlers[action];
+      if (!handler) return;
+      event.preventDefault();
+      handler();
+    });
 
     boot();
   </script>

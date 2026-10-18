@@ -96,15 +96,22 @@ INITIAL_ENGINEER_SECURITY_ANSWER=replace-with-engineer-security-answer
 ENCRYPTION_KEY=replace-with-at-least-32-chars-random-key
 UPGRADE_SIGNING_KEY=replace-with-at-least-32-chars-random-key
 DOCUMENT_TOKEN_SECRET=replace-with-at-least-32-chars-random-key
+DOCUMENT_ATTACHMENT_LIMIT_BYTES=10485760
+DOCUMENT_QUOTA_PER_USER_BYTES=209715200
+DOCUMENT_QUOTA_PER_PROJECT_BYTES=2147483648
+INSPECTION_ATTACHMENT_QUOTA_PER_USER_BYTES=104857600
+INSPECTION_ATTACHMENT_QUOTA_PER_PROJECT_BYTES=1073741824
 ```
 
 密码要求：至少 8 位，包含字母、数字和特殊字符。
 
-`ENCRYPTION_KEY`、`UPGRADE_SIGNING_KEY` 与 `DOCUMENT_TOKEN_SECRET` 建议使用 32 位以上随机字符串。示例生成命令：
+`ENCRYPTION_KEY`、`UPGRADE_SIGNING_KEY` 与 `DOCUMENT_TOKEN_SECRET` 必须使用 32 位以上随机字符串，生产环境缺失或长度不足会拒绝启动。示例生成命令：
 
 ```bash
 openssl rand -base64 32
 ```
+
+附件配额按字节配置，默认单个附件 10MB、个人资料累计 200MB、项目资料累计 2GB、个人巡检附件累计 100MB、项目巡检附件累计 1GB，可按实际磁盘容量调整。
 
 应用默认监听 `0.0.0.0:3000`，可通过 `APP_BIND` 和 `APP_PORT` 环境变量调整。数据目录默认使用 bind mount 映射到宿主机 `./data/` 目录，启动后可直接在宿主机查看备份、证书等运行时文件。
 

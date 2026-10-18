@@ -151,6 +151,12 @@ const importBodyLimitBytes = parseInt(process.env.IMPORT_BODY_LIMIT_BYTES, 10) |
 // 附件上传在内存中解析 multipart，故通过上限约束单请求内存占用（默认 10MB，可用环境变量调整）。
 const documentAttachmentLimitBytes = parseInt(process.env.DOCUMENT_ATTACHMENT_LIMIT_BYTES, 10) || 10 * 1024 * 1024;
 const documentAttachmentLimitMb = Math.round(documentAttachmentLimitBytes / (1024 * 1024));
+// 附件配额按「个人 + 项目」双维度累计，避免单个账号或单个项目占满磁盘。
+const documentQuotaPerUserBytes = parseInt(process.env.DOCUMENT_QUOTA_PER_USER_BYTES, 10) || 200 * 1024 * 1024;
+const documentQuotaPerProjectBytes = parseInt(process.env.DOCUMENT_QUOTA_PER_PROJECT_BYTES, 10) || 2 * 1024 * 1024 * 1024;
+// 巡检附件以 base64 内联在数据库中，同样需要限制个人与项目累计体积。
+const inspectionAttachmentQuotaPerUserBytes = parseInt(process.env.INSPECTION_ATTACHMENT_QUOTA_PER_USER_BYTES, 10) || 100 * 1024 * 1024;
+const inspectionAttachmentQuotaPerProjectBytes = parseInt(process.env.INSPECTION_ATTACHMENT_QUOTA_PER_PROJECT_BYTES, 10) || 1024 * 1024 * 1024;
 // 巡检执行附件以 base64 dataURL 内联在 JSON 中，体积约为原文件的 4/3，请求体上限需留足余量。
 const inspectionAttachmentBodyLimitBytes = 20 * 1024 * 1024;
 const allowFileDbFallback = process.env.ALLOW_FILE_DB_FALLBACK === 'true';
@@ -256,7 +262,7 @@ function validateProductionConfiguration() {
   if (!process.env.INITIAL_ADMIN_SECURITY_ANSWER || process.env.INITIAL_ADMIN_SECURITY_ANSWER === 'admin') problems.push('INITIAL_ADMIN_SECURITY_ANSWER 必须设置为生产安全答案');
   if (!process.env.INITIAL_ENGINEER_SECURITY_ANSWER || process.env.INITIAL_ENGINEER_SECURITY_ANSWER === 'blue') problems.push('INITIAL_ENGINEER_SECURITY_ANSWER 必须设置为生产安全答案');
   if (!process.env.ENCRYPTION_KEY || process.env.ENCRYPTION_KEY.length < 32) problems.push('ENCRYPTION_KEY 必须设置且长度不少于 32 位');
-  if (!process.env.DOCUMENT_TOKEN_SECRET || process.env.DOCUMENT_TOKEN_SECRET.length < 32) console.warn('WARNING: DOCUMENT_TOKEN_SECRET 环境变量未设置，文档访问令牌重启后将失效。请在生产环境中设置 DOCUMENT_TOKEN_SECRET。');
+  if (!process.env.DOCUMENT_TOKEN_SECRET || process.env.DOCUMENT_TOKEN_SECRET.length < 32) problems.push('DOCUMENT_TOKEN_SECRET 必须设置且长度不少于 32 位');
   if (!upgradeSigningKeyEnv || upgradeSigningKeyEnv.length < 32) problems.push('UPGRADE_SIGNING_KEY 必须设置且长度不少于 32 位');
   if (problems.length) {
     throw new Error(`生产配置不安全：${problems.join('；')}`);
@@ -3756,13 +3762,57 @@ function normalizeInspectionAttachment(attachment) {
   };
 }
 
-function serializeDbSnapshot(db) {
+function formatQuotaSize(bytes) {
+  const value = Number(bytes) || 0;
+  if (value >= 1024 * 1024 * 1024) return `${Number((value / (1024 * 1024 * 1024)).toFixed(1))}GB`;
+  return `${Math.max(1, Math.round(value / (1024 * 1024)))}MB`;
+}
+
+// dataURL 体积按 base64 长度反推，避免客户端上报的 size 被伪造后绕过配额。
+function dataUrlByteLength(dataUrl) {
+  const value = String(dataUrl || '');
+  const commaIndex = value.indexOf(',');
+  if (commaIndex === -1) return 0;
+  const payload = value.slice(commaIndex + 1);
+  if (!payload) return 0;
+  const padding = payload.endsWith('==') ? 2 : payload.endsWith('=') ? 1 : 0;
+  return Math.max(0, Math.floor(payload.length * 3 / 4) - padding);
+}
+
+function inspectionAttachmentBytes(attachment) {
+  if (!attachment || typeof attachment !== 'object') return 0;
+  return Math.max(Number(attachment.size) || 0, dataUrlByteLength(attachment.dataUrl));
+}
+
+// 统一校验附件配额：调用方提供条目集合、归属与体积取值方式，避免各接口重复实现。
+function findAttachmentQuotaExceeded({ items, userId, projectId, incomingBytes, excludeId, getOwnerId, getProjectId, getBytes, perUserBytes, perProjectBytes, label }) {
+  const bytes = Number(incomingBytes) || 0;
+  if (bytes <= 0) return '';
+  let userUsed = 0;
+  let projectUsed = 0;
+  for (const item of items || []) {
+    if (!item || (excludeId && item.id === excludeId)) continue;
+    const itemBytes = Number(getBytes(item)) || 0;
+    if (itemBytes <= 0) continue;
+    if (userId && getOwnerId(item) === userId) userUsed += itemBytes;
+    if (projectId && getProjectId(item) === projectId) projectUsed += itemBytes;
+  }
+  if (perProjectBytes && projectId && projectUsed + bytes > perProjectBytes) {
+    return `${label}超出项目配额（上限 ${formatQuotaSize(perProjectBytes)}，已用 ${formatQuotaSize(projectUsed)}）`;
+  }
+  if (perUserBytes && userId && userUsed + bytes > perUserBytes) {
+    return `${label}超出个人配额（上限 ${formatQuotaSize(perUserBytes)}，已用 ${formatQuotaSize(userUsed)}）`;
+  }
+  return '';
+}
+
+async function serializeDbSnapshot(db) {
   const normalized = normalizeDb(db);
   return {
     ...normalized,
     sessions: [],
     runtimeState: { loginRateLimits: [] },
-    documentAttachments: collectDocumentAttachments(normalized.documents || [])
+    documentAttachments: await collectDocumentAttachments(normalized.documents || [])
   };
 }
 
@@ -3967,28 +4017,36 @@ function buildImportedDbPreservingCurrentSession(raw, currentUser, currentSessio
   return nextDb;
 }
 
-function collectDocumentAttachments(documents) {
-  return (documents || []).flatMap(doc => {
-    if (!doc.attachmentPath || !isDocumentAttachmentPathSafe(doc.attachmentPath) || !fs.existsSync(doc.attachmentPath)) return [];
-    return [{
+async function collectDocumentAttachments(documents) {
+  const collected = [];
+  for (const doc of documents || []) {
+    if (!doc.attachmentPath || !isDocumentAttachmentPathSafe(doc.attachmentPath)) continue;
+    let content;
+    try {
+      content = await fs.promises.readFile(doc.attachmentPath);
+    } catch (_) {
+      continue;
+    }
+    collected.push({
       documentId: doc.id,
       attachmentName: doc.attachmentName || path.basename(doc.attachmentPath),
-      dataBase64: fs.readFileSync(doc.attachmentPath).toString('base64')
-    }];
-  });
+      dataBase64: content.toString('base64')
+    });
+  }
+  return collected;
 }
 
-function restoreDocumentAttachments(db, attachments) {
+async function restoreDocumentAttachments(db, attachments) {
   if (!Array.isArray(attachments) || !attachments.length) return;
   for (const item of attachments) {
     const target = (db.documents || []).find(doc => doc.id === item.documentId);
     if (!target || !item.dataBase64) continue;
     const attachmentName = sanitizeUploadFilename(item.attachmentName || target.attachmentName || 'attachment');
     const docDir = path.join(documentsUploadDir, target.id);
-    fs.mkdirSync(docDir, { recursive: true });
+    await fs.promises.mkdir(docDir, { recursive: true });
     const attachmentPath = resolveSafeChildPath(docDir, attachmentName);
     const content = Buffer.from(String(item.dataBase64), 'base64');
-    fs.writeFileSync(attachmentPath, content);
+    await fs.promises.writeFile(attachmentPath, content);
     target.attachmentName = attachmentName;
     target.attachmentPath = attachmentPath;
     target.attachmentSize = content.length;
@@ -4821,12 +4879,12 @@ function createNonce() {
 }
 
 function buildNonceHeaderValue(nonce) {
-  const n = nonce || '';
-  return `default-src 'self'; script-src 'self' 'unsafe-inline' 'nonce-${n}'; style-src 'self' 'unsafe-inline' 'nonce-${n}'; img-src 'self' data: blob:; connect-src 'self' ws: wss:; font-src 'self' data:; object-src 'none'; base-uri 'self'; frame-ancestors 'none'; form-action 'self'`;
+  return `default-src 'self'; script-src 'self' 'nonce-${nonce}'; style-src 'self' 'unsafe-inline'; img-src 'self' data: blob:; connect-src 'self' ws: wss:; font-src 'self' data:; object-src 'none'; base-uri 'self'; frame-ancestors 'none'; form-action 'self'`;
 }
 
 function buildSecurityHeaders(extraHeaders = {}, nonce = '') {
-  const csp = nonce ? buildNonceHeaderValue(nonce) : "default-src 'self'; script-src 'self' 'unsafe-inline'; style-src 'self' 'unsafe-inline'; img-src 'self' data: blob:; connect-src 'self' ws: wss:; font-src 'self' data:; object-src 'none'; base-uri 'self'; frame-ancestors 'none'; form-action 'self'";
+  // 脚本只允许同源文件与携带本次 nonce 的内联块；样式保留 unsafe-inline 以支持大量行内 style。
+  const csp = nonce ? buildNonceHeaderValue(nonce) : "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data: blob:; connect-src 'self' ws: wss:; font-src 'self' data:; object-src 'none'; base-uri 'self'; frame-ancestors 'none'; form-action 'self'";
   const headers = {
     'X-Content-Type-Options': 'nosniff',
     'X-Frame-Options': 'DENY',
@@ -4857,8 +4915,76 @@ function text(res, status, data, extraHeaders = {}) {
   res.end(data);
 }
 
-function paginateResult(items, query) {
-  const unpaged = query.all === '1' || query.unpaged === '1' || String(query.pageSize || '').toLowerCase() === 'all';
+function createChunkWriter(target) {
+  return chunk => new Promise((resolve, reject) => {
+    const cleanup = () => {
+      target.removeListener('drain', onDrain);
+      target.removeListener('close', onClose);
+    };
+    const onDrain = () => { cleanup(); resolve(); };
+    const onClose = () => { cleanup(); reject(new Error('写入目标已关闭')); };
+    target.once('close', onClose);
+    if (target.write(chunk)) {
+      cleanup();
+      resolve();
+    } else {
+      target.once('drain', onDrain);
+    }
+  });
+}
+
+// 按顶层字段与数组元素逐段序列化，避免备份/导出一次性构造完整 JSON 字符串占用大量内存。
+async function writeJsonDocument(writeChunk, data) {
+  const source = data && typeof data === 'object' ? data : {};
+  const keys = Object.keys(source);
+  await writeChunk('{');
+  for (let i = 0; i < keys.length; i += 1) {
+    const value = source[keys[i]];
+    await writeChunk(`${i ? ',' : ''}${JSON.stringify(keys[i])}:`);
+    if (Array.isArray(value)) {
+      await writeChunk('[');
+      for (let j = 0; j < value.length; j += 1) {
+        await writeChunk(`${j ? ',' : ''}${JSON.stringify(value[j])}`);
+      }
+      await writeChunk(']');
+    } else {
+      await writeChunk(JSON.stringify(value));
+    }
+  }
+  await writeChunk('}');
+}
+
+async function respondJsonDocument(res, extraHeaders, data) {
+  res.writeHead(200, buildSecurityHeaders(extraHeaders));
+  try {
+    await writeJsonDocument(createChunkWriter(res), data);
+    res.end();
+  } catch (error) {
+    if (!res.writableEnded) res.end();
+    throw error;
+  }
+}
+
+async function writeJsonFileStreaming(filePath, data) {
+  const stream = fs.createWriteStream(filePath);
+  const finished = new Promise((resolve, reject) => {
+    stream.once('finish', resolve);
+    stream.once('error', reject);
+  });
+  try {
+    await writeJsonDocument(createChunkWriter(stream), data);
+    stream.end();
+    await finished;
+  } catch (error) {
+    stream.destroy();
+    throw error;
+  }
+}
+
+function paginateResult(items, query, user) {
+  // 单次全量返回仅限管理员，其他角色即使传入 all/unpaged 也退回常规分页，避免一次拉取整库数据。
+  const unpagedRequested = query.all === '1' || query.unpaged === '1' || String(query.pageSize || '').toLowerCase() === 'all';
+  const unpaged = unpagedRequested && Boolean(user) && user.role === 'admin';
   if (unpaged) {
     const data = Array.isArray(items) ? items : [];
     return { data, page: 1, pageSize: data.length || 0, total: data.length, totalPages: 1, all: true };
@@ -8581,7 +8707,7 @@ function validateUpgradePackageIntegrity(pendingDir) {
   };
 }
 
-function serveStatic(req, res, pathname, db) {
+async function serveStatic(req, res, pathname, db) {
   const filePath = pathname === '/' ? path.join(publicDir, 'index.html') : path.join(publicDir, pathname);
   const normalized = path.resolve(filePath);
   if (!(normalized === publicDir || normalized.startsWith(publicDir + path.sep))) {
@@ -8628,6 +8754,22 @@ function serveStatic(req, res, pathname, db) {
     extraHeaders['Cache-Control'] = 'no-store, no-cache, must-revalidate';
     extraHeaders.Pragma = 'no-cache';
     extraHeaders.Expires = '0';
+  }
+  // HTML 每次请求生成独立 nonce，内联脚本块通过 __CSP_NONCE__ 占位符替换后下发。
+  if (ext === '.html') {
+    let html;
+    try {
+      html = await fs.promises.readFile(resolvedPath, 'utf8');
+    } catch (_) {
+      text(res, 404, 'Not Found');
+      return;
+    }
+    const nonce = createNonce();
+    const body = html.split('__CSP_NONCE__').join(nonce);
+    const payload = Buffer.from(body, 'utf8');
+    res.writeHead(200, buildSecurityHeaders({ ...extraHeaders, 'Content-Length': String(payload.length) }, nonce));
+    res.end(payload);
+    return;
   }
   // 读流失败（权限/升级替换窗口/fd 耗尽）必须就地收尾，否则未监听的 'error'
   // 会冒泡到 uncaughtException 并终止整个进程。打开成功后再写响应头。
@@ -9410,7 +9552,7 @@ const requestHandler = async (req, res) => {
       const list = user.role === 'admin' ? db.projects : db.projects.filter(item => item.id === user.projectId);
       const query = Object.fromEntries(reqUrl.searchParams);
       const sorted = parseSortQuery(query, list, 'createdAt');
-      return json(res, 200, paginateResult(sorted, query));
+      return json(res, 200, paginateResult(sorted, query, user));
     }
 
     if (req.method === 'POST' && pathname === '/api/projects') {
@@ -9547,7 +9689,7 @@ const requestHandler = async (req, res) => {
           : [];
       const query = Object.fromEntries(reqUrl.searchParams);
       const sorted = parseSortQuery(query, list, 'createdAt');
-      return json(res, 200, paginateResult(sorted, query));
+      return json(res, 200, paginateResult(sorted, query, user));
     }
 
     if (req.method === 'POST' && pathname === '/api/users') {
@@ -9929,7 +10071,7 @@ const requestHandler = async (req, res) => {
       const list = filterByProjectScope(db.assets, user, item => item.projectId);
       const query = Object.fromEntries(reqUrl.searchParams);
       const sorted = parseSortQuery(query, list, 'createdAt');
-      return json(res, 200, paginateResult(sorted.map(item => sanitizeAssetForApi(item, user)), query));
+      return json(res, 200, paginateResult(sorted.map(item => sanitizeAssetForApi(item, user)), query, user));
     }
 
     if (req.method === 'POST' && pathname === '/api/assets/cabinet-layout/relocate') {
@@ -10563,13 +10705,13 @@ const requestHandler = async (req, res) => {
       if (!user) return;
       const query = Object.fromEntries(reqUrl.searchParams);
       if (user.role === 'customer') {
-        return json(res, 200, paginateResult([], query));
+        return json(res, 200, paginateResult([], query, user));
       }
       let list = filterByProjectScope(db.logs || [], user, item => item.projectId);
       if (query.projectId) list = list.filter(item => item.projectId === query.projectId);
       if (query.userId) list = list.filter(item => item.userId === query.userId);
       const sorted = parseSortQuery(query, list, 'createdAt');
-      return json(res, 200, paginateResult(sorted, query));
+      return json(res, 200, paginateResult(sorted, query, user));
     }
 
     if (req.method === 'GET' && pathname === '/api/logs/dictionaries') {
@@ -10675,7 +10817,7 @@ const requestHandler = async (req, res) => {
           hasContent: Boolean(item.content || item.problem || item.solution)
         }))
         : sorted;
-      return json(res, 200, paginateResult(presented, query));
+      return json(res, 200, paginateResult(presented, query, user));
     }
 
     // 详情读取对项目内所有角色开放（含客户），列表接口只脱敏正文，详情接口按权限返回完整内容。
@@ -10781,7 +10923,7 @@ const requestHandler = async (req, res) => {
       const query = Object.fromEntries(reqUrl.searchParams);
       const sorted = parseSortQuery(query, list, 'createdAt');
       const sanitized = sorted.map(item => sanitizeDocumentForApi(item, false));
-      return json(res, 200, paginateResult(sanitized, query));
+      return json(res, 200, paginateResult(sanitized, query, user));
     }
 
     if (req.method === 'GET' && pathname.match(/^\/api\/documents\/([^/]+)$/) && !pathname.includes('/verify-password') && !pathname.includes('/download')) {
@@ -10834,6 +10976,19 @@ const requestHandler = async (req, res) => {
       if (type !== 'device') {
         const filePart = parts.find(p => p.name === 'attachment' && p.filename);
         if (!filePart || !filePart.filename) return json(res, 400, { message: '请上传附件' });
+        const quotaError = findAttachmentQuotaExceeded({
+          items: db.documents,
+          userId: user.id,
+          projectId,
+          incomingBytes: filePart.data.length,
+          getOwnerId: item => item.createdBy || '',
+          getProjectId: item => item.projectId || '',
+          getBytes: item => item.attachmentSize || 0,
+          perUserBytes: documentQuotaPerUserBytes,
+          perProjectBytes: documentQuotaPerProjectBytes,
+          label: '资料附件'
+        });
+        if (quotaError) return json(res, 413, { message: quotaError });
         const docDir = path.join(documentsUploadDir, docId);
         fs.mkdirSync(docDir, { recursive: true });
         attachmentName = sanitizeUploadFilename(filePart.filename);
@@ -10925,6 +11080,20 @@ const requestHandler = async (req, res) => {
         if (getField('type')) target.type = newType;
         const filePart = parts.find(p => p.name === 'attachment' && p.filename);
         if (filePart && filePart.filename) {
+          const quotaError = findAttachmentQuotaExceeded({
+            items: db.documents,
+            userId: user.id,
+            projectId: target.projectId || '',
+            incomingBytes: filePart.data.length,
+            excludeId: docId,
+            getOwnerId: item => item.createdBy || '',
+            getProjectId: item => item.projectId || '',
+            getBytes: item => item.attachmentSize || 0,
+            perUserBytes: documentQuotaPerUserBytes,
+            perProjectBytes: documentQuotaPerProjectBytes,
+            label: '资料附件'
+          });
+          if (quotaError) return json(res, 413, { message: quotaError });
           const docDir = path.join(documentsUploadDir, docId);
           fs.mkdirSync(docDir, { recursive: true });
           target.attachmentName = sanitizeUploadFilename(filePart.filename);
@@ -11131,7 +11300,7 @@ const requestHandler = async (req, res) => {
         .map(plan => sanitizeInspectionPlanForViewer({ ...plan, status: resolveInspectionPlanStatus(plan, todayKey) }, user));
       const query = Object.fromEntries(reqUrl.searchParams);
       const sorted = parseSortQuery(query, list, 'createdAt');
-      return json(res, 200, paginateResult(sorted, query));
+      return json(res, 200, paginateResult(sorted, query, user));
     }
 
     if (req.method === 'POST' && pathname === '/api/inspection-plans') {
@@ -11221,7 +11390,7 @@ const requestHandler = async (req, res) => {
         .map(item => sanitizeInspectionExecutionForViewer(item, user));
       const query = Object.fromEntries(reqUrl.searchParams);
       const sorted = parseSortQuery(query, list, 'createdAt');
-      return json(res, 200, paginateResult(sorted, query));
+      return json(res, 200, paginateResult(sorted, query, user));
     }
 
     if (req.method === 'POST' && pathname === '/api/inspection-executions') {
@@ -11241,6 +11410,20 @@ const requestHandler = async (req, res) => {
       if (!nextDate || nextDate < executedDateKey) {
         nextDate = computeNextInspectionDateKey(plan.cycle, executedDateKey) || nextDate;
       }
+      const attachment = normalizeInspectionAttachment(body.attachment);
+      const attachmentQuotaError = findAttachmentQuotaExceeded({
+        items: db.inspectionExecutions,
+        userId: user.id,
+        projectId: plan.projectId,
+        incomingBytes: inspectionAttachmentBytes(attachment),
+        getOwnerId: item => item.createdBy || '',
+        getProjectId: item => item.projectId || '',
+        getBytes: item => inspectionAttachmentBytes(item.attachment),
+        perUserBytes: inspectionAttachmentQuotaPerUserBytes,
+        perProjectBytes: inspectionAttachmentQuotaPerProjectBytes,
+        label: '巡检附件'
+      });
+      if (attachmentQuotaError) return json(res, 413, { message: attachmentQuotaError });
       const execution = {
         id: id('inspectionExec'),
         planId: plan.id,
@@ -11252,7 +11435,7 @@ const requestHandler = async (req, res) => {
         result: body.result || '正常',
         issue: body.issue || '',
         suggestion: body.suggestion || '',
-        attachment: normalizeInspectionAttachment(body.attachment),
+        attachment,
         nextDate,
         createdBy: user.id,
         createdAt: now()
@@ -11286,7 +11469,23 @@ const requestHandler = async (req, res) => {
       if (body.suggestion !== undefined) target.suggestion = body.suggestion;
       if (body.nextDate !== undefined) target.nextDate = body.nextDate;
       const attachment = normalizeInspectionAttachment(body.attachment);
-      if (attachment && attachment.name) target.attachment = attachment;
+      if (attachment && attachment.name) {
+        const attachmentQuotaError = findAttachmentQuotaExceeded({
+          items: db.inspectionExecutions,
+          userId: user.id,
+          projectId: target.projectId || '',
+          incomingBytes: inspectionAttachmentBytes(attachment),
+          excludeId: executionId,
+          getOwnerId: item => item.createdBy || '',
+          getProjectId: item => item.projectId || '',
+          getBytes: item => inspectionAttachmentBytes(item.attachment),
+          perUserBytes: inspectionAttachmentQuotaPerUserBytes,
+          perProjectBytes: inspectionAttachmentQuotaPerProjectBytes,
+          label: '巡检附件'
+        });
+        if (attachmentQuotaError) return json(res, 413, { message: attachmentQuotaError });
+        target.attachment = attachment;
+      }
       // 依据该计划下最新一条执行记录统一刷新状态，避免修改历史记录时错误覆盖计划当前状态。
       const plan = (db.inspectionPlans || []).find(item => item.id === target.planId);
       refreshInspectionPlanFromExecutions(db, target.planId);
@@ -11316,12 +11515,12 @@ const requestHandler = async (req, res) => {
       if (!user) return;
       if (user.role === 'customer') {
         const query = Object.fromEntries(reqUrl.searchParams);
-        return json(res, 200, paginateResult([], query));
+        return json(res, 200, paginateResult([], query, user));
       }
       const list = filterByProjectScope(db.spareParts || [], user, item => item.projectId);
       const query = Object.fromEntries(reqUrl.searchParams);
       const sorted = parseSortQuery(query, list, 'createdAt');
-      return json(res, 200, paginateResult(sorted, query));
+      return json(res, 200, paginateResult(sorted, query, user));
     }
 
     if (req.method === 'GET' && pathname === '/api/spare-part-movements') {
@@ -11329,12 +11528,12 @@ const requestHandler = async (req, res) => {
       if (!user) return;
       if (user.role === 'customer') {
         const query = Object.fromEntries(reqUrl.searchParams);
-        return json(res, 200, paginateResult([], query));
+        return json(res, 200, paginateResult([], query, user));
       }
       const list = filterByProjectScope(db.sparePartMovements || [], user, item => item.projectId);
       const query = Object.fromEntries(reqUrl.searchParams);
       const sorted = parseSortQuery(query, list, 'createdAt');
-      return json(res, 200, paginateResult(sorted, query));
+      return json(res, 200, paginateResult(sorted, query, user));
     }
 
     if (req.method === 'POST' && pathname === '/api/spare-parts') {
@@ -11535,7 +11734,7 @@ const requestHandler = async (req, res) => {
       const query = Object.fromEntries(reqUrl.searchParams);
       const sorted = parseSortQuery(query, list, 'createdAt');
       const presented = sorted.map(item => sanitizeChangeRecordForViewer(item, user));
-      return json(res, 200, paginateResult(presented, query));
+      return json(res, 200, paginateResult(presented, query, user));
     }
 
     if (req.method === 'POST' && pathname === '/api/change-records') {
@@ -11737,7 +11936,7 @@ const requestHandler = async (req, res) => {
       const presented = user.role === 'customer'
         ? sorted.map(item => ({ ...item, description: '', resolution: '' }))
         : sorted;
-      return json(res, 200, paginateResult(presented, query));
+      return json(res, 200, paginateResult(presented, query, user));
     }
 
     if (req.method === 'POST' && pathname === '/api/incidents') {
@@ -11855,7 +12054,7 @@ const requestHandler = async (req, res) => {
           customerId: item.customerId
         }))
         : sorted;
-      return json(res, 200, paginateResult(presented, query));
+      return json(res, 200, paginateResult(presented, query, user));
     }
 
     if (req.method === 'POST' && pathname === '/api/approvals') {
@@ -11989,7 +12188,7 @@ const requestHandler = async (req, res) => {
         .map(item => sanitizeAiInspectionTargetForViewer({ ...item, systemVersion: item.assetId && assetVersionMap.has(item.assetId) ? assetVersionMap.get(item.assetId) : item.systemVersion }, user));
       const query = Object.fromEntries(reqUrl.searchParams);
       const sorted = parseSortQuery(query, list, 'createdAt');
-      return json(res, 200, paginateResult(sorted, query));
+      return json(res, 200, paginateResult(sorted, query, user));
     }
 
     if (req.method === 'POST' && pathname === '/api/ai-inspection/targets') {
@@ -12199,7 +12398,7 @@ const requestHandler = async (req, res) => {
       const list = (db.aiInspectionTemplates || []).filter(item => canUseAiInspectionTemplate(user, item));
       const query = Object.fromEntries(reqUrl.searchParams);
       const sorted = parseSortQuery(query, list, 'createdAt');
-      return json(res, 200, paginateResult(sorted, query));
+      return json(res, 200, paginateResult(sorted, query, user));
     }
 
     if (req.method === 'POST' && pathname === '/api/ai-inspection/templates') {
@@ -12283,7 +12482,7 @@ const requestHandler = async (req, res) => {
       if (!user) return;
       if (user.role === 'customer') {
         const query = Object.fromEntries(reqUrl.searchParams);
-        return json(res, 200, paginateResult([], query));
+        return json(res, 200, paginateResult([], query, user));
       }
       const referenceMs = Date.now();
       const resultMap = new Map();
@@ -12310,7 +12509,7 @@ const requestHandler = async (req, res) => {
       });
       const query = Object.fromEntries(reqUrl.searchParams);
       const sorted = parseSortQuery(query, list, 'createdAt');
-      return json(res, 200, paginateResult(sorted, query));
+      return json(res, 200, paginateResult(sorted, query, user));
     }
 
     if (req.method === 'POST' && pathname === '/api/ai-inspection/tasks') {
@@ -12450,13 +12649,13 @@ const requestHandler = async (req, res) => {
       if (!user) return;
       if (user.role === 'customer') {
         const query = Object.fromEntries(reqUrl.searchParams);
-        return json(res, 200, paginateResult([], query));
+        return json(res, 200, paginateResult([], query, user));
       }
       const list = filterByProjectScope(db.configBackupPlans || [], user, item => item.projectId);
       const query = Object.fromEntries(reqUrl.searchParams);
       if (!query.sortDirection) query.sortDirection = 'desc';
       const sorted = parseSortQuery(query, list, 'createdAt');
-      return json(res, 200, paginateResult(sorted, query));
+      return json(res, 200, paginateResult(sorted, query, user));
     }
 
     if (req.method === 'POST' && pathname === '/api/ai-inspection/config-backup/plans') {
@@ -12551,14 +12750,14 @@ const requestHandler = async (req, res) => {
       if (!user) return;
       if (user.role === 'customer') {
         const query = Object.fromEntries(reqUrl.searchParams);
-        return json(res, 200, paginateResult([], query));
+        return json(res, 200, paginateResult([], query, user));
       }
       const list = filterByProjectScope(db.configBackupRecords || [], user, item => item.projectId)
         .map(item => ({ ...item, content: undefined }));
       const query = Object.fromEntries(reqUrl.searchParams);
       if (!query.sortDirection) query.sortDirection = 'desc';
       const sorted = parseSortQuery(query, list, 'createdAt');
-      return json(res, 200, paginateResult(sorted, query));
+      return json(res, 200, paginateResult(sorted, query, user));
     }
 
     if (req.method === 'POST' && pathname.startsWith('/api/ai-inspection/config-backup/records/') && pathname.endsWith('/download')) {
@@ -12650,7 +12849,7 @@ const requestHandler = async (req, res) => {
       }
       if (!query.sortDirection) query.sortDirection = 'desc';
       const sorted = parseSortQuery(query, list, 'createdAt');
-      return json(res, 200, paginateResult(sorted.map(item => sanitizeAiInspectionResultForViewer(item, user)), query));
+      return json(res, 200, paginateResult(sorted.map(item => sanitizeAiInspectionResultForViewer(item, user)), query, user));
     }
 
     if (req.method === 'GET' && pathname.startsWith('/api/ai-inspection/results/')) {
@@ -12688,7 +12887,7 @@ const requestHandler = async (req, res) => {
       const sorted = parseSortQuery(query, list, 'createdAt');
       const unreadTotal = list.filter(item => !getNotificationReadAtForUser(item, user.id)).length;
       const presented = sorted.map(item => presentNotification(item, user));
-      return json(res, 200, { ...paginateResult(presented, query), unreadTotal });
+      return json(res, 200, { ...paginateResult(presented, query, user), unreadTotal });
     }
 
     if (req.method === 'POST' && pathname === '/api/notifications/read-all') {
@@ -12759,11 +12958,11 @@ const requestHandler = async (req, res) => {
       if (!user) return;
       const list = user.role === 'admin'
         ? (db.auditLogs || [])
-        : (db.auditLogs || []).filter(item => !item.projectId || item.projectId === user.projectId);
+        : filterByProjectScope(db.auditLogs || [], user, item => item.projectId);
       const query = Object.fromEntries(reqUrl.searchParams);
       if (!query.sortDirection) query.sortDirection = 'desc';
       const sorted = parseSortQuery(query, list, 'createdAt');
-      return json(res, 200, paginateResult(sorted, query));
+      return json(res, 200, paginateResult(sorted, query, user));
     }
 
     if (req.method === 'GET' && pathname === '/api/audit-logs/archive') {
@@ -12779,9 +12978,9 @@ const requestHandler = async (req, res) => {
       if (!filePath) return json(res, 400, { message: '无效的归档文件' });
       if (fs.statSync(filePath).size > auditArchiveMaxReadBytes) return json(res, 413, { message: '归档文件过大，无法在线查询' });
       let entries = readAuditArchiveEntries(filePath);
-      // 非管理员仅能查看本项目或无项目归属的历史审计记录，与在线审计日志接口保持一致。
+      // 审计员仅能查看本项目的历史审计记录，与在线审计日志接口保持一致。
       if (user.role !== 'admin') {
-        entries = entries.filter(item => !item.projectId || item.projectId === user.projectId);
+        entries = filterByProjectScope(entries, user, item => item.projectId);
       }
       const action = reqUrl.searchParams.get('action') || '';
       if (action) entries = entries.filter(item => item.action === action);
@@ -12795,7 +12994,7 @@ const requestHandler = async (req, res) => {
       const query = Object.fromEntries(reqUrl.searchParams);
       if (!query.sortDirection) query.sortDirection = 'desc';
       const sorted = parseSortQuery(query, entries, 'createdAt');
-      return json(res, 200, paginateResult(sorted, query));
+      return json(res, 200, paginateResult(sorted, query, user));
     }
 
     if (req.method === 'GET' && pathname === '/api/work-reports') {
@@ -13308,9 +13507,9 @@ const requestHandler = async (req, res) => {
       const sessionToken = getSessionToken(req);
       const currentSession = (db.sessions || []).find(item => item.token === sessionToken) || null;
       const nextDb = buildImportedDbPreservingCurrentSession(fillMissingSnapshotSecrets(body, db), user, sessionToken, currentSession);
-      restoreDocumentAttachments(nextDb, body.documentAttachments || []);
+      await restoreDocumentAttachments(nextDb, body.documentAttachments || []);
       const backupFilename = `backup-before-import-${now().replace(/[:.]/g, '-')}.json`;
-      fs.writeFileSync(path.join(backupDir, backupFilename), JSON.stringify(serializeDbSnapshot(db), null, 2));
+      await writeJsonFileStreaming(path.join(backupDir, backupFilename), await serializeDbSnapshot(db));
       appendAuditLog(nextDb, user, 'import', 'system', '', `导入系统数据，导入前备份 ${backupFilename}`);
       await writeDb(nextDb);
       // 落库成功后清理旧数据残留的资料附件目录，避免导入后磁盘残留不可达附件。
@@ -13327,7 +13526,7 @@ const requestHandler = async (req, res) => {
         return json(res, 401, { message: '管理员密码错误' });
       }
       const filename = `backup-${now().replace(/[:.]/g, '-')}.json`;
-      fs.writeFileSync(path.join(backupDir, filename), JSON.stringify(serializeDbSnapshot(db), null, 2));
+      await writeJsonFileStreaming(path.join(backupDir, filename), await serializeDbSnapshot(db));
       appendAuditLog(db, user, 'backup', 'system', '', `创建系统备份 ${filename}`);
       await writeDb(db);
       return json(res, 200, {
@@ -13346,7 +13545,7 @@ const requestHandler = async (req, res) => {
       const sessionToken = getSessionToken(req);
       const currentSession = (db.sessions || []).find(item => item.token === sessionToken) || null;
       const backupFilename = `backup-before-reset-${now().replace(/[:.]/g, '-')}.json`;
-      fs.writeFileSync(path.join(backupDir, backupFilename), JSON.stringify(serializeDbSnapshot(db), null, 2));
+      await writeJsonFileStreaming(path.join(backupDir, backupFilename), await serializeDbSnapshot(db));
       const preservedHttpsConfig = normalizeSystemConfig(db.systemConfig || {});
       const nextDb = buildResetDbForNewEnvironment(user, sessionToken, currentSession);
       nextDb.systemConfig = normalizeSystemConfig({
@@ -13384,13 +13583,13 @@ const requestHandler = async (req, res) => {
       }
       appendAuditLog(db, user, 'export', 'system', '', '导出系统数据');
       await writeDb(db);
-      res.writeHead(200, buildSecurityHeaders({
-        'Content-Type': 'application/json; charset=utf-8',
-        'Content-Disposition': 'attachment; filename="onsite-ops-export.json"'
-      }));
       // 导出内容需与磁盘备份/恢复语义一致，包含凭据哈希与设备密钥，
       // 保证导出文件在其它环境导入后账号可登录、资产监控凭据可用。
-      return res.end(JSON.stringify(serializeDbSnapshot(db), null, 2));
+      return await respondJsonDocument(res, {
+        'Content-Type': 'application/json; charset=utf-8',
+        'Content-Disposition': 'attachment; filename="onsite-ops-export.json"',
+        'Cache-Control': 'no-store'
+      }, await serializeDbSnapshot(db));
     }
 
     if (req.method === 'POST' && pathname.startsWith('/api/system/backups/') && pathname.endsWith('/restore')) {
@@ -13415,7 +13614,7 @@ const requestHandler = async (req, res) => {
       const filename = path.basename(filePath);
       let snapshot;
       try {
-        snapshot = JSON.parse(fs.readFileSync(filePath, 'utf8'));
+        snapshot = JSON.parse(await fs.promises.readFile(filePath, 'utf8'));
       } catch (_) {
         return json(res, 400, { message: '备份文件不是有效 JSON' });
       }
@@ -13437,9 +13636,9 @@ const requestHandler = async (req, res) => {
       const sessionToken = getSessionToken(req);
       const currentSession = (db.sessions || []).find(item => item.token === sessionToken) || null;
       const nextDb = buildImportedDbPreservingCurrentSession(fillMissingSnapshotSecrets(snapshot, db), user, sessionToken, currentSession);
-      restoreDocumentAttachments(nextDb, snapshot.documentAttachments || []);
+      await restoreDocumentAttachments(nextDb, snapshot.documentAttachments || []);
       const backupFilename = `backup-before-restore-${now().replace(/[:.]/g, '-')}.json`;
-      fs.writeFileSync(path.join(backupDir, backupFilename), JSON.stringify(serializeDbSnapshot(db), null, 2));
+      await writeJsonFileStreaming(path.join(backupDir, backupFilename), await serializeDbSnapshot(db));
       appendAuditLog(nextDb, user, 'restore', 'system', '', `从磁盘备份恢复 ${filename}，恢复前备份 ${backupFilename}`);
       await writeDb(nextDb);
       await applyHttpsServerConfig(nextDb.systemConfig || {});
@@ -13466,16 +13665,20 @@ const requestHandler = async (req, res) => {
       }
       const filename = path.basename(filePath);
       // 备份文件与导出/恢复保持同一语义：包含可恢复凭据，以便跨环境导入后账号仍可登录。
-      const payload = fs.readFileSync(filePath, 'utf8');
+      const stat = await fs.promises.stat(filePath);
       appendAuditLog(db, user, 'download', 'system', '', `下载${archived ? '归档' : ''}备份 ${filename}`);
       await writeDb(db);
-      const fileBuffer = Buffer.from(payload, 'utf8');
       res.writeHead(200, buildSecurityHeaders({
         'Content-Type': 'application/json; charset=utf-8',
         'Content-Disposition': `attachment; filename="${filename}"`,
-        'Content-Length': String(fileBuffer.length)
+        'Cache-Control': 'no-store',
+        'Content-Length': String(stat.size)
       }));
-      return res.end(fileBuffer);
+      const stream = fs.createReadStream(filePath);
+      stream.once('error', () => {
+        if (!res.writableEnded) res.end();
+      });
+      return stream.pipe(res);
     }
 
     if (req.method === 'DELETE' && pathname.startsWith('/api/system/backups/')) {
@@ -13919,7 +14122,7 @@ const requestHandler = async (req, res) => {
       });
     }
 
-    return serveStatic(req, res, pathname, db);
+    return await serveStatic(req, res, pathname, db);
   } catch (error) {
     console.error('Request error:', error.message);
     if (res.headersSent) {
@@ -14620,7 +14823,7 @@ async function runAutoBackup() {
     const filePath = path.join(backupDir, filename);
     if (!fs.existsSync(filePath)) {
       if (db) {
-        fs.writeFileSync(filePath, JSON.stringify(serializeDbSnapshot(db), null, 2));
+        await writeJsonFileStreaming(filePath, await serializeDbSnapshot(db));
       }
     }
     // 所有备份（每日快照、重置/导入/恢复前快照、手动快照）统一按 localBackupRetentionDays

@@ -343,6 +343,14 @@ async function main() {
   assert(health.status === 200 && health.data.ok === true, '健康检查接口失败');
   const ready = await request('/api/ready');
   assert(ready.status === 200 && ready.data.ok === true, '就绪检查接口失败');
+  const indexPage = await request('/');
+  const cspHeader = indexPage.headers['content-security-policy'] || '';
+  assert(indexPage.status === 200 && typeof indexPage.data === 'string', '首页加载失败');
+  assert(/script-src 'self' 'nonce-[^']+'/.test(cspHeader), 'HTML 应使用 nonce 限制内联脚本');
+  assert(!/script-src[^;]*'unsafe-inline'/.test(cspHeader), 'script-src 不应包含 unsafe-inline');
+  assert(!/onclick=/.test(indexPage.data), '首页不应包含内联事件属性');
+  const cspNonce = (cspHeader.match(/'nonce-([^']+)'/) || [])[1];
+  assert(cspNonce && indexPage.data.includes(`nonce="${cspNonce}"`), 'HTML 内联脚本应携带匹配的 nonce');
   const captchaProbe = await request('/api/captcha');
   assert(captchaProbe.status === 200 && captchaProbe.data.token, '验证码接口失败');
   assert(captchaProbe.data.code === undefined, '验证码接口不应返回明文 code');
@@ -788,6 +796,34 @@ async function main() {
   assert(engineerSession.status === 200, '工程师会话校验失败');
   assert(engineerSession.data.systemConfig?.httpsCertFingerprint256 === undefined, '工程师会话不应返回完整系统配置');
   assert(Number(engineerSession.data.systemConfig?.webIdleLogoutMinutes) >= 1, '工程师会话应返回超时配置');
+  // 非管理员请求 all=1 只能拿到分页结果；全量返回保留给管理员。
+  const engineerUnpaged = await request('/api/projects?all=1', { headers: { cookie: engineerCookie } });
+  assert(engineerUnpaged.status === 200, '工程师读取项目列表失败');
+  assert(engineerUnpaged.data.all !== true && Number(engineerUnpaged.data.pageSize) <= 100, '非管理员 all=1 应退回分页');
+  const adminUnpaged = await request('/api/projects?all=1', { headers: { cookie } });
+  assert(adminUnpaged.data.all === true, '管理员 all=1 应返回全量数据');
+  // 审计员只能看到本项目审计日志，无项目归属与其他项目记录均不可见。
+  const auditorUsername = `auditor_${Date.now()}`;
+  const createAuditor = await request('/api/users', {
+    method: 'POST',
+    headers: { cookie, 'Content-Type': 'application/json' },
+    body: JSON.stringify({ username: auditorUsername, password: 'Auditor123!', role: 'auditor', name: '审计回归账号', projectId })
+  });
+  assert(createAuditor.status === 201, '创建审计员账号失败');
+  const auditorLogin = await login(auditorUsername, 'Auditor123!');
+  assert(auditorLogin.status === 200, '审计员登录失败');
+  const auditorLogs = await request('/api/audit-logs?pageSize=100&sortBy=createdAt&sortDirection=desc', { headers: { cookie: auditorLogin.cookie } });
+  assert(auditorLogs.status === 200, '审计员读取审计日志失败');
+  const auditorRows = auditorLogs.data.data || [];
+  assert(auditorRows.length > 0, '审计员应能看到本项目审计日志');
+  assert(auditorRows.every(item => item.projectId === projectId), '审计员仅能看到本项目审计日志');
+  const adminLogsForScope = await request('/api/audit-logs?all=1', { headers: { cookie } });
+  const foreignAuditEntry = (adminLogsForScope.data.data || []).find(item => item.projectId !== projectId);
+  if (foreignAuditEntry) {
+    assert(!auditorRows.some(item => item.id === foreignAuditEntry.id), '审计员不应看到其他项目审计日志');
+  }
+  const auditorUnpaged = await request('/api/audit-logs?all=1', { headers: { cookie: auditorLogin.cookie } });
+  assert(auditorUnpaged.data.all !== true, '审计员 all=1 应退回分页');
   const engineerAudit = await request('/api/audit-logs?all=1', { headers: { cookie: engineerCookie } });
   assert(engineerAudit.status === 403, '工程师不应读取审计日志');
   const engineerUpgradeLogs = await request('/api/system/upgrade/logs', { headers: { cookie: engineerCookie } });
@@ -2266,6 +2302,18 @@ async function main() {
   assert(createDoc2.status === 200 || createDoc2.status === 201, `创建合同资料失败: ${doc2Data.message || createDoc2.status}`);
   assert(doc2Data.attachmentName === 'test-contract.pdf', '附件名称未保存');
   const docId2 = doc2Data.id;
+  if (process.env.EXPECT_DOCUMENT_QUOTA === '1') {
+    // 服务端以 DOCUMENT_QUOTA_PER_USER_BYTES 限制个人累计附件体积，超限时必须拒绝落盘。
+    const quotaForm = new FormData();
+    quotaForm.append('projectId', projectId);
+    quotaForm.append('type', 'contract');
+    quotaForm.append('title', '配额测试合同');
+    quotaForm.append('attachment', new Blob([new Uint8Array(9 * 1024 * 1024)], { type: 'application/pdf' }), 'quota-contract.pdf');
+    quotaForm.append('accessPassword', 'DocPass789');
+    const quotaResponse = await fetch(base + '/api/documents', { method: 'POST', headers: withCsrf({ cookie }, 'POST'), body: quotaForm });
+    const quotaData = await quotaResponse.json();
+    assert(quotaResponse.status === 413 && /配额/.test(String(quotaData.message || '')), '附件超出个人配额应返回 413');
+  }
 
   const listDocs = await request('/api/documents', { headers: { cookie } });
   assert(listDocs.status === 200 && Array.isArray(listDocs.data.data), '资料列表读取失败');
