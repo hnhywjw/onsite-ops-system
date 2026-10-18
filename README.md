@@ -128,6 +128,7 @@ docker compose --env-file .env.production -f docker-compose.prod.yml up -d --bui
 - 资产列表切换项目筛选时清理不可见的勾选项，避免批量删除或导出误操作其它项目资产
 - 登录限流改为从右往左跳过可信代理取真实客户端地址，并校验 IP 合法性，避免伪造 `X-Forwarded-For` 绕过
 - 新增 `TRUSTED_PROXY_IPS`，支持跨主机反向代理按 IP/CIDR 声明可信出口
+- 新增可选启用的动态令牌（TOTP）二次认证，支持身份验证器扫码绑定、一次性恢复码与管理员重置
 - OIDC 登录 state 与发起登录的浏览器 Cookie 绑定，防止登录 CSRF
 - 附件替换改为临时文件原子重命名，删除资料先落库再清理文件，避免失败时丢失附件
 

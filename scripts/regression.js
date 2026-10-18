@@ -174,6 +174,37 @@ async function requestHttps(path, port) {
 
 const { decodeCaptchaFromSvg } = require('./captcha-glyphs');
 
+const BASE32_ALPHABET = 'ABCDEFGHIJKLMNOPQRSTUVWXYZ234567';
+
+function base32Decode(input) {
+  let bits = 0;
+  let value = 0;
+  const bytes = [];
+  for (const char of String(input || '').toUpperCase().replace(/[^A-Z2-7]/g, '')) {
+    value = (value << 5) | BASE32_ALPHABET.indexOf(char);
+    bits += 5;
+    if (bits >= 8) {
+      bytes.push((value >>> (bits - 8)) & 0xff);
+      bits -= 8;
+    }
+  }
+  return Buffer.from(bytes);
+}
+
+function totpCode(secret, atMs = Date.now()) {
+  const counter = Math.floor(atMs / 1000 / 30);
+  const movingFactor = Buffer.alloc(8);
+  movingFactor.writeUInt32BE(Math.floor(counter / 0x100000000), 0);
+  movingFactor.writeUInt32BE(counter >>> 0, 4);
+  const digest = crypto.createHmac('sha1', base32Decode(secret)).update(movingFactor).digest();
+  const offset = digest[digest.length - 1] & 0x0f;
+  const binary = ((digest[offset] & 0x7f) << 24)
+    | ((digest[offset + 1] & 0xff) << 16)
+    | ((digest[offset + 2] & 0xff) << 8)
+    | (digest[offset + 3] & 0xff);
+  return String(binary % 1000000).padStart(6, '0');
+}
+
 async function login(username, password, options = {}) {
   const captcha = await request('/api/captcha');
   const result = await request('/api/login', {
@@ -342,6 +373,102 @@ async function main() {
   assert(Number(admin.data.systemConfig?.webIdleLogoutMinutes) >= 1, '登录响应未返回控制台超时配置');
   let cookie = admin.cookie;
   assert(String(admin.headers['set-cookie'] || '').includes('SameSite=Lax'), '登录 Cookie 应为 SameSite=Lax');
+
+  // 动态令牌（TOTP）二次认证：绑定、挑战登录、恢复码、重新生成与关闭。
+  const twoFactorUsername = `tf_${Date.now()}_${Math.floor(Math.random() * 1000)}`;
+  const twoFactorPassword = 'TotpRegress1!';
+  const twoFactorUser = await request('/api/users', {
+    method: 'POST',
+    headers: { cookie, 'Content-Type': 'application/json' },
+    body: JSON.stringify({ username: twoFactorUsername, password: twoFactorPassword, role: 'viewer', name: '动态令牌回归账号' })
+  });
+  assert(twoFactorUser.status === 201 && twoFactorUser.data.id, '创建动态令牌回归账号失败');
+  const twoFactorUserId = twoFactorUser.data.id;
+  try {
+    const plainLogin = await login(twoFactorUsername, twoFactorPassword);
+    assert(plainLogin.status === 200 && plainLogin.cookie, '动态令牌回归账号首次登录失败');
+    const plainCookie = plainLogin.cookie;
+    const initialStatus = await request('/api/account/2fa', { headers: { cookie: plainCookie } });
+    assert(initialStatus.status === 200 && initialStatus.data.enabled === false, '新账号动态令牌应默认关闭');
+    const setup = await request('/api/account/2fa/setup', {
+      method: 'POST',
+      headers: { cookie: plainCookie, 'Content-Type': 'application/json' },
+      body: JSON.stringify({ password: twoFactorPassword })
+    });
+    assert(setup.status === 200 && setup.data.secret && setup.data.otpauthUrl, '动态令牌绑定初始化失败');
+    assert(!String(setup.data.otpauthUrl).includes('undefined'), '动态令牌二维码链接异常');
+    const validCode = totpCode(setup.data.secret);
+    const wrongCode = String((Number(validCode) + 1) % 1000000).padStart(6, '0');
+    const wrongEnable = await request('/api/account/2fa/enable', {
+      method: 'POST',
+      headers: { cookie: plainCookie, 'Content-Type': 'application/json' },
+      body: JSON.stringify({ code: wrongCode })
+    });
+    assert(wrongEnable.status === 400, '错误动态码不应启用二次认证');
+    const enable = await request('/api/account/2fa/enable', {
+      method: 'POST',
+      headers: { cookie: plainCookie, 'Content-Type': 'application/json' },
+      body: JSON.stringify({ code: validCode })
+    });
+    assert(enable.status === 200 && Array.isArray(enable.data.recoveryCodes) && enable.data.recoveryCodes.length === 10, '启用动态令牌失败');
+    await request('/api/logout', { method: 'POST', headers: { cookie: plainCookie, 'Content-Type': 'application/json' }, body: '{}' });
+
+    const challenge = await login(twoFactorUsername, twoFactorPassword);
+    assert(challenge.status === 200 && challenge.data.twoFactorRequired === true, '启用二次认证后登录未返回动态码挑战');
+    assert(!challenge.cookie, '仅凭密码不应建立会话');
+    assert(challenge.data.user === undefined, '动态码挑战阶段不应返回用户信息');
+    const badChallenge = await request('/api/login/2fa', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ challengeToken: challenge.data.challengeToken, code: wrongCode })
+    });
+    assert(badChallenge.status === 401, '错误动态码不应通过二次认证');
+    const verified = await request('/api/login/2fa', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ challengeToken: challenge.data.challengeToken, code: validCode })
+    });
+    assert(verified.status === 200 && verified.data.user, '正确动态码二次认证失败');
+    assert(verified.data.user.twoFactorSecret === undefined && verified.data.user.twoFactorRecoveryCodeHashes === undefined, '登录响应不应返回动态令牌密钥');
+    const verifiedCookie = (verified.headers['set-cookie'] || '').split(';')[0];
+    assert(Boolean(verifiedCookie), '二次认证成功未建立会话');
+    csrfByCookie.set(verifiedCookie, verified.data.csrfToken);
+    const enabledStatus = await request('/api/account/2fa', { headers: { cookie: verifiedCookie } });
+    assert(enabledStatus.status === 200 && enabledStatus.data.enabled === true && enabledStatus.data.recoveryCodesRemaining === 10, '动态令牌启用状态异常');
+    await request('/api/logout', { method: 'POST', headers: { cookie: verifiedCookie, 'Content-Type': 'application/json' }, body: '{}' });
+
+    const recoveryChallenge = await login(twoFactorUsername, twoFactorPassword);
+    assert(recoveryChallenge.status === 200 && recoveryChallenge.data.challengeToken, '恢复码登录未取得挑战');
+    const recoveryLogin = await request('/api/login/2fa', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ challengeToken: recoveryChallenge.data.challengeToken, code: enable.data.recoveryCodes[0] })
+    });
+    assert(recoveryLogin.status === 200 && recoveryLogin.data.recoveryCodeUsed === true, '恢复码登录失败');
+    const recoveryCookie = (recoveryLogin.headers['set-cookie'] || '').split(';')[0];
+    csrfByCookie.set(recoveryCookie, recoveryLogin.data.csrfToken);
+    const afterRecovery = await request('/api/account/2fa', { headers: { cookie: recoveryCookie } });
+    assert(afterRecovery.data.recoveryCodesRemaining === 9, '恢复码使用后未失效');
+
+    const regenerated = await request('/api/account/2fa/recovery-codes', {
+      method: 'POST',
+      headers: { cookie: recoveryCookie, 'Content-Type': 'application/json' },
+      body: JSON.stringify({ code: totpCode(setup.data.secret) })
+    });
+    assert(regenerated.status === 200 && regenerated.data.recoveryCodes.length === 10, '重新生成恢复码失败');
+    const disabled = await request('/api/account/2fa/disable', {
+      method: 'POST',
+      headers: { cookie: recoveryCookie, 'Content-Type': 'application/json' },
+      body: JSON.stringify({ password: twoFactorPassword, code: totpCode(setup.data.secret) })
+    });
+    assert(disabled.status === 200, '关闭动态令牌失败');
+    const disabledStatus = await request('/api/account/2fa', { headers: { cookie: recoveryCookie } });
+    assert(disabledStatus.status === 200 && disabledStatus.data.enabled === false, '关闭动态令牌后状态未更新');
+    await request('/api/logout', { method: 'POST', headers: { cookie: recoveryCookie, 'Content-Type': 'application/json' }, body: '{}' });
+  } finally {
+    await request(`/api/users/${twoFactorUserId}`, { method: 'DELETE', headers: { cookie } });
+  }
+
   // 每轮回归用独立客户端 IP，避免反复运行累积触发忘记密码的进程内限流
   const forgotTestIp = `198.18.${(Date.now() % 200) + 1}.${Math.floor(Math.random() * 250) + 1}`;
   const forgotMissingCaptcha = await request('/api/captcha');

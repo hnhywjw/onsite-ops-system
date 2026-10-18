@@ -1570,7 +1570,15 @@ function sanitizeAiInspectionTargetForViewer(item, viewer) {
 
 function sanitizeUser(user) {
   if (!user) return null;
-  const { passwordHash, securityQuestion, securityAnswerHash, ...safe } = user;
+  const {
+    passwordHash,
+    securityQuestion,
+    securityAnswerHash,
+    twoFactorSecret,
+    twoFactorPendingSecret,
+    twoFactorRecoveryCodeHashes,
+    ...safe
+  } = user;
   return safe;
 }
 
@@ -2293,6 +2301,199 @@ function decryptCredential(ciphertext) {
   let decrypted = decipher.update(parts[2], 'hex', 'utf8');
   decrypted += decipher.final('utf8');
   return decrypted;
+}
+
+// ---- TOTP 动态令牌（RFC 6238，零外部依赖）----
+const TOTP_STEP_SECONDS = 30;
+const TOTP_DIGITS = 6;
+const TOTP_WINDOW_STEPS = 1;
+const TOTP_SECRET_BYTES = 20;
+const TOTP_RECOVERY_CODE_COUNT = 10;
+const TOTP_LABEL = '驻场运维管理系统';
+const TWO_FACTOR_CHALLENGE_TTL_MS = 5 * 60 * 1000;
+const TWO_FACTOR_CHALLENGE_MAX_ATTEMPTS = 5;
+const TWO_FACTOR_CHALLENGE_LIMIT = 2000;
+const twoFactorChallenges = new Map();
+const BASE32_ALPHABET = 'ABCDEFGHIJKLMNOPQRSTUVWXYZ234567';
+// 恢复码本身是 80 位随机串，用 HMAC 做不可逆摘要即可，避免每次校验跑多轮 scrypt。
+const RECOVERY_CODE_HASH_KEY = crypto.pbkdf2Sync(RUNTIME_ENCRYPTION_KEY, 'totp-recovery-static-salt', 100000, 32, 'sha256');
+
+function base32Encode(buffer) {
+  let bits = 0;
+  let value = 0;
+  let output = '';
+  for (const byte of buffer) {
+    value = (value << 8) | byte;
+    bits += 8;
+    while (bits >= 5) {
+      output += BASE32_ALPHABET[(value >>> (bits - 5)) & 31];
+      bits -= 5;
+    }
+  }
+  if (bits > 0) output += BASE32_ALPHABET[(value << (5 - bits)) & 31];
+  return output;
+}
+
+function base32Decode(input) {
+  const cleaned = String(input || '').toUpperCase().replace(/[^A-Z2-7]/g, '');
+  let bits = 0;
+  let value = 0;
+  const bytes = [];
+  for (const char of cleaned) {
+    const index = BASE32_ALPHABET.indexOf(char);
+    if (index < 0) continue;
+    value = (value << 5) | index;
+    bits += 5;
+    if (bits >= 8) {
+      bytes.push((value >>> (bits - 8)) & 0xff);
+      bits -= 8;
+    }
+  }
+  return Buffer.from(bytes);
+}
+
+function generateTotpSecret() {
+  return base32Encode(crypto.randomBytes(TOTP_SECRET_BYTES));
+}
+
+function buildTotpAt(secret, counter) {
+  const key = base32Decode(secret);
+  if (!key.length) return '';
+  const movingFactor = Buffer.alloc(8);
+  movingFactor.writeUInt32BE(Math.floor(counter / 0x100000000), 0);
+  movingFactor.writeUInt32BE(counter >>> 0, 4);
+  const digest = crypto.createHmac('sha1', key).update(movingFactor).digest();
+  const offset = digest[digest.length - 1] & 0x0f;
+  const binary = ((digest[offset] & 0x7f) << 24)
+    | ((digest[offset + 1] & 0xff) << 16)
+    | ((digest[offset + 2] & 0xff) << 8)
+    | (digest[offset + 3] & 0xff);
+  return String(binary % (10 ** TOTP_DIGITS)).padStart(TOTP_DIGITS, '0');
+}
+
+function verifyTotpCode(secret, code, atMs = nowMs()) {
+  const candidate = String(code || '').replace(/\s+/g, '');
+  if (!/^\d{6}$/.test(candidate)) return false;
+  const counter = Math.floor(atMs / 1000 / TOTP_STEP_SECONDS);
+  // 允许前后各一个时间步，容忍客户端与服务端之间的时钟漂移。
+  for (let offset = -TOTP_WINDOW_STEPS; offset <= TOTP_WINDOW_STEPS; offset += 1) {
+    const expected = buildTotpAt(secret, counter + offset);
+    if (expected.length === candidate.length && crypto.timingSafeEqual(Buffer.from(expected), Buffer.from(candidate))) {
+      return true;
+    }
+  }
+  return false;
+}
+
+function normalizeRecoveryCode(code) {
+  return String(code || '').toUpperCase().replace(/[^A-Z2-7]/g, '');
+}
+
+function hashRecoveryCode(code) {
+  const normalized = normalizeRecoveryCode(code);
+  if (!normalized) return '';
+  return crypto.createHmac('sha256', RECOVERY_CODE_HASH_KEY).update(`totp-recovery:${normalized}`).digest('hex');
+}
+
+function generateRecoveryCodes(count = TOTP_RECOVERY_CODE_COUNT) {
+  const codes = [];
+  for (let index = 0; index < count; index += 1) {
+    const raw = base32Encode(crypto.randomBytes(10));
+    codes.push(`${raw.slice(0, 8)}-${raw.slice(8, 16)}`);
+  }
+  return codes;
+}
+
+function buildTotpOtpauthUrl(username, secret) {
+  const label = encodeURIComponent(`${TOTP_LABEL}:${username || 'user'}`);
+  const issuer = encodeURIComponent(TOTP_LABEL);
+  return `otpauth://totp/${label}?secret=${secret}&issuer=${issuer}&algorithm=SHA1&digits=${TOTP_DIGITS}&period=${TOTP_STEP_SECONDS}`;
+}
+
+function readUserTotpSecret(user) {
+  if (!user || !user.twoFactorSecret) return '';
+  try {
+    return decryptCredential(user.twoFactorSecret);
+  } catch (error) {
+    // 加密密钥轮换后旧密文无法解密，必须按失败处理而不是放行登录。
+    console.warn('动态令牌密钥解密失败:', error.message);
+    return '';
+  }
+}
+
+function readPendingTotpSecret(user) {
+  if (!user || !user.twoFactorPendingSecret) return '';
+  try {
+    return decryptCredential(user.twoFactorPendingSecret);
+  } catch (error) {
+    console.warn('待确认动态令牌密钥解密失败:', error.message);
+    return '';
+  }
+}
+
+// LDAP 账号的本地密码是系统随机生成的占位值，无法用于二次确认，改为只依赖动态码。
+function verifyTwoFactorPassword(user, password) {
+  if (String(user?.username || '').startsWith('ldap_')) return true;
+  return verifyPassword(String(password || ''), user?.passwordHash);
+}
+
+function consumeRecoveryCode(user, code) {
+  const hashes = Array.isArray(user?.twoFactorRecoveryCodeHashes) ? user.twoFactorRecoveryCodeHashes : [];
+  const candidate = hashRecoveryCode(code);
+  if (!candidate) return false;
+  const index = hashes.findIndex(item => {
+    const stored = String(item || '');
+    return stored.length === candidate.length && crypto.timingSafeEqual(Buffer.from(stored), Buffer.from(candidate));
+  });
+  if (index < 0) return false;
+  // 恢复码一次性使用，命中后立即从列表移除。
+  hashes.splice(index, 1);
+  user.twoFactorRecoveryCodeHashes = hashes;
+  return true;
+}
+
+function pruneTwoFactorChallenges() {
+  const current = nowMs();
+  for (const [token, entry] of twoFactorChallenges) {
+    if (!entry || entry.expiresAt <= current) twoFactorChallenges.delete(token);
+  }
+  while (twoFactorChallenges.size > TWO_FACTOR_CHALLENGE_LIMIT) {
+    const oldest = twoFactorChallenges.keys().next();
+    if (oldest.done) break;
+    twoFactorChallenges.delete(oldest.value);
+  }
+}
+
+function createTwoFactorChallenge(userId, req) {
+  pruneTwoFactorChallenges();
+  const challengeToken = crypto.randomBytes(24).toString('hex');
+  twoFactorChallenges.set(challengeToken, {
+    userId,
+    clientIp: getRequestClientIp(req),
+    expiresAt: nowMs() + TWO_FACTOR_CHALLENGE_TTL_MS,
+    attempts: 0
+  });
+  return challengeToken;
+}
+
+function getTwoFactorChallenge(challengeToken, req) {
+  const token = String(challengeToken || '').trim();
+  if (!token) return null;
+  const entry = twoFactorChallenges.get(token);
+  if (!entry) return null;
+  if (entry.expiresAt <= nowMs() || entry.clientIp !== getRequestClientIp(req)) {
+    twoFactorChallenges.delete(token);
+    return null;
+  }
+  return entry;
+}
+
+function clearTwoFactorFields(user) {
+  user.twoFactorEnabled = false;
+  user.twoFactorSecret = '';
+  user.twoFactorPendingSecret = '';
+  user.twoFactorRecoveryCodeHashes = [];
+  user.twoFactorEnabledAt = '';
 }
 
 function validateHost(host) {
@@ -4664,6 +4865,7 @@ function isUnsafeMethod(method) {
 
 function isCsrfExemptPath(pathname) {
   return pathname === '/api/login'
+    || pathname === '/api/login/2fa'
     || pathname === '/api/forgot-password/verify'
     || pathname === '/api/forgot-password/reset'
     || pathname.startsWith('/api/auth/oidc/');
@@ -8329,6 +8531,17 @@ const requestHandler = async (req, res) => {
       if (user.status === 'rejected') {
         return json(res, 403, { message: '账号注册申请未通过，请联系管理员' });
       }
+      if (user.twoFactorEnabled) {
+        if (!readUserTotpSecret(user)) {
+          return json(res, 403, { message: '动态令牌配置异常，请联系管理员重置后重新绑定' });
+        }
+        const challengeToken = createTwoFactorChallenge(user.id, req);
+        return json(res, 200, {
+          twoFactorRequired: true,
+          challengeToken,
+          message: '请输入身份验证器中的 6 位动态码'
+        });
+      }
       const token = crypto.randomBytes(24).toString('hex');
       const expiresAt = new Date(nowMs() + sessionMaxAgeSeconds * 1000).toISOString();
       // 清除失败计数、升级哈希、建立会话需在同一临界区内基于最新状态完成，
@@ -8346,6 +8559,74 @@ const requestHandler = async (req, res) => {
         await writeDb(lockDb, { silent: true, replaceCollections: ['sessions'] });
       });
       return json(res, 200, { user: sanitizeUser(user), systemConfig: presentSystemConfig(user, db.systemConfig), csrfToken: getSessionCsrfToken(token) }, { 'Set-Cookie': buildSessionCookie(req, token, db.systemConfig) });
+    }
+
+    if (req.method === 'POST' && pathname === '/api/login/2fa') {
+      const body = await readBody(req);
+      const challengeToken = String(body.challengeToken || '').trim();
+      const challenge = getTwoFactorChallenge(challengeToken, req);
+      if (!challenge) {
+        return json(res, 401, { message: '登录验证已过期，请重新登录' });
+      }
+      const user = db.users.find(item => item.id === challenge.userId);
+      if (!user) {
+        twoFactorChallenges.delete(challengeToken);
+        return json(res, 401, { message: '登录验证已过期，请重新登录' });
+      }
+      const rateLimitState = getLoginRateLimitState(db, req, user.username);
+      if (rateLimitState.blocked) {
+        twoFactorChallenges.delete(challengeToken);
+        return json(res, 429, { message: loginBlockedMessage(rateLimitState.retryAfterMs) }, rateLimitResponseHeaders(rateLimitState.retryAfterMs));
+      }
+      if (user.status === 'pending' || user.status === 'disabled' || user.status === 'rejected') {
+        twoFactorChallenges.delete(challengeToken);
+        return json(res, 403, { message: '账号状态异常，请联系管理员' });
+      }
+      const totpSecret = readUserTotpSecret(user);
+      if (!user.twoFactorEnabled || !totpSecret) {
+        twoFactorChallenges.delete(challengeToken);
+        return json(res, 401, { message: '登录验证已过期，请重新登录' });
+      }
+      const code = String(body.code || '').trim();
+      const totpMatched = verifyTotpCode(totpSecret, code);
+      const recoveryMatched = !totpMatched && consumeRecoveryCode(user, code);
+      if (!totpMatched && !recoveryMatched) {
+        challenge.attempts += 1;
+        if (challenge.attempts >= TWO_FACTOR_CHALLENGE_MAX_ATTEMPTS) {
+          twoFactorChallenges.delete(challengeToken);
+        }
+        const failedState = await recordLoginFailureLocked(req, user.username);
+        if (failedState.lockedUntil > nowMs()) {
+          return json(res, 429, { message: loginBlockedMessage(failedState.lockedUntil - nowMs()) }, rateLimitResponseHeaders(failedState.lockedUntil - nowMs()));
+        }
+        return json(res, 401, { message: '动态码或恢复码错误' });
+      }
+      twoFactorChallenges.delete(challengeToken);
+      const token = crypto.randomBytes(24).toString('hex');
+      const expiresAt = new Date(nowMs() + sessionMaxAgeSeconds * 1000).toISOString();
+      // 二次验证通过后仍要在临界区内复核账号状态，避免与管理员重置/禁用并发时建立会话。
+      const outcome = await withDbMutationLock(async () => {
+        const lockDb = await readDb();
+        const lockUser = (lockDb.users || []).find(item => item.id === user.id);
+        if (!lockUser || !lockUser.twoFactorEnabled || lockUser.status !== 'active') return { ok: false };
+        if (recoveryMatched) {
+          lockUser.twoFactorRecoveryCodeHashes = Array.isArray(user.twoFactorRecoveryCodeHashes) ? user.twoFactorRecoveryCodeHashes : [];
+        }
+        clearLoginFailures(lockDb, req, user.username);
+        lockDb.sessions = (lockDb.sessions || []).filter(item => item.userId !== lockUser.id && Date.parse(item.expiresAt) > nowMs());
+        lockDb.sessions.push({ token, userId: lockUser.id, createdAt: now(), lastActivityAt: now(), expiresAt });
+        await writeDb(lockDb, { silent: true, replaceCollections: ['sessions'] });
+        return { ok: true, user: lockUser };
+      });
+      if (!outcome.ok) {
+        return json(res, 401, { message: '登录验证已过期，请重新登录' });
+      }
+      return json(res, 200, {
+        user: sanitizeUser(outcome.user),
+        systemConfig: presentSystemConfig(outcome.user, db.systemConfig),
+        csrfToken: getSessionCsrfToken(token),
+        recoveryCodeUsed: recoveryMatched
+      }, { 'Set-Cookie': buildSessionCookie(req, token, db.systemConfig) });
     }
 
     if (req.method === 'POST' && pathname === '/api/change-password') {
@@ -8373,6 +8654,107 @@ const requestHandler = async (req, res) => {
       await writeDb(db, { replaceCollections: ['sessions'] });
       closeUserWebSockets(user.id);
       return json(res, 200, { message: '密码修改成功' });
+    }
+
+    if (req.method === 'GET' && pathname === '/api/account/2fa') {
+      const user = requireAuth(req, res, db);
+      if (!user) return;
+      return json(res, 200, {
+        enabled: Boolean(user.twoFactorEnabled),
+        enabledAt: user.twoFactorEnabledAt || '',
+        pending: Boolean(user.twoFactorPendingSecret),
+        recoveryCodesRemaining: Array.isArray(user.twoFactorRecoveryCodeHashes) ? user.twoFactorRecoveryCodeHashes.length : 0
+      });
+    }
+
+    if (req.method === 'POST' && pathname === '/api/account/2fa/setup') {
+      const user = requireAuth(req, res, db);
+      if (!user) return;
+      if (String(user.username || '').startsWith('oidc_')) {
+        return json(res, 400, { message: '企业 SSO 账号的二次认证由身份提供方管理' });
+      }
+      if (user.twoFactorEnabled) {
+        return json(res, 400, { message: '动态令牌已启用，如需更换请先关闭' });
+      }
+      const body = await readBody(req);
+      if (!verifyTwoFactorPassword(user, body.password)) {
+        return json(res, 401, { message: '当前密码错误' });
+      }
+      const secret = generateTotpSecret();
+      user.twoFactorPendingSecret = encryptCredential(secret);
+      appendAuditLog(db, user, 'update', 'user', user.id, '申请绑定动态令牌');
+      await writeDb(db);
+      return json(res, 200, {
+        secret,
+        otpauthUrl: buildTotpOtpauthUrl(user.username, secret),
+        account: user.username
+      });
+    }
+
+    if (req.method === 'POST' && pathname === '/api/account/2fa/enable') {
+      const user = requireAuth(req, res, db);
+      if (!user) return;
+      if (user.twoFactorEnabled) {
+        return json(res, 400, { message: '动态令牌已启用' });
+      }
+      const pendingSecret = readPendingTotpSecret(user);
+      if (!pendingSecret) {
+        return json(res, 400, { message: '绑定已过期，请重新开始绑定' });
+      }
+      const body = await readBody(req);
+      if (!verifyTotpCode(pendingSecret, body.code)) {
+        return json(res, 400, { message: '动态码错误，请核对身份验证器后重试' });
+      }
+      const recoveryCodes = generateRecoveryCodes();
+      user.twoFactorSecret = user.twoFactorPendingSecret;
+      user.twoFactorPendingSecret = '';
+      user.twoFactorEnabled = true;
+      user.twoFactorEnabledAt = now();
+      user.twoFactorRecoveryCodeHashes = recoveryCodes.map(hashRecoveryCode).filter(Boolean);
+      appendAuditLog(db, user, 'update', 'user', user.id, '启用动态令牌二次认证');
+      await writeDb(db);
+      return json(res, 200, { message: '动态令牌已启用', recoveryCodes });
+    }
+
+    if (req.method === 'POST' && pathname === '/api/account/2fa/disable') {
+      const user = requireAuth(req, res, db);
+      if (!user) return;
+      if (!user.twoFactorEnabled) {
+        return json(res, 400, { message: '动态令牌未启用' });
+      }
+      const body = await readBody(req);
+      if (!verifyTwoFactorPassword(user, body.password)) {
+        return json(res, 401, { message: '当前密码错误' });
+      }
+      const totpSecret = readUserTotpSecret(user);
+      if (!totpSecret) {
+        return json(res, 400, { message: '动态令牌配置异常，请联系管理员重置' });
+      }
+      if (!verifyTotpCode(totpSecret, body.code) && !consumeRecoveryCode(user, body.code)) {
+        return json(res, 400, { message: '动态码或恢复码错误' });
+      }
+      clearTwoFactorFields(user);
+      appendAuditLog(db, user, 'update', 'user', user.id, '关闭动态令牌二次认证');
+      await writeDb(db);
+      return json(res, 200, { message: '动态令牌已关闭' });
+    }
+
+    if (req.method === 'POST' && pathname === '/api/account/2fa/recovery-codes') {
+      const user = requireAuth(req, res, db);
+      if (!user) return;
+      if (!user.twoFactorEnabled) {
+        return json(res, 400, { message: '动态令牌未启用' });
+      }
+      const body = await readBody(req);
+      const totpSecret = readUserTotpSecret(user);
+      if (!totpSecret || !verifyTotpCode(totpSecret, body.code)) {
+        return json(res, 400, { message: '动态码错误' });
+      }
+      const recoveryCodes = generateRecoveryCodes();
+      user.twoFactorRecoveryCodeHashes = recoveryCodes.map(hashRecoveryCode).filter(Boolean);
+      appendAuditLog(db, user, 'update', 'user', user.id, '重新生成动态令牌恢复码');
+      await writeDb(db);
+      return json(res, 200, { message: '恢复码已重新生成', recoveryCodes });
     }
 
     if (req.method === 'POST' && pathname === '/api/forgot-password/verify') {
@@ -8697,6 +9079,17 @@ const requestHandler = async (req, res) => {
         if (localUser.status === 'rejected') {
           return json(res, 403, { message: '账号注册申请未通过，请联系管理员' });
         }
+        if (localUser.twoFactorEnabled) {
+          if (!readUserTotpSecret(localUser)) {
+            return json(res, 403, { message: '动态令牌配置异常，请联系管理员重置后重新绑定' });
+          }
+          const challengeToken = createTwoFactorChallenge(localUser.id, req);
+          return json(res, 200, {
+            twoFactorRequired: true,
+            challengeToken,
+            message: '请输入身份验证器中的 6 位动态码'
+          });
+        }
         const token = crypto.randomBytes(24).toString('hex');
         const expiresAt = new Date(nowMs() + sessionMaxAgeSeconds * 1000).toISOString();
         db.sessions = (db.sessions || []).filter(item => item.userId !== localUser.id && Date.parse(item.expiresAt) > nowMs());
@@ -8974,6 +9367,30 @@ const requestHandler = async (req, res) => {
       });
       if (!outcome.item) return json(res, outcome.status, { message: outcome.message });
       return json(res, 201, outcome.item);
+    }
+
+    if (req.method === 'POST' && pathname.startsWith('/api/users/') && pathname.endsWith('/reset-2fa')) {
+      const user = requireAdmin(req, res, db);
+      if (!user) return;
+      const targetUserId = pathname.split('/')[3];
+      const target = db.users.find(item => item.id === targetUserId);
+      if (!target) {
+        return json(res, 404, { message: '人员不存在' });
+      }
+      if (target.role === 'admin' && user.id !== target.id) {
+        return json(res, 403, { message: '不能重置其他管理员账号的动态令牌' });
+      }
+      if (!target.twoFactorEnabled) {
+        return json(res, 400, { message: '该账号未启用动态令牌' });
+      }
+      const body = await readBody(req);
+      if (!verifyAdminStepUp(user, body.password)) {
+        return json(res, 401, { message: '管理员密码错误' });
+      }
+      clearTwoFactorFields(target);
+      appendAuditLog(db, user, 'update', 'user', target.id, `重置动态令牌 ${target.name}`, target.projectId);
+      await writeDb(db);
+      return json(res, 200, { message: '动态令牌已重置，该账号下次登录无需动态码' });
     }
 
     if (req.method === 'PUT' && pathname.endsWith('/approve') && pathname.startsWith('/api/users/')) {

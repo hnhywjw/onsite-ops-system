@@ -1083,6 +1083,7 @@
     .topo-cmenu-item:hover { background:#f0f5ff; }
   </style>
   <script src="/vendor/xlsx.full.min.js"></script>
+  <script src="/vendor/qrcode.min.js"></script>
 </head>
 <body>
   <section id="loginView" class="login-wrap">
@@ -1171,6 +1172,16 @@
           </label>
         </div>
         <button class="primary full" type="submit">登录</button>
+      </form>
+
+      <form id="loginTwoFactorForm" class="hidden" style="display:flex; flex-direction:column;">
+        <p class="muted" style="font-size:13px; margin:0 0 10px;">请输入身份验证器（如 Google Authenticator）中的 6 位动态码。若身份验证器不可用，可改用恢复码。</p>
+        <div class="input-group" style="margin-bottom:12px;">
+          <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="11" width="18" height="11" rx="2"/><path d="M7 11V7a5 5 0 0110 0v4"/></svg>
+          <input id="loginTotpInput" name="code" autocomplete="one-time-code" maxlength="32" placeholder="6 位动态码或恢复码" required />
+        </div>
+        <button class="primary full" type="submit">验证并登录</button>
+        <button id="loginTotpBackBtn" class="secondary full" type="button" style="margin-top:8px;">返回重新登录</button>
       </form>
 
       <div class="divider">其他登录方式</div>
@@ -1982,6 +1993,9 @@
       <div style="display:flex;gap:8px;margin-top:12px;">
         <button id="logoutBtn" class="logout" style="flex:1;margin-top:0;">退出登录</button>
         <button id="changePwdBtn" class="logout" style="flex:1;margin-top:0;">修改密码</button>
+      </div>
+      <div style="display:flex;gap:8px;margin-top:8px;">
+        <button id="twoFactorBtn" class="logout" style="flex:1;margin-top:0;">账号安全</button>
       </div>
       <div class="sidebar-footer">
         <div class="sidebar-version">软件版本：<span id="sidebarCurrentVersion">-</span></div>
@@ -3498,10 +3512,61 @@
     </div>
   </div>
 
+  <div id="twoFactorModal" class="modal-overlay hidden">
+    <div class="modal">
+      <h3>账号安全</h3>
+      <div id="twoFactorStatus" class="muted" style="font-size:13px; margin-bottom:12px;">加载中...</div>
+      <div id="twoFactorDisabledPanel" class="hidden">
+        <p class="muted" style="font-size:13px; margin:0 0 10px;">启用后，登录时除密码和图形验证码外，还需要输入身份验证器中的 6 位动态码。</p>
+        <label>当前密码<input id="twoFactorPassword" type="password" autocomplete="current-password" /></label>
+        <div id="twoFactorSetupMessage" class="message"></div>
+        <div class="modal-actions">
+          <button type="button" class="secondary" id="twoFactorCloseBtn">关闭</button>
+          <button type="button" class="primary" id="twoFactorSetupBtn">开始绑定</button>
+        </div>
+      </div>
+      <div id="twoFactorPendingPanel" class="hidden">
+        <p class="muted" style="font-size:13px; margin:0 0 10px;">用身份验证器扫描二维码，或手动输入密钥，然后填写生成的动态码完成绑定。</p>
+        <div style="display:flex; gap:12px; align-items:center; margin-bottom:12px;">
+          <img id="twoFactorQrImg" alt="动态令牌二维码" width="160" height="160" style="background:#fff; border:1px solid var(--line, #e5e7eb); border-radius:8px; flex-shrink:0;" />
+          <div style="min-width:0;">
+            <div class="muted" style="font-size:12px;">手动密钥</div>
+            <div id="twoFactorSecretText" style="word-break:break-all; font-family:monospace; font-size:13px; user-select:text;"></div>
+          </div>
+        </div>
+        <label>动态码<input id="twoFactorEnableCode" inputmode="numeric" autocomplete="one-time-code" maxlength="6" /></label>
+        <div id="twoFactorEnableMessage" class="message"></div>
+        <div class="modal-actions">
+          <button type="button" class="secondary" id="twoFactorCancelSetupBtn">取消</button>
+          <button type="button" class="primary" id="twoFactorEnableBtn">确认启用</button>
+        </div>
+      </div>
+      <div id="twoFactorRecoveryPanel" class="hidden">
+        <p class="muted" style="font-size:13px; margin:0 0 10px;">请立即保存以下恢复码。每个恢复码只能使用一次，用于身份验证器丢失时登录。</p>
+        <pre id="twoFactorRecoveryList" style="margin:0 0 12px; padding:12px; background:var(--primary-weak, #eef2ff); border-radius:8px; font-size:13px; line-height:1.7; user-select:text; white-space:pre-wrap;"></pre>
+        <div class="modal-actions">
+          <button type="button" class="primary" id="twoFactorRecoveryDoneBtn">我已保存</button>
+        </div>
+      </div>
+      <div id="twoFactorEnabledPanel" class="hidden">
+        <p class="muted" id="twoFactorEnabledInfo" style="font-size:13px; margin:0 0 10px;"></p>
+        <label>动态码<input id="twoFactorOpCode" autocomplete="one-time-code" maxlength="32" /></label>
+        <label>当前密码<input id="twoFactorOpPassword" type="password" autocomplete="current-password" /></label>
+        <div id="twoFactorOpMessage" class="message"></div>
+        <div class="modal-actions" style="flex-wrap:wrap;">
+          <button type="button" class="secondary" id="twoFactorCloseEnabledBtn">关闭</button>
+          <button type="button" class="secondary" id="twoFactorRegenerateBtn">重新生成恢复码</button>
+          <button type="button" class="primary" id="twoFactorDisableBtn" style="background:var(--danger, #dc2626);">关闭动态令牌</button>
+        </div>
+      </div>
+    </div>
+  </div>
+
   <script>
     const state = {
       user: null,
       csrfToken: '',
+      twoFactorChallenge: '',
       captchaToken: '',
       ldapCaptchaToken: '',
       regCaptchaToken: '',
@@ -10226,6 +10291,17 @@
           method: 'POST',
           body: JSON.stringify(body)
         });
+        if (result.twoFactorRequired) {
+          state.twoFactorChallenge = result.challengeToken || '';
+          els.loginForm.classList.add('hidden');
+          const twoFactorForm = document.getElementById('loginTwoFactorForm');
+          twoFactorForm.classList.remove('hidden');
+          const totpInput = document.getElementById('loginTotpInput');
+          totpInput.value = '';
+          totpInput.focus();
+          setMessage('loginMessage', '密码验证通过，请输入身份验证器中的动态码');
+          return;
+        }
         const rememberCheckbox = document.getElementById('rememberUsername');
         if (rememberCheckbox.checked) {
           localStorage.setItem('rememberedUsername', body.username || '');
@@ -10245,6 +10321,7 @@
       } catch (error) {
         await refreshCaptcha();
         setMessage('loginMessage', error.message, 'error');
+      } finally {
         if (submitButton) {
           submitButton.disabled = false;
           submitButton.textContent = '登录';
@@ -10253,6 +10330,76 @@
     }
 
     els.loginForm.addEventListener('submit', handleLoginSubmit);
+
+    function resetTwoFactorLogin() {
+      state.twoFactorChallenge = '';
+      const twoFactorForm = document.getElementById('loginTwoFactorForm');
+      if (twoFactorForm) {
+        twoFactorForm.classList.add('hidden');
+        const input = document.getElementById('loginTotpInput');
+        if (input) input.value = '';
+      }
+      els.loginForm.classList.remove('hidden');
+    }
+
+    async function handleTwoFactorSubmit(event) {
+      event.preventDefault();
+      const form = document.getElementById('loginTwoFactorForm');
+      const input = document.getElementById('loginTotpInput');
+      const submitButton = form.querySelector('button[type="submit"]');
+      const code = input.value.trim();
+      if (!code) {
+        setMessage('loginMessage', '请输入动态码', 'error');
+        return;
+      }
+      if (!state.twoFactorChallenge) {
+        resetTwoFactorLogin();
+        await refreshCaptcha();
+        setMessage('loginMessage', '登录验证已过期，请重新登录', 'error');
+        return;
+      }
+      if (submitButton) {
+        submitButton.disabled = true;
+        submitButton.textContent = '验证中...';
+      }
+      try {
+        const result = await api('/api/login/2fa', {
+          method: 'POST',
+          body: JSON.stringify({ challengeToken: state.twoFactorChallenge, code })
+        });
+        state.twoFactorChallenge = '';
+        state.user = result.user;
+        state.systemConfig = result.systemConfig || state.systemConfig;
+        state.csrfToken = result.csrfToken || state.csrfToken;
+        setMessage('loginMessage', result.recoveryCodeUsed ? '恢复码验证通过，正在进入系统，请尽快重新生成恢复码' : '登录成功，正在进入系统...');
+        try {
+          await boot({ skipSession: true, preserveAppOnError: true });
+        } catch (error) {
+          console.error(error);
+          throw new Error(`登录后初始化失败：${error.message}`);
+        }
+      } catch (error) {
+        input.value = '';
+        input.focus();
+        if (String(error.message || '').includes('过期')) {
+          resetTwoFactorLogin();
+          await refreshCaptcha();
+        }
+        setMessage('loginMessage', error.message, 'error');
+      } finally {
+        if (submitButton) {
+          submitButton.disabled = false;
+          submitButton.textContent = '验证并登录';
+        }
+      }
+    }
+
+    document.getElementById('loginTwoFactorForm').addEventListener('submit', handleTwoFactorSubmit);
+    document.getElementById('loginTotpBackBtn').addEventListener('click', async () => {
+      resetTwoFactorLogin();
+      setMessage('loginMessage', '');
+      await refreshCaptcha();
+    });
 
     els.logoutBtn.addEventListener('click', async () => {
       stopSystemLoadAutoRefresh();
@@ -10296,6 +10443,146 @@
         setTimeout(() => changePwdModal.classList.add('hidden'), 1500);
       } catch (error) {
         setMessage('changePwdMessage', error.message, 'error');
+      }
+    }));
+
+    const twoFactorModal = document.getElementById('twoFactorModal');
+    const twoFactorPanels = ['twoFactorDisabledPanel', 'twoFactorPendingPanel', 'twoFactorRecoveryPanel', 'twoFactorEnabledPanel']
+      .map(panelId => document.getElementById(panelId));
+
+    async function withButtonLock(button, task) {
+      if (!button || button.disabled) return;
+      const originalText = button.textContent;
+      button.disabled = true;
+      try {
+        return await task();
+      } finally {
+        button.disabled = false;
+        button.textContent = originalText;
+      }
+    }
+
+    function showTwoFactorPanel(panelId) {
+      twoFactorPanels.forEach(panel => panel.classList.toggle('hidden', panel.id !== panelId));
+    }
+
+    function renderTwoFactorQr(uri) {
+      const img = document.getElementById('twoFactorQrImg');
+      img.removeAttribute('src');
+      try {
+        const qr = qrcode(0, 'M');
+        qr.addData(uri);
+        qr.make();
+        img.src = qr.createDataURL(4, 8);
+      } catch (error) {
+        console.error('生成动态令牌二维码失败', error);
+      }
+    }
+
+    async function refreshTwoFactorStatus() {
+      const status = await api('/api/account/2fa', { silent: true });
+      const statusText = document.getElementById('twoFactorStatus');
+      if (status.enabled) {
+        statusText.textContent = `动态令牌：已启用${status.enabledAt ? `（${status.enabledAt}）` : ''}，剩余恢复码 ${status.recoveryCodesRemaining} 个`;
+        document.getElementById('twoFactorEnabledInfo').textContent = '关闭动态令牌或重新生成恢复码都需要当前动态码；关闭时本地账号还需要当前密码。';
+        showTwoFactorPanel('twoFactorEnabledPanel');
+      } else {
+        statusText.textContent = '动态令牌：未启用';
+        showTwoFactorPanel('twoFactorDisabledPanel');
+      }
+      return status;
+    }
+
+    document.getElementById('twoFactorBtn').addEventListener('click', async () => {
+      document.getElementById('twoFactorPassword').value = '';
+      document.getElementById('twoFactorEnableCode').value = '';
+      document.getElementById('twoFactorOpCode').value = '';
+      document.getElementById('twoFactorOpPassword').value = '';
+      document.getElementById('twoFactorSecretText').textContent = '';
+      ['twoFactorSetupMessage', 'twoFactorEnableMessage', 'twoFactorOpMessage'].forEach(id => setMessage(id, ''));
+      document.getElementById('twoFactorStatus').textContent = '加载中...';
+      twoFactorModal.classList.remove('hidden');
+      try {
+        await refreshTwoFactorStatus();
+      } catch (error) {
+        document.getElementById('twoFactorStatus').textContent = `读取状态失败：${error.message}`;
+      }
+    });
+
+    ['twoFactorCloseBtn', 'twoFactorCloseEnabledBtn', 'twoFactorCancelSetupBtn'].forEach(id => {
+      document.getElementById(id).addEventListener('click', () => twoFactorModal.classList.add('hidden'));
+    });
+
+    document.getElementById('twoFactorSetupBtn').addEventListener('click', () => withButtonLock(document.getElementById('twoFactorSetupBtn'), async () => {
+      const password = document.getElementById('twoFactorPassword').value;
+      setMessage('twoFactorSetupMessage', '');
+      try {
+        const result = await api('/api/account/2fa/setup', { method: 'POST', body: JSON.stringify({ password }) });
+        document.getElementById('twoFactorSecretText').textContent = result.secret;
+        renderTwoFactorQr(result.otpauthUrl);
+        document.getElementById('twoFactorEnableCode').value = '';
+        showTwoFactorPanel('twoFactorPendingPanel');
+      } catch (error) {
+        setMessage('twoFactorSetupMessage', error.message, 'error');
+      }
+    }));
+
+    document.getElementById('twoFactorEnableBtn').addEventListener('click', () => withButtonLock(document.getElementById('twoFactorEnableBtn'), async () => {
+      const code = document.getElementById('twoFactorEnableCode').value.trim();
+      setMessage('twoFactorEnableMessage', '');
+      if (!code) {
+        setMessage('twoFactorEnableMessage', '请输入身份验证器生成的动态码', 'error');
+        return;
+      }
+      try {
+        const result = await api('/api/account/2fa/enable', { method: 'POST', body: JSON.stringify({ code }) });
+        document.getElementById('twoFactorRecoveryList').textContent = (result.recoveryCodes || []).join('\n');
+        showTwoFactorPanel('twoFactorRecoveryPanel');
+      } catch (error) {
+        setMessage('twoFactorEnableMessage', error.message, 'error');
+      }
+    }));
+
+    document.getElementById('twoFactorRecoveryDoneBtn').addEventListener('click', async () => {
+      try {
+        await refreshTwoFactorStatus();
+      } catch (error) {
+        setMessage('twoFactorOpMessage', error.message, 'error');
+      }
+    });
+
+    document.getElementById('twoFactorRegenerateBtn').addEventListener('click', () => withButtonLock(document.getElementById('twoFactorRegenerateBtn'), async () => {
+      const code = document.getElementById('twoFactorOpCode').value.trim();
+      setMessage('twoFactorOpMessage', '');
+      if (!code) {
+        setMessage('twoFactorOpMessage', '请输入当前动态码', 'error');
+        return;
+      }
+      try {
+        const result = await api('/api/account/2fa/recovery-codes', { method: 'POST', body: JSON.stringify({ code }) });
+        document.getElementById('twoFactorRecoveryList').textContent = (result.recoveryCodes || []).join('\n');
+        showTwoFactorPanel('twoFactorRecoveryPanel');
+      } catch (error) {
+        setMessage('twoFactorOpMessage', error.message, 'error');
+      }
+    }));
+
+    document.getElementById('twoFactorDisableBtn').addEventListener('click', () => withButtonLock(document.getElementById('twoFactorDisableBtn'), async () => {
+      const code = document.getElementById('twoFactorOpCode').value.trim();
+      const password = document.getElementById('twoFactorOpPassword').value;
+      setMessage('twoFactorOpMessage', '');
+      if (!code) {
+        setMessage('twoFactorOpMessage', '请输入当前动态码或恢复码', 'error');
+        return;
+      }
+      try {
+        await api('/api/account/2fa/disable', { method: 'POST', body: JSON.stringify({ code, password }) });
+        document.getElementById('twoFactorOpCode').value = '';
+        document.getElementById('twoFactorOpPassword').value = '';
+        await refreshTwoFactorStatus();
+        setMessage('twoFactorSetupMessage', '动态令牌已关闭', 'success');
+      } catch (error) {
+        setMessage('twoFactorOpMessage', error.message, 'error');
       }
     }));
 
