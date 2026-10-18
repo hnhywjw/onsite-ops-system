@@ -328,7 +328,8 @@
       gap: 8px;
     }
     .report-actions {
-      flex-wrap: nowrap;
+      flex-wrap: wrap;
+      min-width: 0;
       gap: 8px;
       justify-content: flex-start;
     }
@@ -342,8 +343,10 @@
     }
     .report-actions select {
       width: auto;
-      min-width: 0;
-      flex: 0 0 auto;
+      /* 半宽卡片内的筛选栏需要能收缩与换行，否则下拉与按钮会溢出卡片。 */
+      min-width: 92px;
+      max-width: 100%;
+      flex: 0 1 auto;
     }
     .kb-search-bar button {
       white-space: nowrap;
