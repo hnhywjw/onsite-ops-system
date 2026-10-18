@@ -72,6 +72,16 @@
       padding: 10px;
       margin-bottom: 12px;
     }
+    /* 导航项在低分辨率下会超高，导航区独立滚动，保证底部操作按钮始终可见。 */
+    .nav {
+      flex: 1 1 auto;
+      min-height: 0;
+      overflow-y: auto;
+      overscroll-behavior: contain;
+    }
+    .nav::-webkit-scrollbar { width: 6px; }
+    .nav::-webkit-scrollbar-thumb { background: rgba(255,255,255,0.18); border-radius: 3px; }
+    .nav::-webkit-scrollbar-track { background: transparent; }
     .nav button {
       width: 100%;
       text-align: left;
