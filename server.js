@@ -13889,7 +13889,6 @@ const requestHandler = async (req, res) => {
       // 并发上传时共用固定 pending 目录会互相覆盖，先解压到随机暂存目录，
       // 校验通过后再原子替换 pending。
       const stagingDir = path.join(upgradesDir, `pending-${crypto.randomBytes(8).toString('hex')}`);
-      fs.mkdirSync(stagingDir, { recursive: true });
 
       function cleanUpgradeDir(dir) {
         try { fs.rmSync(dir, { recursive: true, force: true }); } catch (_) {}
@@ -13899,6 +13898,19 @@ const requestHandler = async (req, res) => {
         cleanUpgradeDir(stagingDir);
         return rejectUpgradeUpload(res, db, user, upgradeFilename, message, options);
       };
+
+      // data/upgrades 由 root 创建或被 root 写过时，容器内的 node 用户无法写入。
+      // 这里提前给出可操作的提示，避免页面只看到 500。
+      try {
+        fs.accessSync(upgradesDir, fs.constants.W_OK);
+      } catch (_) {
+        return rejectUpgradeUpload(res, db, user, upgradeFilename, '升级目录不可写，请在宿主机执行 chown -R 1000:1000 data 后重试');
+      }
+      try {
+        fs.mkdirSync(stagingDir, { recursive: true });
+      } catch (error) {
+        return rejectUpgradeUpload(res, db, user, upgradeFilename, `无法创建升级暂存目录：${error.message}。请确认 data/upgrades 属于容器内运行用户（node，uid 1000）`);
+      }
 
       const tempArchive = path.join(upgradesDir, `temp-upgrade-${crypto.randomBytes(8).toString('hex')}.tar.gz`);
       fs.writeFileSync(tempArchive, pkgPart.data, { mode: 0o600 });
@@ -13968,8 +13980,12 @@ const requestHandler = async (req, res) => {
       }
 
       // 新包完整通过预检后再替换 pending，避免上传失败破坏上一份已校验包。
+      // 旧 pending 若属于其他用户会删不掉，rename 随之失败，这里先确认已清空。
+      try { fs.rmSync(pendingDir, { recursive: true, force: true }); } catch (_) {}
+      if (fs.existsSync(pendingDir)) {
+        return failUpgrade('旧升级目录无法删除，请在宿主机删除 data/upgrades/pending 后重试');
+      }
       try {
-        try { fs.rmSync(pendingDir, { recursive: true, force: true }); } catch (_) {}
         fs.renameSync(stagingDir, pendingDir);
       } catch (error) {
         return failUpgrade(`升级包暂存失败：${error.message}`);
@@ -14027,11 +14043,16 @@ const requestHandler = async (req, res) => {
         return rejectUpgradeUpload(res, db, user, upgradeFilename, `写入 SHA256SUMS 失败：${error.message}`, { toVersion: upgradeVersion });
       }
 
-      fs.writeFileSync(path.join(upgradesDir, 'UPGRADE_READY'), JSON.stringify({
-        version: upgradeVersion,
-        timestamp: now(),
-        requestedBy: user.username
-      }));
+      try {
+        fs.writeFileSync(path.join(upgradesDir, 'UPGRADE_READY'), JSON.stringify({
+          version: upgradeVersion,
+          timestamp: now(),
+          requestedBy: user.username
+        }));
+      } catch (error) {
+        cleanUpgradeDir(pendingDir);
+        return rejectUpgradeUpload(res, db, user, upgradeFilename, `写入升级就绪标记失败：${error.message}。请确认 data/upgrades 属于容器内运行用户（node，uid 1000）`, { toVersion: upgradeVersion });
+      }
 
       appendAuditLog(db, user, 'upgrade', 'system', '', `上传升级包 v${upgradeVersion}，系统即将自动重启完成升级`);
       await appendUpgradeLog(db, user, {

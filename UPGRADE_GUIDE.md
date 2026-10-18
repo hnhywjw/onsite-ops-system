@@ -274,7 +274,21 @@ docker compose --env-file .env.production -f docker-compose.prod.yml up -d --bui
 
 v1.0.8 及更早版本不支持当前清单格式，按第 7 节用完整安装包替换文件并重建镜像。
 
-### 10.7 容器反复重启
+### 10.7 解压报「File exists」「Permission denied」
+
+宿主机 `data/upgrades/pending` 由 root 创建或被 root 写过，容器内的 `node`（uid 1000）无法清理和覆盖，旧版本会把删除失败吞掉，随后解压报大量 `Cannot open: File exists` 与 `Cannot mkdir: Permission denied`。
+
+在宿主机上清理并纠正属主后重试：
+
+```bash
+cd /opt/onsite-ops-system
+sudo rm -rf data/upgrades/pending data/upgrades/temp-upgrade.tar.gz
+sudo chown -R 1000:1000 data
+```
+
+解压失败时不会写入 `UPGRADE_READY`，容器不会应用半成品包，清理后重新上传即可。避免在宿主机用 `sudo` 直接解压升级包，或在容器内以 `-u root` 执行操作。
+
+### 10.8 容器反复重启
 
 查看 `docker compose logs`。常见原因是缺少 `DOCUMENT_TOKEN_SECRET`、`ENCRYPTION_KEY`、`UPGRADE_SIGNING_KEY`，或密钥长度不足 32 位。
 
