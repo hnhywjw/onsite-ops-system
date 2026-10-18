@@ -58,6 +58,8 @@ npm run typecheck
 npm run smoke
 npm run regression
 npm run e2e
+npm run build-upgrade
+npm run verify-upgrade -- onsite-ops-upgrade-<版本>.tar.gz
 ```
 
 需要指定测试地址时：

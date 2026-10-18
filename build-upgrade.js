@@ -106,6 +106,10 @@ if (signingKey.length >= 32) {
 } else {
   console.log('UPGRADE_SIGNING_KEY missing or shorter than 32 chars; manifest has no signature');
   console.log('Production UI upload requires: UPGRADE_SIGNING_KEY=your-key npm run build-upgrade');
+  if (process.env.UPGRADE_REQUIRE_SIGNATURE === '1') {
+    console.error('UPGRADE_REQUIRE_SIGNATURE=1，拒绝生成未签名升级包');
+    process.exit(1);
+  }
 }
 
 const manifestPath = path.join(rootDir, 'manifest.json');

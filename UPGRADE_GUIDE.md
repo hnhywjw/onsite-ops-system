@@ -54,48 +54,113 @@ tar -czf onsite-ops-system-v1.0.16-production.tar.gz \
 tar -tzf onsite-ops-system-v1.0.16-production.tar.gz | head -20
 ```
 
-## 4. 在本地构建离线升级包
+## 4. 制作离线升级包
 
-离线升级包由仓库内的 `build-upgrade.js` 生成，入口是 `npm run build-upgrade`。
+离线升级包由仓库内的 `build-upgrade.js` 生成，入口是 `npm run build-upgrade`。本节覆盖从取得密钥到本地自检的完整流程。
 
-### 4.1 无签名构建（仅限测试环境）
+### 4.1 为什么提示「升级包缺少签名」
+
+生产环境（`NODE_ENV=production`）上传升级包时会强制校验 HMAC 签名。GitHub Release 中的 `onsite-ops-upgrade-v1.0.16.tar.gz` 是用仓库默认方式构建的，`manifest.json` 里没有 `signature` 字段，因此上传后被直接拒绝，提示「升级包缺少签名」。
+
+这不是包损坏，而是设计如此：签名密钥不能进入公开仓库，任何拿到密钥的人都能伪造升级包。每个部署环境必须用自己的密钥在本地重新构建。
+
+相关校验逻辑：
+
+- 生产环境：`signature` 缺失直接拒绝；签名不匹配拒绝
+- 非生产环境：`signature` 缺失时放行，存在时仍会校验
+- 服务端未配置不少于 32 位的签名密钥时，报「系统未配置升级签名密钥」
+
+### 4.2 准备条件
+
+- 与目标版本一致的源码目录（完整安装包解压即可，例如 `onsite-ops-system-v1.0.16-production.tar.gz`）
+- Node.js 20 LTS 及以上，`tar` 可用
+- 目标服务器当前的 `UPGRADE_SIGNING_KEY`
+- 目标服务器当前版本低于待安装版本，服务端不接受平级或降级包
+
+构建过程不安装依赖、不连接数据库，只需 Node 标准库和 `tar`。
+
+### 4.3 取得生产环境的签名密钥
+
+密钥必须与目标服务器运行时的 `UPGRADE_SIGNING_KEY` 逐字符一致。按部署方式选择取值方式。
+
+方式一：从 `.env.production` 读取。
 
 ```bash
-npm run build-upgrade
+cd /opt/onsite-ops-system
+KEY=$(sed -n 's/^UPGRADE_SIGNING_KEY=//p' .env.production | tail -1 | tr -d '"'"'"'')
+printf 'key length: %s\n' "${#KEY}"
 ```
 
-产物为 `onsite-ops-upgrade-v<version>.tar.gz`，同时生成 `manifest.json`。未设置 `UPGRADE_SIGNING_KEY` 时 manifest 不含 `signature` 字段，脚本会打印提示。生产环境上传这类包会被拒绝。
-
-### 4.2 带签名构建（生产环境必须）
-
-签名密钥必须与目标服务器上运行的 `UPGRADE_SIGNING_KEY` 完全一致，长度不少于 32 位：
+方式二：从运行中的容器读取，适用于密钥由编排平台注入、未落在文件里的场景。
 
 ```bash
-UPGRADE_SIGNING_KEY='与生产环境一致且不少于32位的随机密钥' npm run build-upgrade
+cd /opt/onsite-ops-system
+KEY=$(docker compose --env-file .env.production -f docker-compose.prod.yml \
+  exec -T onsite-ops-system printenv UPGRADE_SIGNING_KEY | tr -d '\r\n')
+printf 'key length: %s\n' "${#KEY}"
 ```
 
-生成密钥的参考命令：
+`exec` 必须带 `-T`。缺少该参数时输出会带 `\r`，签出来的包必然校验失败。
+
+方式三：密钥存放在密码管理器或 KMS 中，直接注入到构建命令的环境变量。
+
+```bash
+read -rs UPGRADE_SIGNING_KEY
+export UPGRADE_SIGNING_KEY
+printf 'key length: %s\n' "${#UPGRADE_SIGNING_KEY}"
+```
+
+三点注意：
+
+- 生产环境不会回退到 `data/upgrade-signing.key`，该文件仅在非生产环境生效；生产环境缺失密钥会在启动时直接失败
+- 密钥经 `.trim()` 处理后参与计算，前后空格会被去掉，取值时不必手工清理
+- 不要把密钥写进命令行历史。用 `read -rs` 或从文件读取，避免 `export KEY='明文'` 留在 `history`
+
+### 4.4 生成新环境的签名密钥
+
+首次部署或需要轮换时生成，长度 64 个十六进制字符，满足不少于 32 位的要求。
 
 ```bash
 openssl rand -hex 32
 ```
 
-签名密钥的三种来源，优先级从高到低：
-
-1. 容器或进程环境变量 `UPGRADE_SIGNING_KEY`
-2. 非生产环境下回退到 `data/upgrade-signing.key`
-3. 都没有时，生产环境启动直接失败
-
-已运行的生产系统如果使用了回退密钥文件，用下面命令取出同一份密钥再构建：
+写入 `.env.production` 后必须重建容器才会生效：
 
 ```bash
-docker compose --env-file .env.production -f docker-compose.prod.yml \
-  exec onsite-ops-system cat /app/data/upgrade-signing.key
+docker compose --env-file .env.production -f docker-compose.prod.yml up -d
 ```
 
-### 4.3 构建输出
+密钥变更后，此前用旧密钥签名的升级包全部失效，需要用新密钥重新构建。
 
-成功时输出示例如下：
+### 4.5 构建签名升级包
+
+在源码目录中执行，`UPGRADE_SIGNING_KEY` 通过环境变量传入，不修改任何文件。
+
+```bash
+cd /tmp/build-1.0.16
+UPGRADE_SIGNING_KEY="$KEY" UPGRADE_REQUIRE_SIGNATURE=1 npm run build-upgrade
+```
+
+`UPGRADE_REQUIRE_SIGNATURE=1` 会在密钥缺失或不足 32 位时直接失败，避免误产出未签名包。发布流水线建议始终带上该变量。
+
+宿主机没有 Node 时，用官方镜像挂载源码目录构建：
+
+```bash
+docker run --rm -v /tmp/build-1.0.16:/src -w /src \
+  -e UPGRADE_SIGNING_KEY="$KEY" -e UPGRADE_REQUIRE_SIGNATURE=1 \
+  node:20-slim node build-upgrade.js
+```
+
+容器以 root 写入产物，上传前把属主改回当前用户：
+
+```bash
+sudo chown "$(id -u):$(id -g)" /tmp/build-1.0.16/onsite-ops-upgrade-v1.0.16.tar.gz \
+  /tmp/build-1.0.16/manifest.json
+```
+
+### 4.6 构建输出
+
+成功时输出如下，关键行是 `Upgrade package signed with UPGRADE_SIGNING_KEY`：
 
 ```text
   SHA256 server.js: 00d62488e748e4cd...
@@ -103,12 +168,28 @@ docker compose --env-file .env.production -f docker-compose.prod.yml \
 Upgrade package signed with UPGRADE_SIGNING_KEY
 Upgrade package created: onsite-ops-upgrade-v1.0.16.tar.gz (0.7 MB)
 Version: 1.0.16
-  manifest.json written (18 files)
+  manifest.json written (19 files)
 ```
 
-`manifest.json` 会被 `.gitignore` 忽略，只随压缩包分发。
+出现 `manifest has no signature` 说明密钥没有传进构建进程，检查命令前缀是否正确、变量是否为空。`manifest.json` 被 `.gitignore` 忽略，只随压缩包分发。
 
-### 4.4 生成校验和
+### 4.7 上传前本地自检
+
+用同一个密钥在本地复算签名，确认包能被生产端接受：
+
+```bash
+UPGRADE_SIGNING_KEY="$KEY" npm run verify-upgrade -- onsite-ops-upgrade-v1.0.16.tar.gz
+```
+
+通过时输出：
+
+```text
+校验通过：版本 1.0.16，19 个文件，签名有效
+```
+
+自检覆盖清单文件一致性、每个文件的 SHA256、清单是否存在未声明条目与文件，以及 HMAC 签名是否与当前密钥匹配。任何一项不通过都会以非零退出码结束并指出具体原因。
+
+### 4.8 生成校验和
 
 两个产物都要写入 `onsite-ops-system-v1.0.16.sha256`，每行一个文件：
 
@@ -252,11 +333,11 @@ docker compose --env-file .env.production -f docker-compose.prod.yml up -d --bui
 
 ### 10.1 上传提示「升级包缺少签名」
 
-当前是生产环境，但包是无签名构建。用生产密钥重新执行第 4.2 节。
+生产环境，但包是无签名构建。GitHub Release 直接提供的升级包属于这一类。按第 4.3 到 4.5 节取得密钥并重新构建。
 
 ### 10.2 上传提示「升级包签名校验失败」
 
-构建用的 `UPGRADE_SIGNING_KEY` 与服务器不一致。核对两边的密钥值，或从服务器 `data/upgrade-signing.key` 取回密钥后重新构建。
+构建用的 `UPGRADE_SIGNING_KEY` 与服务器不一致。用第 4.3 节的方式二从容器取值，重新构建后再用 `npm run verify-upgrade` 自检。常见原因是取了 `.env.production` 里被注释掉的旧值，或 `exec` 没加 `-T` 导致密钥尾部带 `\r`。
 
 ### 10.3 上传提示「升级包 SHA256 校验失败」
 
@@ -300,5 +381,6 @@ sudo chown -R 1000:1000 data
 - `npm run regression` 通过
 - 完整安装包解压后为平铺结构，不含 `data/`、`node_modules/`
 - 升级包带 `signature` 字段，签名密钥与目标环境一致
+- `npm run verify-upgrade -- <包>` 输出「校验通过」
 - `.sha256` 文件包含完整包与升级包两行
 - Release 附件与校验和文件来自同一次构建
