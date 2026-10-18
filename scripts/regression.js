@@ -231,11 +231,11 @@ async function updateSystemSettings(cookie, payload) {
   });
 }
 
-async function exportSystemSnapshot(cookie) {
+async function exportSystemSnapshot(cookie, password = 'Admin123!') {
   const exported = await request('/api/system/export', {
     method: 'POST',
     headers: { cookie, 'Content-Type': 'application/json' },
-    body: '{}'
+    body: JSON.stringify({ password })
   });
   assert(exported.status === 200, '导出当前数据失败');
   return exported.data;
@@ -530,27 +530,47 @@ async function main() {
 
   // 每轮回归用独立客户端 IP，避免反复运行累积触发忘记密码的进程内限流
   const forgotTestIp = `198.18.${(Date.now() % 200) + 1}.${Math.floor(Math.random() * 250) + 1}`;
+  const forgotHeaders = { 'Content-Type': 'application/json', 'x-forwarded-for': forgotTestIp };
+  // 重置密码必须先通过 verify 换取一次性票据，票据缺失时直接 400。
+  const requestForgotTicket = async (username) => {
+    const captcha = await request('/api/captcha');
+    const verify = await request('/api/forgot-password/verify', {
+      method: 'POST',
+      headers: forgotHeaders,
+      body: JSON.stringify({ username, captchaToken: captcha.data.token, captcha: decodeCaptchaFromSvg(captcha.data) })
+    });
+    return verify.data && verify.data.ticket;
+  };
+  const forgotMissingTicket = await requestForgotTicket('no-such-user');
   const forgotMissingCaptcha = await request('/api/captcha');
   const forgotMissing = await request('/api/forgot-password/reset', {
     method: 'POST',
-    headers: { 'Content-Type': 'application/json', 'x-forwarded-for': forgotTestIp },
-    body: JSON.stringify({ username: 'no-such-user', securityAnswer: 'x', newPassword: 'Newpass1!', captchaToken: forgotMissingCaptcha.data.token, captcha: decodeCaptchaFromSvg(forgotMissingCaptcha.data) })
+    headers: forgotHeaders,
+    body: JSON.stringify({ username: 'no-such-user', securityAnswer: 'x', newPassword: 'Newpass1!', ticket: forgotMissingTicket, captchaToken: forgotMissingCaptcha.data.token, captcha: decodeCaptchaFromSvg(forgotMissingCaptcha.data) })
   });
+  const forgotWrongTicket = await requestForgotTicket('admin');
   const forgotWrongCaptcha = await request('/api/captcha');
   const forgotWrong = await request('/api/forgot-password/reset', {
     method: 'POST',
-    headers: { 'Content-Type': 'application/json', 'x-forwarded-for': forgotTestIp },
-    body: JSON.stringify({ username: 'admin', securityAnswer: 'wrong-answer', newPassword: 'Newpass1!', captchaToken: forgotWrongCaptcha.data.token, captcha: decodeCaptchaFromSvg(forgotWrongCaptcha.data) })
+    headers: forgotHeaders,
+    body: JSON.stringify({ username: 'admin', securityAnswer: 'wrong-answer', newPassword: 'Newpass1!', ticket: forgotWrongTicket, captchaToken: forgotWrongCaptcha.data.token, captcha: decodeCaptchaFromSvg(forgotWrongCaptcha.data) })
   });
   assert(forgotMissing.status === 200 && forgotWrong.status === 200, '忘记密码失败应返回 200');
   assert(forgotMissing.data.reset !== true && forgotWrong.data.reset !== true, '忘记密码失败不应标记 reset');
   assert(forgotMissing.data.message === forgotWrong.data.message, '忘记密码失败响应应一致');
   const forgotResetNoCaptcha = await request('/api/forgot-password/reset', {
     method: 'POST',
-    headers: { 'Content-Type': 'application/json', 'x-forwarded-for': forgotTestIp },
+    headers: forgotHeaders,
     body: JSON.stringify({ username: 'admin', securityAnswer: 'wrong-answer', newPassword: 'Newpass1!' })
   });
   assert(forgotResetNoCaptcha.status === 401, '忘记密码重置缺少验证码应被拒绝');
+  const forgotResetNoTicketCaptcha = await request('/api/captcha');
+  const forgotResetNoTicket = await request('/api/forgot-password/reset', {
+    method: 'POST',
+    headers: forgotHeaders,
+    body: JSON.stringify({ username: 'admin', securityAnswer: 'wrong-answer', newPassword: 'Newpass1!', captchaToken: forgotResetNoTicketCaptcha.data.token, captcha: decodeCaptchaFromSvg(forgotResetNoTicketCaptcha.data) })
+  });
+  assert(forgotResetNoTicket.status === 400, '忘记密码重置缺少票据应返回 400');
   const forgotVerifyMissingCaptcha = await request('/api/captcha');
   const forgotVerifyMissing = await request('/api/forgot-password/verify', {
     method: 'POST',
@@ -575,7 +595,7 @@ async function main() {
   const exported = await request('/api/system/export', {
     method: 'POST',
     headers: { cookie, 'Content-Type': 'application/json' },
-    body: '{}'
+    body: JSON.stringify({ password: 'Admin123!' })
   });
   assert(exported.status === 200, '导出当前数据失败');
   const snapshot = exported.data;
@@ -605,7 +625,7 @@ async function main() {
   assert(Number(allProjects.data.total) >= Number(pagedProjects.data.total || 0), 'all=1 返回数量应覆盖分页 total');
   assert(allProjects.data.data.length === Number(allProjects.data.total), 'all=1 应返回全部项目');
   assert(allProjects.data.totalPages === 1, 'all=1 的 totalPages 应为 1');
-  const backupResult = await request('/api/system/backup', { method: 'POST', headers: { cookie, 'Content-Type': 'application/json' }, body: '{}' });
+  const backupResult = await request('/api/system/backup', { method: 'POST', headers: { cookie, 'Content-Type': 'application/json' }, body: JSON.stringify({ password: 'Admin123!' }) });
   assert(backupResult.status === 200, '创建系统备份失败');
   assert(String(backupResult.data.filename || '').startsWith('backup-'), '系统备份文件名不符合预期');
   const backupGetDenied = await request(`/api/system/backups/${encodeURIComponent(backupResult.data.filename)}`, { headers: { cookie } });
@@ -613,10 +633,28 @@ async function main() {
   const systemBackupDownload = await request(`/api/system/backups/${encodeURIComponent(backupResult.data.filename)}`, {
     method: 'POST',
     headers: { cookie, 'Content-Type': 'application/json' },
-    body: '{}'
+    body: JSON.stringify({ password: 'Admin123!' })
   });
   assert(systemBackupDownload.status === 200, 'POST 下载系统备份失败');
   assert((systemBackupDownload.data.users || []).every(item => Boolean(item.passwordHash)), '备份下载应包含可恢复的 passwordHash');
+  const systemBackupDownloadNoPassword = await request(`/api/system/backups/${encodeURIComponent(backupResult.data.filename)}`, {
+    method: 'POST',
+    headers: { cookie, 'Content-Type': 'application/json' },
+    body: '{}'
+  });
+  assert(systemBackupDownloadNoPassword.status === 401, '系统备份下载缺少管理员密码应被拒绝');
+  const systemExportNoPassword = await request('/api/system/export', {
+    method: 'POST',
+    headers: { cookie, 'Content-Type': 'application/json' },
+    body: '{}'
+  });
+  assert(systemExportNoPassword.status === 401, '系统导出缺少管理员密码应被拒绝');
+  const systemBackupNoPassword = await request('/api/system/backup', {
+    method: 'POST',
+    headers: { cookie, 'Content-Type': 'application/json' },
+    body: '{}'
+  });
+  assert(systemBackupNoPassword.status === 401, '创建系统备份缺少管理员密码应被拒绝');
   const systemInfo = await request('/api/system/info', { headers: { cookie } });
   assert(systemInfo.status === 200, '查询系统信息失败');
   assert(Number(systemInfo.data.systemConfig?.webIdleLogoutMinutes) >= 1, '系统信息未返回控制台超时配置');

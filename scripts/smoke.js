@@ -77,7 +77,7 @@ async function main() {
   const backup = await request('/api/system/backup', {
     method: 'POST',
     headers: { ...headers, 'Content-Type': 'application/json' },
-    body: JSON.stringify({})
+    body: JSON.stringify({ password: 'Admin123!' })
   });
   assert(backup.status === 200, '系统备份创建失败（文件 DB 路径异常）');
   assert(backup.data.filename, '备份未返回文件名');

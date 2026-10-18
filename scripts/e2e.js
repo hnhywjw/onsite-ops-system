@@ -1102,6 +1102,7 @@ async function main() {
     await login(page, 'admin', 'Admin123!');
     await page.click('button[data-tab="system"]');
     await page.click('section[data-tab="system"] button[data-subtab="upgrade"]');
+    await page.fill('#systemRestorePassword', 'Admin123!');
     await page.click('#systemBackupBtn');
     await page.waitForFunction(() => {
       const message = document.querySelector('#systemBackupMessage');
@@ -1109,6 +1110,7 @@ async function main() {
     });
 
     page.setDefaultTimeout(180000);
+    await page.fill('#systemRestorePassword', 'Admin123!');
     const exportedText = await captureExportDownload(page, '#systemExportBtn', '/api/system/export', exportPath);
     const exported = JSON.parse(exportedText);
     assert(Array.isArray(exported.projects) && exported.projects.some(item => item.name === projectName), '导出数据未包含新建项目');

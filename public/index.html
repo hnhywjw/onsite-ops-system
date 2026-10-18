@@ -1070,8 +1070,19 @@
     .modal-actions { display:flex; gap:8px; justify-content:flex-end; margin-top:16px; }
     @media (max-width: 768px) {
       body { font-size: 13px; }
-      .layout { grid-template-columns: 1fr; background: var(--bg); }
-      .sidebar { width: 0; overflow: hidden; padding: 0; }
+      /* 窄屏把侧栏折叠为顶部导航条，保留完整入口，避免导航不可达。 */
+      .layout { grid-template-columns: 1fr; grid-template-rows: auto minmax(0, 1fr); background: var(--bg); }
+      .sidebar { width: 100%; height: auto; max-height: 46vh; padding: 8px 10px; }
+      .brand { font-size: 14px; margin-bottom: 2px; }
+      .brand-logo { width: 22px; height: 22px; }
+      .subbrand { display: none; }
+      .userbox { padding: 6px 8px; margin-bottom: 6px; font-size: 12px; }
+      .nav { display: flex; flex-wrap: wrap; gap: 4px; }
+      .nav button { width: auto; padding: 5px 8px; margin-bottom: 0; font-size: 12px; gap: 4px; }
+      .nav-icon, .nav-icon svg { width: 14px; height: 14px; flex-basis: 14px; }
+      .nav-sep, .sidebar-footer { display: none; }
+      .logout { margin-top: 6px; padding: 5px 8px; font-size: 12px; }
+      .content { height: 100%; padding: 12px; }
       .main { margin-left: 0; padding: 12px; }
       .table-wrap { overflow-x: auto; }
       .table-wrap table { min-width: 600px; }
@@ -3227,9 +3238,9 @@
             </div>
             <div class="card system-backup-card">
               <h3 style="margin-top:0;">数据备份、导出</h3>
-              <div class="muted">创建当前数据库快照，或直接导出完整数据文件。从磁盘备份恢复需再次输入管理员密码。</div>
+              <div class="muted">创建当前数据库快照、导出或下载完整数据文件、从磁盘备份恢复，均需输入当前管理员密码二次确认，操作会记入审计。</div>
               <label style="margin-top:14px; max-width: 320px;">
-                <span>恢复备份时的管理员密码</span>
+                <span>管理员密码（备份、导出、下载、恢复、删除共用）</span>
                 <input id="systemRestorePassword" type="password" placeholder="请输入当前管理员密码" />
               </label>
               <div class="system-actions">
@@ -3473,6 +3484,10 @@
               <option value="decision">审批</option>
               <option value="execute">执行</option>
               <option value="export">导出</option>
+              <option value="login">登录</option>
+              <option value="login_failed">登录失败</option>
+              <option value="sso_login">单点登录</option>
+              <option value="logout">退出登录</option>
               <option value="access">查看</option>
               <option value="download">下载</option>
               <option value="verify">验证</option>
@@ -3480,6 +3495,7 @@
               <option value="backup">备份</option>
               <option value="upload">上传</option>
               <option value="upgrade">升级</option>
+              <option value="restore">恢复</option>
             </select>
             <select id="auditLogFilterTarget">
               <option value="">全部对象</option>
@@ -3502,6 +3518,7 @@
               <option value="aiInspectionTarget">巡检对象</option>
               <option value="aiInspectionTemplate">巡检模板</option>
               <option value="aiInspectionTask">巡检任务</option>
+              <option value="auth">认证</option>
               <option value="aiInspectionResult">巡检结果</option>
               <option value="configBackupPlan">配置备份计划</option>
               <option value="configBackupRecord">配置备份记录</option>
@@ -3863,12 +3880,21 @@
         const method = String(options.method || 'POST').toUpperCase();
         const headers = {};
         if (method !== 'GET' && method !== 'HEAD' && state.csrfToken) headers['X-CSRF-Token'] = state.csrfToken;
+        if (options.body !== undefined) headers['Content-Type'] = 'application/json';
         const response = await fetch(buildAuthenticatedUrl(url), {
           method,
           credentials: 'include',
-          headers
+          headers,
+          body: options.body
         });
-        if (!response.ok) throw new Error('下载失败');
+        if (!response.ok) {
+          let message = '下载失败';
+          try {
+            const payload = await response.json();
+            if (payload && payload.message) message = payload.message;
+          } catch (_) {}
+          throw new Error(message);
+        }
         const blob = await response.blob();
         const downloadUrl = URL.createObjectURL(blob);
         const a = document.createElement('a');
@@ -12355,8 +12381,16 @@
       }
     });
     document.getElementById('systemBackupBtn').addEventListener('click', async () => {
+      const passwordInput = document.getElementById('systemRestorePassword');
+      const password = passwordInput ? passwordInput.value : '';
+      if (!password) {
+        setMessage('systemBackupMessage', '请输入管理员密码后再创建备份', 'error');
+        passwordInput?.focus();
+        return;
+      }
       try {
-        const result = await api('/api/system/backup', { method: 'POST', body: '{}' });
+        const result = await api('/api/system/backup', { method: 'POST', body: JSON.stringify({ password }) });
+        if (passwordInput) passwordInput.value = '';
         appendBackupLinkToMessage('systemBackupMessage', result.href, result.filename, `备份创建成功: ${result.filename}`);
         try {
           await refreshSystemManagement();
@@ -12368,12 +12402,28 @@
       }
     });
     document.getElementById('systemExportBtn').addEventListener('click', () => {
-      downloadReport('/api/system/export', `onsite-ops-export-${formatLocalDateKey(new Date())}.json`, { method: 'POST' });
+      const passwordInput = document.getElementById('systemRestorePassword');
+      const password = passwordInput ? passwordInput.value : '';
+      if (!password) {
+        setMessage('systemBackupMessage', '请输入管理员密码后再导出数据', 'error');
+        passwordInput?.focus();
+        return;
+      }
+      downloadReport('/api/system/export', `onsite-ops-export-${formatLocalDateKey(new Date())}.json`, { method: 'POST', body: JSON.stringify({ password }) });
+      if (passwordInput) passwordInput.value = '';
     });
     document.getElementById('systemBackupList').addEventListener('click', async event => {
       const downloadBtn = event.target.closest('button[data-action="download-system-backup"]');
       if (downloadBtn) {
-        downloadReport(downloadBtn.dataset.href, downloadBtn.dataset.filename || 'backup.json', { method: 'POST' });
+        const passwordInput = document.getElementById('systemRestorePassword');
+        const password = passwordInput ? passwordInput.value : '';
+        if (!password) {
+          setMessage('systemBackupMessage', '请输入管理员密码后再下载备份', 'error');
+          passwordInput?.focus();
+          return;
+        }
+        downloadReport(downloadBtn.dataset.href, downloadBtn.dataset.filename || 'backup.json', { method: 'POST', body: JSON.stringify({ password }) });
+        if (passwordInput) passwordInput.value = '';
         return;
       }
       const restoreBtn = event.target.closest('button[data-action="restore-system-backup"]');

@@ -95,11 +95,12 @@ INITIAL_ADMIN_SECURITY_ANSWER=replace-with-admin-security-answer
 INITIAL_ENGINEER_SECURITY_ANSWER=replace-with-engineer-security-answer
 ENCRYPTION_KEY=replace-with-at-least-32-chars-random-key
 UPGRADE_SIGNING_KEY=replace-with-at-least-32-chars-random-key
+DOCUMENT_TOKEN_SECRET=replace-with-at-least-32-chars-random-key
 ```
 
 密码要求：至少 8 位，包含字母、数字和特殊字符。
 
-`ENCRYPTION_KEY` 与 `UPGRADE_SIGNING_KEY` 建议使用 32 位以上随机字符串。示例生成命令：
+`ENCRYPTION_KEY`、`UPGRADE_SIGNING_KEY` 与 `DOCUMENT_TOKEN_SECRET` 建议使用 32 位以上随机字符串。示例生成命令：
 
 ```bash
 openssl rand -base64 32
@@ -330,6 +331,7 @@ curl http://127.0.0.1:3000/api/ready
 - `INITIAL_ENGINEER_SECURITY_ANSWER`
 - `ENCRYPTION_KEY`
 - `UPGRADE_SIGNING_KEY`
+- `DOCUMENT_TOKEN_SECRET`
 
 ### 9.2 `/api/ready` 返回 503
 
@@ -379,3 +381,13 @@ docker compose --env-file .env.production -f docker-compose.prod.yml up -d --bui
 - 企业 SSO 账号的二次认证由身份提供方负责，本地不提供绑定入口
 
 `ENCRYPTION_KEY` 同时用于加密动态令牌密钥。更换该密钥会导致既有动态令牌无法解密，相关账号需由管理员重置后重新绑定，请在生产环境固定并妥善备份 `ENCRYPTION_KEY`。
+
+## 12. 敏感操作二次确认
+
+系统备份创建、数据导出、备份下载、备份恢复与备份删除均要求管理员密码二次确认，并写入操作日志。
+
+- 入口：系统管理页「升级与备份」子标签下的管理员密码输入框
+- 失败限制：同一管理员账号在 15 分钟内连续 5 次密码校验失败将锁定 5 分钟
+- 审计：认证事件（登录成功、登录失败、退出登录、OIDC 单点登录）与备份导出下载均记录来源 IP 与 User-Agent，可在「操作日志」按动作筛选
+
+`DOCUMENT_TOKEN_SECRET` 用于签发资料访问令牌。未设置时会从 `ENCRYPTION_KEY` 派生独立子密钥；显式设置后更换该值会使已签发的资料访问链接立即失效，需要重新打开资料。

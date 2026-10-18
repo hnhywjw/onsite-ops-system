@@ -2,7 +2,7 @@ const http = require('http');
 const https = require('https');
 const fs = require('fs');
 const path = require('path');
-const { execFile, execSync } = require('child_process');
+const { execFile, execFileSync } = require('child_process');
 const crypto = require('crypto');
 const tls = require('tls');
 const { URL } = require('url');
@@ -544,7 +544,8 @@ async function ldapAuthenticate(ldapUrlStr, baseDn, bindDn, bindPassword, userna
         } else {
           const eqParts = [];
           eqParts.push(encodeOctetString(0x04, op.attribute || 'cn'));
-          eqParts.push(encodeOctetString(0x04, op.value || ''));
+          // RFC 4515：过滤值中的 * ( ) \ NUL 必须转义，否则账号名可篡改搜索条件语义。
+          eqParts.push(encodeOctetString(0x04, escapeLdapFilterValue(op.value || '')));
           filter = Buffer.concat([Buffer.from([0xa3]), encodeLength(Buffer.concat(eqParts).length), ...eqParts]);
         }
         const body = Buffer.concat([baseObj, scope, deref, sizeLimit, timeLimit, typesOnly, filter]);
@@ -622,7 +623,17 @@ async function ldapAuthenticate(ldapUrlStr, baseDn, bindDn, bindPassword, userna
     }
 
     function escapeLdapDn(val) {
-      return String(val).replace(/[,+\"\\<>;=#]/g, '\\$&');
+      let escaped = String(val)
+        .replace(/[,+\"\\<>;=#\u0000]/g, ch => (ch === '\u0000' ? '\\00' : `\\${ch}`));
+      // RFC 4514：首尾空格与首个 # 需要转义，否则会被 DN 解析器忽略或误判。
+      if (escaped.startsWith(' ')) escaped = `\\ ${escaped.slice(1)}`;
+      if (escaped.endsWith(' ')) escaped = `${escaped.slice(0, -1)}\\ `;
+      if (escaped.startsWith('#')) escaped = `\\#${escaped.slice(1)}`;
+      return escaped;
+    }
+
+    function escapeLdapFilterValue(val) {
+      return String(val).replace(/[\u0000()*\\]/g, ch => `\\${ch.charCodeAt(0).toString(16).padStart(2, '0')}`);
     }
 
     conn.on('connect', () => {
@@ -690,6 +701,30 @@ const captchaCharset = `${captchaLetters}${captchaDigits}`;
 const captchaSecret = crypto.randomBytes(32).toString('hex');
 const captchaChallenges = new Map();
 const CAPTCHA_CHALLENGE_LIMIT = 5000;
+// 验证码签发按来源 IP 限流，避免匿名请求无限生成挑战挤出他人验证码。
+const captchaRequestWindows = new Map();
+const CAPTCHA_REQUEST_LIMIT = 200;
+const CAPTCHA_REQUEST_WINDOW_MS = 5 * 60 * 1000;
+
+function checkCaptchaRequestRate(req) {
+  const clientIp = getRequestClientIp(req);
+  const current = nowMs();
+  const entry = captchaRequestWindows.get(clientIp);
+  if (!entry || current - entry.windowStart > CAPTCHA_REQUEST_WINDOW_MS) {
+    captchaRequestWindows.set(clientIp, { windowStart: current, count: 1 });
+    if (captchaRequestWindows.size > 10000) {
+      for (const [key, value] of captchaRequestWindows) {
+        if (current - value.windowStart > CAPTCHA_REQUEST_WINDOW_MS) captchaRequestWindows.delete(key);
+      }
+    }
+    return { limited: false, retryAfterMs: 0 };
+  }
+  entry.count += 1;
+  if (entry.count > CAPTCHA_REQUEST_LIMIT) {
+    return { limited: true, retryAfterMs: CAPTCHA_REQUEST_WINDOW_MS - (current - entry.windowStart) };
+  }
+  return { limited: false, retryAfterMs: 0 };
+}
 
 // 忘记密码流程的短时票据：仅在 verify 校验通过后签发，绑定账号，防止跳过第一步直接调用 reset。
 const forgotPasswordTickets = new Map();
@@ -1539,6 +1574,12 @@ function sanitizeUploadFilename(filename) {
     .trim()
     || `upload-${Date.now()}`;
   if (base === '.' || base === '..') return `upload-${Date.now()}`;
+  // 文件名过长会触发 ENAMETOOLONG，落盘失败后返回 500；截断时保留扩展名。
+  const MAX_UPLOAD_FILENAME_LENGTH = 180;
+  if (base.length > MAX_UPLOAD_FILENAME_LENGTH) {
+    const ext = path.extname(base).slice(0, 16);
+    return base.slice(0, MAX_UPLOAD_FILENAME_LENGTH - ext.length) + ext;
+  }
   return base;
 }
 
@@ -1580,6 +1621,14 @@ function sanitizeUser(user) {
     ...safe
   } = user;
   return safe;
+}
+
+// oidc_/ldap_ 前缀由 SSO/LDAP 自动开通流程占用；若允许普通账号使用，
+// 预注册同名账号后会与外部身份登录映射到同一记录，造成账号接管。
+const RESERVED_USERNAME_PREFIXES = ['oidc_', 'ldap_'];
+function isReservedUsername(username) {
+  const lowered = String(username || '').trim().toLowerCase();
+  return RESERVED_USERNAME_PREFIXES.some(prefix => lowered.startsWith(prefix));
 }
 
 function sanitizeUserForViewer(user, viewer) {
@@ -2268,7 +2317,14 @@ function resolveRuntimeEncryptionKey() {
   return generated;
 }
 const RUNTIME_ENCRYPTION_KEY = resolveRuntimeEncryptionKey();
-const DOCUMENT_TOKEN_SECRET = process.env.DOCUMENT_TOKEN_SECRET || RUNTIME_ENCRYPTION_KEY;
+// 文档令牌密钥与凭据加密密钥分开：未显式配置时从运行时密钥派生独立子密钥，
+// 避免同一密钥同时用于加密和签名，且不影响启动（已有令牌会失效，需重新打开文档）。
+const DOCUMENT_TOKEN_SECRET = (() => {
+  const fromEnv = String(process.env.DOCUMENT_TOKEN_SECRET || '').trim();
+  if (fromEnv.length >= 32) return fromEnv;
+  if (fromEnv) console.warn('WARNING: DOCUMENT_TOKEN_SECRET 长度不足 32 位，已改用派生密钥。');
+  return crypto.pbkdf2Sync(RUNTIME_ENCRYPTION_KEY, 'document-token-static-salt', 100000, 32, 'sha256').toString('hex');
+})();
 const DOCUMENT_TYPES = ['device', 'topology', 'layout', 'proposal', 'config', 'contract', 'acceptance'];
 const ENCRYPTION_ALGORITHM = 'aes-256-gcm';
 
@@ -2371,18 +2427,38 @@ function buildTotpAt(secret, counter) {
   return String(binary % (10 ** TOTP_DIGITS)).padStart(TOTP_DIGITS, '0');
 }
 
-function verifyTotpCode(secret, code, atMs = nowMs()) {
+function matchTotpCounter(secret, code, atMs = nowMs()) {
   const candidate = String(code || '').replace(/\s+/g, '');
-  if (!/^\d{6}$/.test(candidate)) return false;
+  if (!/^\d{6}$/.test(candidate)) return null;
   const counter = Math.floor(atMs / 1000 / TOTP_STEP_SECONDS);
   // 允许前后各一个时间步，容忍客户端与服务端之间的时钟漂移。
   for (let offset = -TOTP_WINDOW_STEPS; offset <= TOTP_WINDOW_STEPS; offset += 1) {
     const expected = buildTotpAt(secret, counter + offset);
     if (expected.length === candidate.length && crypto.timingSafeEqual(Buffer.from(expected), Buffer.from(candidate))) {
-      return true;
+      return counter + offset;
     }
   }
-  return false;
+  return null;
+}
+
+// 同一用途下，同一时间步的动态码只允许成功使用一次，避免被截获后在有效窗口内重放。
+// 按用途分桶，使登录与账号自助操作互不阻塞（各自仍需完整凭据）。
+const totpLastUsedCounter = new Map();
+
+function consumeTotpCode(user, secret, code, scope = 'default') {
+  const counter = matchTotpCounter(secret, code);
+  if (counter === null) return false;
+  const key = `${scope}:${user && user.id ? user.id : 'anonymous'}:${String(secret).slice(-8)}`;
+  const lastUsed = totpLastUsedCounter.get(key);
+  if (Number.isFinite(lastUsed) && counter <= lastUsed) return false;
+  totpLastUsedCounter.set(key, counter);
+  if (totpLastUsedCounter.size > 5000) {
+    const cutoff = Math.floor(nowMs() / 1000 / TOTP_STEP_SECONDS) - 10;
+    for (const [entryKey, value] of totpLastUsedCounter) {
+      if (value < cutoff) totpLastUsedCounter.delete(entryKey);
+    }
+  }
+  return true;
 }
 
 function normalizeRecoveryCode(code) {
@@ -2494,6 +2570,39 @@ function clearTwoFactorFields(user) {
   user.twoFactorPendingSecret = '';
   user.twoFactorRecoveryCodeHashes = [];
   user.twoFactorEnabledAt = '';
+}
+
+// 关闭 2FA、重生成恢复码等自助操作此前可无限次尝试 6 位动态码，
+// LDAP 账号还会跳过密码复核，必须按账号限制失败次数。
+const twoFactorVerifyFailures = new Map();
+const TWO_FACTOR_VERIFY_MAX_FAILURES = 5;
+const TWO_FACTOR_VERIFY_LOCK_MS = 5 * 60 * 1000;
+
+function getTwoFactorVerifyLockState(user) {
+  const entry = twoFactorVerifyFailures.get(user && user.id);
+  if (!entry || !entry.lockedUntil) return { locked: false, retryAfterMs: 0 };
+  if (entry.lockedUntil <= nowMs()) {
+    twoFactorVerifyFailures.delete(user.id);
+    return { locked: false, retryAfterMs: 0 };
+  }
+  return { locked: true, retryAfterMs: entry.lockedUntil - nowMs() };
+}
+
+function recordTwoFactorVerifyFailure(user) {
+  if (!user || !user.id) return;
+  const current = nowMs();
+  const entry = twoFactorVerifyFailures.get(user.id) || { count: 0, firstAt: current, lockedUntil: 0 };
+  if (current - entry.firstAt > TWO_FACTOR_VERIFY_LOCK_MS) {
+    entry.count = 0;
+    entry.firstAt = current;
+  }
+  entry.count += 1;
+  if (entry.count >= TWO_FACTOR_VERIFY_MAX_FAILURES) entry.lockedUntil = current + TWO_FACTOR_VERIFY_LOCK_MS;
+  twoFactorVerifyFailures.set(user.id, entry);
+}
+
+function clearTwoFactorVerifyFailures(user) {
+  if (user && user.id) twoFactorVerifyFailures.delete(user.id);
 }
 
 function validateHost(host) {
@@ -3428,6 +3537,8 @@ function normalizeDb(raw = {}) {
       operatorId: item.operatorId || '',
       operatorName: item.operatorName || '',
       detail: item.detail || '',
+      ip: item.ip || '',
+      userAgent: item.userAgent || '',
       createdAt: item.createdAt || now()
     })),
     upgradeLogs: (raw.upgradeLogs || []).map(item => ({
@@ -4650,7 +4761,8 @@ async function getSystemServicesStatus(db) {
       key: 'mysql',
       name: 'MySQL 数据库',
       status: 'running',
-      detail: `${dbConfig.user}@${dbConfig.host}:${dbConfig.port}/${dbConfig.database}`,
+      // 不返回连接串，避免管理员页面成为内网拓扑与账号信息的泄露点。
+      detail: `已连接（数据库 ${dbConfig.database}）`,
       checkedAt
     });
   } catch (error) {
@@ -4668,7 +4780,7 @@ async function getSystemServicesStatus(db) {
         key: 'mysql',
         name: 'MySQL 数据库',
         status: 'stopped',
-        detail: error.message,
+        detail: '数据库连接失败，请检查服务状态与配置',
         checkedAt
       });
     }
@@ -4679,7 +4791,7 @@ async function getSystemServicesStatus(db) {
       key: 'backup-dir',
       name: '备份目录',
       status: 'running',
-      detail: backupDir,
+      detail: '备份目录可读写',
       checkedAt
     });
   } catch (error) {
@@ -4729,7 +4841,13 @@ function buildSecurityHeaders(extraHeaders = {}, nonce = '') {
 
 function json(res, status, data, extraHeaders = {}) {
   if (res.headersSent || res.writableEnded) return;
-  res.writeHead(status, buildSecurityHeaders({ 'Content-Type': 'application/json; charset=utf-8', ...extraHeaders }));
+  // 接口响应可能包含用户资料、CSRF token、审计日志等，禁止浏览器与中间代理缓存。
+  res.writeHead(status, buildSecurityHeaders({
+    'Cache-Control': 'no-store',
+    Pragma: 'no-cache',
+    'Content-Type': 'application/json; charset=utf-8',
+    ...extraHeaders
+  }));
   res.end(JSON.stringify(data));
 }
 
@@ -4989,8 +5107,41 @@ function requireAuditReader(req, res, db) {
   return user;
 }
 
-function verifyAdminStepUp(user, password) {
-  return Boolean(user && password) && verifyPassword(String(password), user.passwordHash);
+// 管理员二次验证按「账号 + 来源 IP」限流，避免会话被窃取后无限尝试管理员密码。
+const adminStepUpFailures = new Map();
+const ADMIN_STEP_UP_MAX_FAILURES = 5;
+const ADMIN_STEP_UP_LOCK_MS = 5 * 60 * 1000;
+const ADMIN_STEP_UP_WINDOW_MS = 15 * 60 * 1000;
+
+function adminStepUpKey(userId, req) {
+  return `${userId || ''}:${req ? getRequestClientIp(req) : ''}`;
+}
+
+function isAdminStepUpLocked(user, req) {
+  const entry = adminStepUpFailures.get(adminStepUpKey(user && user.id, req));
+  return Boolean(entry && entry.lockedUntil > nowMs());
+}
+
+function verifyAdminStepUp(user, password, req) {
+  if (!user) return false;
+  const key = adminStepUpKey(user.id, req);
+  const entry = adminStepUpFailures.get(key);
+  if (entry && entry.lockedUntil > nowMs()) return false;
+  if (entry && entry.lockedUntil && entry.lockedUntil <= nowMs()) adminStepUpFailures.delete(key);
+  if (Boolean(password) && verifyPassword(String(password), user.passwordHash)) {
+    adminStepUpFailures.delete(key);
+    return true;
+  }
+  const current = adminStepUpFailures.get(key) || { count: 0, firstAt: nowMs(), lockedUntil: 0 };
+  if (nowMs() - current.firstAt > ADMIN_STEP_UP_WINDOW_MS) {
+    current.count = 0;
+    current.firstAt = nowMs();
+    current.lockedUntil = 0;
+  }
+  current.count += 1;
+  if (current.count >= ADMIN_STEP_UP_MAX_FAILURES) current.lockedUntil = nowMs() + ADMIN_STEP_UP_LOCK_MS;
+  adminStepUpFailures.set(key, current);
+  return false;
 }
 
 function requireEditor(req, res, db) {
@@ -5028,9 +5179,9 @@ function canUseAiInspectionTemplate(user, item) {
   return Boolean(user.projectId) && item.projectId === user.projectId;
 }
 
-function appendAuditLog(db, user, action, targetType, targetId, detail, projectId = '') {
+function appendAuditLog(db, user, action, targetType, targetId, detail, projectId = '', meta = null) {
   db.auditLogs = db.auditLogs || [];
-  db.auditLogs.push({
+  const entry = {
     id: id('audit'),
     projectId: projectId || user.projectId || '',
     action,
@@ -5040,7 +5191,12 @@ function appendAuditLog(db, user, action, targetType, targetId, detail, projectI
     operatorName: user.name,
     detail,
     createdAt: now()
-  });
+  };
+  if (meta) {
+    entry.ip = String(meta.ip || '').slice(0, 64);
+    entry.userAgent = String(meta.userAgent || '').slice(0, 200);
+  }
+  db.auditLogs.push(entry);
   if (db.auditLogs.length > 10000) {
     // 超限时先归档被裁剪的历史记录，避免审计数据被静默丢弃。
     const overflow = db.auditLogs.slice(0, db.auditLogs.length - 5000);
@@ -5555,6 +5711,14 @@ function getRequestClientIp(req) {
   return forwardedChain[0] || remoteAddress || 'unknown';
 }
 
+function auditMeta(req) {
+  if (!req) return null;
+  return {
+    ip: getRequestClientIp(req),
+    userAgent: String(req.headers?.['user-agent'] || '')
+  };
+}
+
 function getLoginRateLimitKey(req, username) {
   return `${getRequestClientIp(req)}:${String(username || '').trim().toLowerCase()}`;
 }
@@ -5616,6 +5780,18 @@ async function recordLoginFailureLocked(req, username) {
   return withDbMutationLock(async () => {
     const lockDb = await readDb();
     const failedState = registerLoginFailure(lockDb, req, username);
+    if (req) {
+      appendAuditLog(
+        lockDb,
+        { id: '', name: String(username || '').slice(0, 64) || '未知账号' },
+        'login_failed',
+        'auth',
+        '',
+        '账号或密码校验失败',
+        '',
+        auditMeta(req)
+      );
+    }
     await writeDb(lockDb, { silent: true });
     return failedState;
   });
@@ -8412,20 +8588,34 @@ function serveStatic(req, res, pathname, db) {
     text(res, 403, 'Forbidden');
     return;
   }
+  if (!fs.existsSync(normalized) || fs.statSync(normalized).isDirectory()) {
+    text(res, 404, 'Not Found');
+    return;
+  }
+  // path.resolve 不解析符号链接，必须用 realpath 复核，防止 public 内的链接指向目录外文件。
+  let resolvedPath;
+  let realPublicDir;
+  try {
+    resolvedPath = fs.realpathSync(normalized);
+    realPublicDir = fs.realpathSync(publicDir);
+  } catch (_) {
+    text(res, 404, 'Not Found');
+    return;
+  }
+  if (!(resolvedPath === realPublicDir || resolvedPath.startsWith(realPublicDir + path.sep))) {
+    text(res, 403, 'Forbidden');
+    return;
+  }
   // 安装包与校验文件包含完整源码，仅允许管理员下载，避免匿名获取。
-  const downloadsDir = path.join(publicDir, 'downloads');
-  if (normalized === downloadsDir || normalized.startsWith(downloadsDir + path.sep)) {
+  const downloadsDir = path.join(realPublicDir, 'downloads');
+  if (resolvedPath === downloadsDir || resolvedPath.startsWith(downloadsDir + path.sep)) {
     const user = db ? getAuthUser(req, db) : null;
     if (!user || user.role !== 'admin') {
       text(res, 404, 'Not Found');
       return;
     }
   }
-  if (!fs.existsSync(normalized) || fs.statSync(normalized).isDirectory()) {
-    text(res, 404, 'Not Found');
-    return;
-  }
-  const ext = path.extname(normalized).toLowerCase();
+  const ext = path.extname(resolvedPath).toLowerCase();
   const types = {
     '.html': 'text/html; charset=utf-8',
     '.js': 'application/javascript; charset=utf-8',
@@ -8441,7 +8631,7 @@ function serveStatic(req, res, pathname, db) {
   }
   // 读流失败（权限/升级替换窗口/fd 耗尽）必须就地收尾，否则未监听的 'error'
   // 会冒泡到 uncaughtException 并终止整个进程。打开成功后再写响应头。
-  const stream = fs.createReadStream(normalized);
+  const stream = fs.createReadStream(resolvedPath);
   stream.once('error', () => {
     if (!res.headersSent) text(res, 404, 'Not Found');
     else if (!res.writableEnded) res.end();
@@ -8498,6 +8688,10 @@ const requestHandler = async (req, res) => {
 
 
     if (req.method === 'GET' && pathname === '/api/captcha') {
+      const captchaRate = checkCaptchaRequestRate(req);
+      if (captchaRate.limited) {
+        return json(res, 429, { message: '验证码请求过于频繁，请稍后重试' }, rateLimitResponseHeaders(captchaRate.retryAfterMs));
+      }
       const code = generateCaptchaCode();
       const token = createCaptchaToken(code);
       // 仅非生产环境保留字形元数据，供自动化测试解码；生产环境只返回图片本身。
@@ -8582,6 +8776,10 @@ const requestHandler = async (req, res) => {
         }
         lockDb.sessions = (lockDb.sessions || []).filter(item => item.userId !== user.id && Date.parse(item.expiresAt) > nowMs());
         lockDb.sessions.push({ token, userId: user.id, createdAt: now(), lastActivityAt: now(), expiresAt });
+        const lockLoginUser = (lockDb.users || []).find(item => item.id === user.id);
+        if (lockLoginUser) {
+          appendAuditLog(lockDb, lockLoginUser, 'login', 'auth', lockLoginUser.id, '账号密码登录成功', '', auditMeta(req));
+        }
         await writeDb(lockDb, { silent: true, replaceCollections: ['sessions'] });
       });
       return json(res, 200, { user: sanitizeUser(user), systemConfig: presentSystemConfig(user, db.systemConfig), csrfToken: getSessionCsrfToken(token) }, { 'Set-Cookie': buildSessionCookie(req, token, db.systemConfig) });
@@ -8614,7 +8812,7 @@ const requestHandler = async (req, res) => {
         return json(res, 401, { message: '登录验证已过期，请重新登录' });
       }
       const code = String(body.code || '').trim();
-      const totpMatched = verifyTotpCode(totpSecret, code);
+      const totpMatched = consumeTotpCode(user, totpSecret, code, 'login');
       const recoveryMatched = !totpMatched && consumeRecoveryCode(user, code);
       if (!totpMatched && !recoveryMatched) {
         challenge.attempts += 1;
@@ -8641,6 +8839,7 @@ const requestHandler = async (req, res) => {
         clearLoginFailures(lockDb, req, user.username);
         lockDb.sessions = (lockDb.sessions || []).filter(item => item.userId !== lockUser.id && Date.parse(item.expiresAt) > nowMs());
         lockDb.sessions.push({ token, userId: lockUser.id, createdAt: now(), lastActivityAt: now(), expiresAt });
+        appendAuditLog(lockDb, lockUser, 'login', 'auth', lockUser.id, recoveryMatched ? '动态令牌恢复码登录成功' : '动态令牌登录成功', '', auditMeta(req));
         await writeDb(lockDb, { silent: true, replaceCollections: ['sessions'] });
         return { ok: true, user: lockUser };
       });
@@ -8728,10 +8927,16 @@ const requestHandler = async (req, res) => {
       if (!pendingSecret) {
         return json(res, 400, { message: '绑定已过期，请重新开始绑定' });
       }
+      const enableLock = getTwoFactorVerifyLockState(user);
+      if (enableLock.locked) {
+        return json(res, 429, { message: '动态码尝试次数过多，请稍后重试' }, rateLimitResponseHeaders(enableLock.retryAfterMs));
+      }
       const body = await readBody(req);
-      if (!verifyTotpCode(pendingSecret, body.code)) {
+      if (!consumeTotpCode(user, pendingSecret, body.code, '2fa-enable')) {
+        recordTwoFactorVerifyFailure(user);
         return json(res, 400, { message: '动态码错误，请核对身份验证器后重试' });
       }
+      clearTwoFactorVerifyFailures(user);
       const recoveryCodes = generateRecoveryCodes();
       user.twoFactorSecret = user.twoFactorPendingSecret;
       user.twoFactorPendingSecret = '';
@@ -8760,9 +8965,15 @@ const requestHandler = async (req, res) => {
       if (!totpSecret) {
         return json(res, 400, { message: '动态令牌配置异常，请联系管理员重置' });
       }
-      if (!verifyTotpCode(totpSecret, body.code) && !consumeRecoveryCode(user, body.code)) {
+      const disableLock = getTwoFactorVerifyLockState(user);
+      if (disableLock.locked) {
+        return json(res, 429, { message: '动态码尝试次数过多，请稍后重试' }, rateLimitResponseHeaders(disableLock.retryAfterMs));
+      }
+      if (!consumeTotpCode(user, totpSecret, body.code, '2fa-disable') && !consumeRecoveryCode(user, body.code)) {
+        recordTwoFactorVerifyFailure(user);
         return json(res, 400, { message: '动态码或恢复码错误' });
       }
+      clearTwoFactorVerifyFailures(user);
       clearTwoFactorFields(user);
       appendAuditLog(db, user, 'update', 'user', user.id, '关闭动态令牌二次认证');
       await writeDb(db);
@@ -8777,9 +8988,15 @@ const requestHandler = async (req, res) => {
       }
       const body = await readBody(req);
       const totpSecret = readUserTotpSecret(user);
-      if (!totpSecret || !verifyTotpCode(totpSecret, body.code)) {
+      const recoveryLock = getTwoFactorVerifyLockState(user);
+      if (recoveryLock.locked) {
+        return json(res, 429, { message: '动态码尝试次数过多，请稍后重试' }, rateLimitResponseHeaders(recoveryLock.retryAfterMs));
+      }
+      if (!totpSecret || !consumeTotpCode(user, totpSecret, body.code, '2fa-recovery-codes')) {
+        if (totpSecret) recordTwoFactorVerifyFailure(user);
         return json(res, 400, { message: '动态码错误' });
       }
+      clearTwoFactorVerifyFailures(user);
       const recoveryCodes = generateRecoveryCodes();
       user.twoFactorRecoveryCodeHashes = recoveryCodes.map(hashRecoveryCode).filter(Boolean);
       appendAuditLog(db, user, 'update', 'user', user.id, '重新生成动态令牌恢复码');
@@ -8824,19 +9041,16 @@ const requestHandler = async (req, res) => {
       if (!/[a-zA-Z]/.test(body.newPassword) || !/[0-9]/.test(body.newPassword) || !/[^a-zA-Z0-9]/.test(body.newPassword)) {
         return json(res, 400, { message: '密码必须包含字母、数字和特殊字符' });
       }
-      // 携带了票据就必须有效（且一次性）：命中即删，答错安全问题同样消耗，避免在票据 TTL 内
-      // 用同一票据反复尝试同一账号的安全问题。未携带票据时保持原有的通用 200 文案。
+      // 票据必须先校验再比对安全问题：否则未携带票据时「答案正确」返回 400、
+      // 「答案错误」返回通用 200，会形成无需票据即可判定安全答案的 oracle。
+      // 票据一次性，答错安全问题同样消耗，避免在 TTL 内反复尝试。
       const providedTicket = String(body.ticket || '').trim();
-      if (providedTicket && !consumeForgotPasswordTicket(providedTicket, username)) {
+      if (!providedTicket || !consumeForgotPasswordTicket(providedTicket, username)) {
         return json(res, 400, { message: '验证已过期，请重新获取验证码' });
       }
       const user = db.users.find(item => item.username === username && item.status !== 'disabled');
       if (!user || !user.securityAnswerHash || !verifyPassword(body.securityAnswer, user.securityAnswerHash)) {
         return json(res, 200, { message: '如验证信息正确，密码将被重置' });
-      }
-      // 成功路径必须校验一次性票据（前端流程由 /forgot-password/verify 签发）。
-      if (!providedTicket) {
-        return json(res, 400, { message: '验证已过期，请重新获取验证码' });
       }
       user.passwordHash = hash(body.newPassword);
       db.sessions = (db.sessions || []).filter(item => item.userId !== user.id);
@@ -8866,6 +9080,9 @@ const requestHandler = async (req, res) => {
       if (registerLengthError) return json(res, 400, { message: registerLengthError });
       if (!db.systemConfig.allowRegistration) {
         return json(res, 403, { message: '管理员已关闭自主注册功能' });
+      }
+      if (isReservedUsername(username)) {
+        return json(res, 400, { message: '该账号前缀为系统保留，请更换账号' });
       }
       if (!body.password || String(body.password).length < 8) {
         return json(res, 400, { message: '密码长度不能少于 8 位' });
@@ -9028,6 +9245,7 @@ const requestHandler = async (req, res) => {
         const expiresAt = new Date(nowMs() + sessionMaxAgeSeconds * 1000).toISOString();
         db.sessions = (db.sessions || []).filter(item => item.userId !== localUser.id && Date.parse(item.expiresAt) > nowMs());
         db.sessions.push({ token, userId: localUser.id, createdAt: now(), lastActivityAt: now(), expiresAt });
+        appendAuditLog(db, localUser, 'sso_login', 'auth', localUser.id, 'OIDC 单点登录成功', '', auditMeta(req));
         await writeDb(db, { replaceCollections: ['sessions'] });
         res.writeHead(302, buildSecurityHeaders({
           Location: '/',
@@ -9140,7 +9358,9 @@ const requestHandler = async (req, res) => {
       if (sessionToken) {
         const session = (db.sessions || []).find(item => item.token === sessionToken);
         const sessionOwnerId = session ? session.userId : '';
+        const logoutUser = sessionOwnerId ? (db.users || []).find(item => item.id === sessionOwnerId) : null;
         db.sessions = (db.sessions || []).filter(item => item.token !== sessionToken);
+        if (logoutUser) appendAuditLog(db, logoutUser, 'logout', 'auth', logoutUser.id, '主动退出登录', '', auditMeta(req));
         await writeDb(db, { silent: true, replaceCollections: ['sessions'] });
         if (sessionOwnerId) closeUserWebSockets(sessionOwnerId);
       }
@@ -9353,6 +9573,9 @@ const requestHandler = async (req, res) => {
       if (username.length > 64) {
         return json(res, 400, { message: '账号长度不能超过 64 位' });
       }
+      if (isReservedUsername(username)) {
+        return json(res, 400, { message: '该账号前缀为系统保留，请更换账号' });
+      }
       const name = String(body.name ?? '').trim();
       if (!name) {
         return json(res, 400, { message: '请输入姓名' });
@@ -9415,7 +9638,7 @@ const requestHandler = async (req, res) => {
         return json(res, 400, { message: '该账号未启用动态令牌' });
       }
       const body = await readBody(req);
-      if (!verifyAdminStepUp(user, body.password)) {
+      if (!verifyAdminStepUp(user, body.password, req)) {
         return json(res, 401, { message: '管理员密码错误' });
       }
       clearTwoFactorFields(target);
@@ -9572,6 +9795,9 @@ const requestHandler = async (req, res) => {
       }
       if (nextUsername.length > 64) {
         return json(res, 400, { message: '账号长度不能超过 64 位' });
+      }
+      if (nextUsername !== target.username && isReservedUsername(nextUsername)) {
+        return json(res, 400, { message: '该账号前缀为系统保留，请更换账号' });
       }
       if (db.users.some(item => item.username === nextUsername && item.id !== targetUserId)) {
         return json(res, 400, { message: '账号已存在' });
@@ -12948,7 +13174,7 @@ const requestHandler = async (req, res) => {
       }
       // 涉及登录与账号锁定策略的敏感设置需要管理员二次验证，防止会话被盗后放宽防护。
       const sensitiveKeys = ['httpsLoginEnabled', 'httpLoginDisabled', 'allowRegistration', 'loginRateLimitMaxAttempts', 'loginRateLimitWindowMinutes', 'loginRateLimitLockMinutes', 'monitorTargetAllowlist', 'ssoAutoApproveAllowlist', 'ssoDefaultProjectId'];
-      if (sensitiveKeys.some(key => safeBody[key] !== undefined) && !verifyAdminStepUp(user, body.password)) {
+      if (sensitiveKeys.some(key => safeBody[key] !== undefined) && !verifyAdminStepUp(user, body.password, req)) {
         return json(res, 401, { message: '修改登录安全设置需要管理员密码验证' });
       }
       if (safeBody.monitorTargetAllowlist !== undefined) {
@@ -13002,7 +13228,7 @@ const requestHandler = async (req, res) => {
       const parts = parseMultipart(rawBody, boundary);
       const passwordPart = parts.find(part => part.name === 'password' && !part.filename);
       const certPassword = passwordPart ? passwordPart.data.toString('utf8').trim() : '';
-      if (!verifyAdminStepUp(user, certPassword)) {
+      if (!verifyAdminStepUp(user, certPassword, req)) {
         return json(res, 401, { message: '管理员密码错误' });
       }
       const certPart = parts.find(part => part.name === 'cert' && part.filename);
@@ -13057,7 +13283,7 @@ const requestHandler = async (req, res) => {
       const user = requireAdmin(req, res, db);
       if (!user) return;
       const body = await readBody(req, importBodyLimitBytes);
-      if (!verifyAdminStepUp(user, body && body.password)) {
+      if (!verifyAdminStepUp(user, body && body.password, req)) {
         return json(res, 401, { message: '管理员密码错误' });
       }
       delete body.password;
@@ -13096,6 +13322,10 @@ const requestHandler = async (req, res) => {
     if (req.method === 'POST' && pathname === '/api/system/backup') {
       const user = requireAdmin(req, res, db);
       if (!user) return;
+      const body = await readBody(req);
+      if (!verifyAdminStepUp(user, body && body.password, req)) {
+        return json(res, 401, { message: '管理员密码错误' });
+      }
       const filename = `backup-${now().replace(/[:.]/g, '-')}.json`;
       fs.writeFileSync(path.join(backupDir, filename), JSON.stringify(serializeDbSnapshot(db), null, 2));
       appendAuditLog(db, user, 'backup', 'system', '', `创建系统备份 ${filename}`);
@@ -13110,7 +13340,7 @@ const requestHandler = async (req, res) => {
       const user = requireAdmin(req, res, db);
       if (!user) return;
       const body = await readBody(req);
-      if (!body.password || !verifyPassword(body.password, user.passwordHash)) {
+      if (!verifyAdminStepUp(user, body.password, req)) {
         return json(res, 401, { message: '管理员密码错误' });
       }
       const sessionToken = getSessionToken(req);
@@ -13148,6 +13378,10 @@ const requestHandler = async (req, res) => {
     if (req.method === 'POST' && pathname === '/api/system/export') {
       const user = requireAdmin(req, res, db);
       if (!user) return;
+      const body = await readBody(req);
+      if (!verifyAdminStepUp(user, body && body.password, req)) {
+        return json(res, 401, { message: '管理员密码错误' });
+      }
       appendAuditLog(db, user, 'export', 'system', '', '导出系统数据');
       await writeDb(db);
       res.writeHead(200, buildSecurityHeaders({
@@ -13163,7 +13397,7 @@ const requestHandler = async (req, res) => {
       const user = requireAdmin(req, res, db);
       if (!user) return;
       const restoreBody = await readBody(req);
-      if (!verifyAdminStepUp(user, restoreBody && restoreBody.password)) {
+      if (!verifyAdminStepUp(user, restoreBody && restoreBody.password, req)) {
         return json(res, 401, { message: '管理员密码错误' });
       }
       const parts = pathname.split('/');
@@ -13215,6 +13449,10 @@ const requestHandler = async (req, res) => {
     if (req.method === 'POST' && pathname.startsWith('/api/system/backups/')) {
       const user = requireAdmin(req, res, db);
       if (!user) return;
+      const body = await readBody(req);
+      if (!verifyAdminStepUp(user, body && body.password, req)) {
+        return json(res, 401, { message: '管理员密码错误' });
+      }
       const rawFilename = pathname.split('/').pop() || '';
       const archived = reqUrl.searchParams.get('archived') === '1';
       const filePath = resolveBackupFilePath(rawFilename, archived);
@@ -13229,20 +13467,22 @@ const requestHandler = async (req, res) => {
       const filename = path.basename(filePath);
       // 备份文件与导出/恢复保持同一语义：包含可恢复凭据，以便跨环境导入后账号仍可登录。
       const payload = fs.readFileSync(filePath, 'utf8');
-      const body = Buffer.from(payload, 'utf8');
+      appendAuditLog(db, user, 'download', 'system', '', `下载${archived ? '归档' : ''}备份 ${filename}`);
+      await writeDb(db);
+      const fileBuffer = Buffer.from(payload, 'utf8');
       res.writeHead(200, buildSecurityHeaders({
         'Content-Type': 'application/json; charset=utf-8',
         'Content-Disposition': `attachment; filename="${filename}"`,
-        'Content-Length': String(body.length)
+        'Content-Length': String(fileBuffer.length)
       }));
-      return res.end(body);
+      return res.end(fileBuffer);
     }
 
     if (req.method === 'DELETE' && pathname.startsWith('/api/system/backups/')) {
       const user = requireAdmin(req, res, db);
       if (!user) return;
       const body = await readBody(req);
-      if (!verifyAdminStepUp(user, body && body.password)) {
+      if (!verifyAdminStepUp(user, body && body.password, req)) {
         return json(res, 401, { message: '管理员密码错误' });
       }
       const rawFilename = pathname.split('/').pop() || '';
@@ -13434,7 +13674,7 @@ const requestHandler = async (req, res) => {
       const parts = parseMultipart(rawBody, boundary);
       const passwordPart = parts.find(part => part.name === 'password');
       const upgradePassword = passwordPart ? passwordPart.data.toString('utf8').replace(/\r?\n$/, '') : '';
-      if (!verifyAdminStepUp(user, upgradePassword)) {
+      if (!verifyAdminStepUp(user, upgradePassword, req)) {
         return rejectUpgradeUpload(res, db, user, '', '管理员密码错误', { status: 401 });
       }
       const pkgPart = parts.find(part => (part.name === 'package' || part.name === 'file') && part.filename);
@@ -13443,43 +13683,93 @@ const requestHandler = async (req, res) => {
 
       const upgradesDir = path.join(dataDir, 'upgrades');
       const pendingDir = path.join(upgradesDir, 'pending');
-      try { fs.rmSync(pendingDir, { recursive: true, force: true }); } catch (_) {}
-      fs.mkdirSync(pendingDir, { recursive: true });
+      // 并发上传时共用固定 pending 目录会互相覆盖，先解压到随机暂存目录，
+      // 校验通过后再原子替换 pending。
+      const stagingDir = path.join(upgradesDir, `pending-${crypto.randomBytes(8).toString('hex')}`);
+      fs.mkdirSync(stagingDir, { recursive: true });
 
       function cleanUpgradeDir(dir) {
         try { fs.rmSync(dir, { recursive: true, force: true }); } catch (_) {}
       }
 
-      const tempArchive = path.join(upgradesDir, 'temp-upgrade.tar.gz');
-      fs.writeFileSync(tempArchive, pkgPart.data);
+      const failUpgrade = (message, options) => {
+        cleanUpgradeDir(stagingDir);
+        return rejectUpgradeUpload(res, db, user, upgradeFilename, message, options);
+      };
+
+      const tempArchive = path.join(upgradesDir, `temp-upgrade-${crypto.randomBytes(8).toString('hex')}.tar.gz`);
+      fs.writeFileSync(tempArchive, pkgPart.data, { mode: 0o600 });
+
+      const UPGRADE_MAX_UNCOMPRESSED_BYTES = 512 * 1024 * 1024;
+      const UPGRADE_MAX_FILE_COUNT = 20000;
+      const oversizedMessage = '升级包解压后体积或文件数超过上限，拒绝安装';
 
       try {
-        const fileList = execSync(`tar -tzf "${tempArchive}"`, { timeout: 10000, encoding: 'utf8' }).trim().split('\n').filter(Boolean);
+        const fileList = execFileSync('tar', ['-tzf', tempArchive], { timeout: 10000, encoding: 'utf8' })
+          .trim().split('\n').filter(Boolean);
+        if (fileList.length > UPGRADE_MAX_FILE_COUNT) return failUpgrade(oversizedMessage);
         for (const entry of fileList) {
           const normalized = entry.replace(/^\.\//, '').replace(/\/+$/, '');
           if (normalized.startsWith('/') || normalized.includes('..')) {
-            try { fs.unlinkSync(tempArchive); } catch (_) {}
-            return rejectUpgradeUpload(res, db, user, upgradeFilename, `升级包包含非法路径：${entry}`);
+            return failUpgrade(`升级包包含非法路径：${entry}`);
           }
         }
-        // 解压前识别符号链接/硬链接/特殊文件，避免链接被用于写出预期之外的文件。
-        const verboseList = execSync(`tar -tvzf "${tempArchive}"`, { timeout: 10000, encoding: 'utf8' }).split('\n');
+        // 解压前识别符号链接/硬链接/特殊文件，并累计声明体积，避免压缩炸弹写满磁盘。
+        const verboseList = execFileSync('tar', ['-tvzf', tempArchive], { timeout: 10000, encoding: 'utf8' }).split('\n');
+        let declaredBytes = 0;
+        let declaredEntries = 0;
         for (const line of verboseList) {
-          if (!line) continue;
+          if (!line.trim()) continue;
+          declaredEntries += 1;
           const typeChar = line.charAt(0);
           if (typeChar === 'l' || typeChar === 'h' || typeChar === 'b' || typeChar === 'c' || typeChar === 'p') {
-            try { fs.unlinkSync(tempArchive); } catch (_) {}
-            cleanUpgradeDir(pendingDir);
-            return rejectUpgradeUpload(res, db, user, upgradeFilename, '升级包包含符号链接、硬链接或特殊文件，拒绝解压');
+            return failUpgrade('升级包包含符号链接、硬链接或特殊文件，拒绝解压');
+          }
+          const sizeMatch = /^\S+\s+\S+\s+(\d+)\s+/.exec(line);
+          if (!sizeMatch) {
+            return failUpgrade('升级包文件清单格式异常，拒绝解压');
+          }
+          declaredBytes += Number(sizeMatch[1]) || 0;
+          if (declaredBytes > UPGRADE_MAX_UNCOMPRESSED_BYTES || declaredEntries > UPGRADE_MAX_FILE_COUNT) {
+            return failUpgrade(oversizedMessage);
           }
         }
-        execSync(`tar -xzf "${tempArchive}" -C "${pendingDir}"`, { timeout: 30000 });
+        execFileSync('tar', ['-xzf', tempArchive, '-C', stagingDir, '--no-same-owner', '--no-same-permissions'], { timeout: 30000 });
       } catch (error) {
-        try { fs.unlinkSync(tempArchive); } catch (_) {}
-        cleanUpgradeDir(pendingDir);
-        return rejectUpgradeUpload(res, db, user, upgradeFilename, `升级包解压失败：${error.message}`);
+        return failUpgrade(`升级包解压失败：${error.message}`);
       } finally {
         try { fs.unlinkSync(tempArchive); } catch (_) {}
+      }
+
+      // tar 头声明可能与实际写入不一致，解压后再实测一次体积与文件数。
+      {
+        let totalBytes = 0;
+        let totalFiles = 0;
+        let overflow = false;
+        const walk = (dir) => {
+          for (const entry of fs.readdirSync(dir, { withFileTypes: true })) {
+            const abs = path.join(dir, entry.name);
+            if (entry.isDirectory()) walk(abs);
+            else {
+              totalFiles += 1;
+              try { totalBytes += fs.statSync(abs).size; } catch (_) {}
+            }
+            if (totalBytes > UPGRADE_MAX_UNCOMPRESSED_BYTES || totalFiles > UPGRADE_MAX_FILE_COUNT) {
+              overflow = true;
+              return;
+            }
+          }
+        };
+        try { walk(stagingDir); } catch (_) { overflow = true; }
+        if (overflow) return failUpgrade(oversizedMessage);
+      }
+
+      // 新包完整通过预检后再替换 pending，避免上传失败破坏上一份已校验包。
+      try {
+        try { fs.rmSync(pendingDir, { recursive: true, force: true }); } catch (_) {}
+        fs.renameSync(stagingDir, pendingDir);
+      } catch (error) {
+        return failUpgrade(`升级包暂存失败：${error.message}`);
       }
 
       {
@@ -13643,7 +13933,8 @@ const requestHandler = async (req, res) => {
 
 const server = http.createServer(requestHandler);
 
-const wss = new WebSocketServer({ noServer: true });
+// 限制单帧大小，避免已登录连接用超大消息占用内存。
+const wss = new WebSocketServer({ noServer: true, maxPayload: 64 * 1024 });
 const wsClients = new Set();
 
 // 会话被撤销（注销、改密、禁用、拒绝、删除、改角色/项目）后，需同步断开该用户已建立的
@@ -13702,6 +13993,7 @@ wss.on('connection', (ws, request) => {
     ws.userId = user.id;
     ws.role = user.role;
     ws.projectId = user.projectId || '';
+    ws.sessionToken = getSessionToken(request);
   } catch (_) {
     ws.close();
     return;
@@ -13724,7 +14016,29 @@ wss.on('connection', (ws, request) => {
 
 const wsHeartbeatTimer = setInterval(() => {
   const stale = [];
+  let db = null;
+  try { db = readDbInternalSync(); } catch (_) { db = null; }
+  const idleLimitMs = db ? getIdleLimitMs(db) : 0;
   for (const ws of wsClients) {
+    // 握手后不再复核会话会导致注销、禁用、空闲超时后连接仍持续接收广播。
+    if (db) {
+      const session = (db.sessions || []).find(item => item.token === ws.sessionToken);
+      const user = session ? (db.users || []).find(item => item.id === session.userId) : null;
+      const lastActivityMs = session ? Date.parse(session.lastActivityAt || session.createdAt) : NaN;
+      const sessionExpired = !session
+        || Date.parse(session.expiresAt) <= Date.now()
+        || (Number.isFinite(lastActivityMs) && Date.now() - lastActivityMs > idleLimitMs);
+      const enrollmentBlocked = Boolean(user && user.twoFactorEnforced && !user.twoFactorEnabled
+        && !String(user.username || '').startsWith('oidc_'));
+      if (!user || user.status !== 'active' || sessionExpired || enrollmentBlocked) {
+        try { ws.close(1008, 'session invalidated'); } catch (_) {}
+        stale.push(ws);
+        continue;
+      }
+      // 角色/项目可能已被管理员调整，广播前同步到最新值。
+      ws.role = user.role;
+      ws.projectId = user.projectId || '';
+    }
     if (ws.isAlive === false) {
       ws.terminate();
       stale.push(ws);
@@ -13773,6 +14087,8 @@ function sendToScopedWs(message, projectId) {
   for (const ws of wsClients) {
     try {
       if (ws.readyState !== 1) continue;
+      // 慢客户端堆积时丢弃本次广播，避免服务端内存被单连接拖垮。
+      if (ws.bufferedAmount > 1024 * 1024) continue;
       const allowAll = !projectId;
       const isAdmin = ws.role === 'admin';
       const sameProject = Boolean(projectId) && ws.projectId === projectId;
@@ -14156,6 +14472,7 @@ function broadcastTrafficUpdate(projectId) {
   for (const ws of wsClients) {
     try {
       if (ws.readyState !== 1) continue;
+      if (ws.bufferedAmount > 1024 * 1024) continue;
       const isAdmin = ws.role === 'admin';
       const sameProject = Boolean(projectId) && ws.projectId === projectId;
       if (!isAdmin && !sameProject) continue;
