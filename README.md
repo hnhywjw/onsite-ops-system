@@ -109,16 +109,31 @@ docker compose --env-file .env.production -f docker-compose.prod.yml up -d --bui
 
 ## 版本
 
-当前版本：`1.0.21`
+当前版本：`1.0.22`
 
 ### 软件包下载
 
-最新版本：**[v1.0.21](https://github.com/hnhywjw/onsite-ops-system/releases/tag/v1.0.21)**
+最新版本：**[v1.0.22](https://github.com/hnhywjw/onsite-ops-system/releases/tag/v1.0.22)**
 
-- 完整安装包 `onsite-ops-system-v1.0.21-production.tar.gz`
-- 离线升级包 `onsite-ops-upgrade-v1.0.21.tar.gz`
+- 完整安装包 `onsite-ops-system-v1.0.22-production.tar.gz`
+- 离线升级包 `onsite-ops-upgrade-v1.0.22.tar.gz`
 - SHA256 校验文件
 - 部署说明见仓库 `PRODUCTION_DEPLOY.md`
+
+### v1.0.22 更新说明
+
+安全与稳定性修复：
+- 升级包落地前强制校验 `SHA256SUMS`，缺失或不一致时保留 pending 并继续运行旧代码；关键文件复制失败同样不进入半升级状态
+- 已有升级包等待应用时拒绝重复上传，避免两次上传互相覆盖 `pending` 与 `UPGRADE_READY`
+- 升级就绪标记先写临时文件、审计日志落库成功后再原子生效，失败时清理暂存目录
+- 改密、启用/关闭动态令牌的密码复核增加失败次数限制（5 次失败锁 15 分钟），降低会话被接管后的暴力尝试风险
+- 登录、LDAP 与找回密码流程限制用户名字段长度，避免超长输入参与后续查询与日志
+- 会话活跃度与整库写入在启动快照尚未建立时跳过，避免冷启动用陈旧数据覆盖 MySQL
+- 审计日志归档失败时不再裁剪内存中的日志，宁可短暂膨胀也不丢审计记录
+- 资料附件改为写库成功后再删除旧文件，写库失败时回收新上传文件
+- MySQL 读写与事务增加独立超时，单条 INSERT 按累计字节数切分，避免大附件记录超过 `max_allowed_packet`
+- 数据快照与自动备份文件改为仅运行用户可读写；维护脚本移除默认口令与关闭证书校验的行为
+- 前端编辑巡检计划、巡检执行、变更记录、故障记录后刷新列表时拉取全量数据，不再只保留第一页
 
 ### v1.0.21 更新说明
 

@@ -197,6 +197,7 @@ let mysqlUnavailableUntil = 0;
 let mysqlAppStateMigrated = false;
 let mysqlReadyFailures = 0;
 let shuttingDown = false;
+let upgradeApplyScheduled = false;
 let httpsServer = null;
 let httpsServerMutex = Promise.resolve();
 let httpsServerStatus = {
@@ -230,6 +231,21 @@ fs.mkdirSync(backupArchiveDir, { recursive: true });
 fs.mkdirSync(notificationArchiveDir, { recursive: true });
 fs.mkdirSync(httpsCertDir, { recursive: true });
 fs.mkdirSync(documentsUploadDir, { recursive: true });
+
+// 升级目录必须由应用自己创建：全新部署只挂了 data 目录，缺少 upgrades 会让页面升级入口直接不可用。
+const upgradesDirPath = path.join(dataDir, 'upgrades');
+fs.mkdirSync(upgradesDirPath, { recursive: true });
+// 解压或写包过程中进程被重启会留下暂存目录与临时包，超过一小时即可安全清理。
+try {
+  const staleCutoff = Date.now() - 60 * 60 * 1000;
+  for (const entry of fs.readdirSync(upgradesDirPath)) {
+    if (!/^(pending-|temp-upgrade-)/.test(entry)) continue;
+    const abs = path.join(upgradesDirPath, entry);
+    try {
+      if (fs.statSync(abs).mtimeMs < staleCutoff) fs.rmSync(abs, { recursive: true, force: true });
+    } catch (_) {}
+  }
+} catch (_) {}
 
 function resolveRuntimeUpgradeSigningKey() {
   if (upgradeSigningKeyEnv.length >= 32) return upgradeSigningKeyEnv;
@@ -1739,6 +1755,13 @@ function checkTextLength(value, max, label) {
   if (String(value).length > max) return `${label}长度不能超过 ${max} 个字符`;
   return null;
 }
+
+const LOGIN_USERNAME_MAX_LENGTH = 64;
+// 登录与找回密码会把用户名拼进限流键并写入 runtimeState，超长输入会成倍放大落库体积。
+function normalizeLoginUsername(value) {
+  const username = String(value || '').trim();
+  return username.length > LOGIN_USERNAME_MAX_LENGTH ? '' : username;
+}
 const ASSET_RESERVED_IDS = new Set(['import', 'cabinet-layout', 'topology-layout', 'topology', 'monitor-status']);
 const ASSET_IMPORT_MAX_ROWS = 500;
 
@@ -2452,7 +2475,8 @@ function matchTotpCounter(secret, code, atMs = nowMs()) {
 }
 
 // 同一用途下，同一时间步的动态码只允许成功使用一次，避免被截获后在有效窗口内重放。
-// 按用途分桶，使登录与账号自助操作互不阻塞（各自仍需完整凭据）。
+// 按用途分桶：启用 2FA 后立刻登录、登录后立刻关闭 2FA 都会复用同一个 30 秒动态码，
+// 跨用途共用计数会让这类正常操作失败。
 const totpLastUsedCounter = new Map();
 
 function consumeTotpCode(user, secret, code, scope = 'default') {
@@ -2613,6 +2637,38 @@ function recordTwoFactorVerifyFailure(user) {
 
 function clearTwoFactorVerifyFailures(user) {
   if (user && user.id) twoFactorVerifyFailures.delete(user.id);
+}
+
+// 已登录会话仍可能被他人接管；改密与动态令牌管理在复核当前密码时同样需要失败次数限制。
+const passwordReauthFailures = new Map();
+const PASSWORD_REAUTH_MAX_FAILURES = 5;
+const PASSWORD_REAUTH_WINDOW_MS = 15 * 60 * 1000;
+
+function getPasswordReauthLockState(user) {
+  const entry = passwordReauthFailures.get(user && user.id);
+  if (!entry || !entry.lockedUntil) return { locked: false, retryAfterMs: 0 };
+  if (entry.lockedUntil <= nowMs()) {
+    passwordReauthFailures.delete(user.id);
+    return { locked: false, retryAfterMs: 0 };
+  }
+  return { locked: true, retryAfterMs: entry.lockedUntil - nowMs() };
+}
+
+function recordPasswordReauthFailure(user) {
+  if (!user || !user.id) return;
+  const current = nowMs();
+  const entry = passwordReauthFailures.get(user.id) || { count: 0, firstAt: current, lockedUntil: 0 };
+  if (current - entry.firstAt > PASSWORD_REAUTH_WINDOW_MS) {
+    entry.count = 0;
+    entry.firstAt = current;
+  }
+  entry.count += 1;
+  if (entry.count >= PASSWORD_REAUTH_MAX_FAILURES) entry.lockedUntil = current + PASSWORD_REAUTH_WINDOW_MS;
+  passwordReauthFailures.set(user.id, entry);
+}
+
+function clearPasswordReauthFailures(user) {
+  if (user && user.id) passwordReauthFailures.delete(user.id);
 }
 
 function validateHost(host) {
@@ -4213,6 +4269,10 @@ const mysqlPoolOptions = {
   idleTimeout: 60000
 };
 
+// 连接已建立但对端不响应时，connectTimeout 不会生效；每条语句都需要独立兜底。
+const MYSQL_QUERY_TIMEOUT_MS = 15000;
+const MYSQL_TX_TIMEOUT_MS = 60000;
+
 async function ensureMySqlReady() {
   if (mysqlReadyPromise) return mysqlReadyPromise;
   // 失败后短时间内直接拒绝，避免数据库宕机时每个请求都排队等 connectTimeout。
@@ -4226,29 +4286,33 @@ async function ensureMySqlReady() {
     // 建库阶段目标库可能还不存在，连接必须不带 database。
     const bootstrapPool = mysql.createPool({ ...mysqlPoolOptions, database: undefined });
     try {
-      await bootstrapPool.query(`CREATE DATABASE IF NOT EXISTS \`${dbConfig.database}\` CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci`);
+      await withTimeout(
+        bootstrapPool.query(`CREATE DATABASE IF NOT EXISTS \`${dbConfig.database}\` CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci`),
+        MYSQL_QUERY_TIMEOUT_MS,
+        'MySQL 建库超时'
+      );
     } finally {
       await bootstrapPool.end().catch(() => {});
     }
     mysqlPool = mysql.createPool({ ...mysqlPoolOptions, charset: 'utf8mb4' });
-    await mysqlPool.query(`
-      CREATE TABLE IF NOT EXISTS app_state (
-        state_key VARCHAR(64) PRIMARY KEY,
-        state_json LONGTEXT NOT NULL,
-        updated_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP
-      ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci
-    `);
+    await withTimeout(mysqlPool.query(`
+        CREATE TABLE IF NOT EXISTS app_state (
+          state_key VARCHAR(64) PRIMARY KEY,
+          state_json LONGTEXT NOT NULL,
+          updated_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP
+        ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci
+      `), MYSQL_QUERY_TIMEOUT_MS, 'MySQL 建表超时');
     for (const key of dbCollectionKeys) {
       const table = collectionTableName(key);
-      await mysqlPool.query(`
-        CREATE TABLE IF NOT EXISTS \`${table}\` (
-          id VARCHAR(191) NOT NULL,
-          payload LONGTEXT NOT NULL,
-          batch_id BIGINT NOT NULL DEFAULT 0,
-          updated_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
-          PRIMARY KEY (id)
-        ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci
-      `);
+      await withTimeout(mysqlPool.query(`
+          CREATE TABLE IF NOT EXISTS \`${table}\` (
+            id VARCHAR(191) NOT NULL,
+            payload LONGTEXT NOT NULL,
+            batch_id BIGINT NOT NULL DEFAULT 0,
+            updated_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+            PRIMARY KEY (id)
+          ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci
+        `), MYSQL_QUERY_TIMEOUT_MS, 'MySQL 建表超时');
     }
     mysqlAppStateMigrated = false;
     mysqlReadyFailures = 0;
@@ -4279,7 +4343,7 @@ async function ensureMySqlReady() {
 function readDbFromFile() {
   if (!fs.existsSync(dbPath)) {
     const initial = seed();
-    fs.writeFileSync(dbPath, JSON.stringify(initial, null, 2));
+    fs.writeFileSync(dbPath, JSON.stringify(initial, null, 2), { mode: 0o600 });
     return initial;
   }
   const raw = JSON.parse(fs.readFileSync(dbPath, 'utf8'));
@@ -4287,7 +4351,7 @@ function readDbFromFile() {
   const current = JSON.stringify(raw);
   const next = JSON.stringify(normalized);
   if (current !== next) {
-    fs.writeFileSync(dbPath, JSON.stringify(normalized, null, 2));
+    fs.writeFileSync(dbPath, JSON.stringify(normalized, null, 2), { mode: 0o600 });
   }
   return normalized;
 }
@@ -4295,7 +4359,8 @@ function readDbFromFile() {
 function writeDbToFile(db) {
   rememberLiveDb(db);
   if (allowFileDbFallback || fileDbNeedsSyncToMySql) {
-    fs.writeFileSync(dbPath, JSON.stringify(pickDbCollections(db), null, 2));
+    // 快照包含口令哈希与加密凭据，文件权限限制为仅运行用户可读写。
+    fs.writeFileSync(dbPath, JSON.stringify(pickDbCollections(db), null, 2), { mode: 0o600 });
   }
 }
 
@@ -4423,26 +4488,50 @@ async function writeCollectionRows(connection, key, value) {
     await connection.query(`DELETE FROM \`${table}\``);
     return;
   }
-  const chunkSize = 50;
-  for (let offset = 0; offset < items.length; offset += chunkSize) {
-    const chunk = items.slice(offset, offset + chunkSize);
+  // 巡检附件以 base64 内联在记录里，按条数分批可能拼出超过 max_allowed_packet 的单条 SQL。
+  // 同时按累计 JSON 字节数切分，保证单条 INSERT 远低于默认 64MB 上限。
+  const MAX_INSERT_BYTES = 4 * 1024 * 1024;
+  const MAX_INSERT_ROWS = 200;
+  let chunk = [];
+  let chunkBytes = 0;
+  const flushChunk = async () => {
+    if (!chunk.length) return;
     const placeholders = chunk.map(() => '(?, ?, ?)').join(', ');
     const params = [];
-    chunk.forEach((item, index) => {
-      const id = item && item.id ? String(item.id) : `__idx_${offset + index}`;
-      params.push(id, JSON.stringify(item), batchId);
+    chunk.forEach(entry => {
+      params.push(entry.id, entry.payload, batchId);
     });
     await connection.query(
       `INSERT INTO \`${table}\` (id, payload, batch_id) VALUES ${placeholders} ON DUPLICATE KEY UPDATE payload = VALUES(payload), batch_id = VALUES(batch_id)`,
       params
     );
+    chunk = [];
+    chunkBytes = 0;
+  };
+  for (let index = 0; index < items.length; index += 1) {
+    const item = items[index];
+    const payload = JSON.stringify(item);
+    const size = Buffer.byteLength(payload) + 64;
+    if (chunk.length && (chunkBytes + size > MAX_INSERT_BYTES || chunk.length >= MAX_INSERT_ROWS)) {
+      await flushChunk();
+    }
+    chunk.push({
+      id: item && item.id ? String(item.id) : `__idx_${index}`,
+      payload
+    });
+    chunkBytes += size;
   }
+  await flushChunk();
   await connection.query(`DELETE FROM \`${table}\` WHERE batch_id <> ?`, [batchId]);
 }
 
 async function readCollectionFromMySql(key) {
   const table = collectionTableName(key);
-  const [rows] = await requireMySqlPool().query(`SELECT id, payload FROM \`${table}\``);
+  const [rows] = await withTimeout(
+    requireMySqlPool().query(`SELECT id, payload FROM \`${table}\``),
+    MYSQL_QUERY_TIMEOUT_MS,
+    `读取 ${key} 超时`
+  );
   if (isObjectCollection(key)) {
     const root = rows.find(row => row.id === OBJECT_ROOT_ID);
     return root ? parseJsonPayload(root.payload, {}) : {};
@@ -4464,9 +4553,17 @@ async function readCollectionsFromMySql() {
 async function migrateAppStateToCollectionTablesIfNeeded() {
   const pool = requireMySqlPool();
   const usersTable = collectionTableName('users');
-  const [countRows] = await pool.query(`SELECT COUNT(*) AS c FROM \`${usersTable}\``);
+  const [countRows] = await withTimeout(
+    pool.query(`SELECT COUNT(*) AS c FROM \`${usersTable}\``),
+    MYSQL_QUERY_TIMEOUT_MS,
+    '检查集合表迁移状态超时'
+  );
   if (Number(countRows[0]?.c || 0) > 0) return;
-  const [stateRows] = await pool.query('SELECT state_key, state_json FROM app_state');
+  const [stateRows] = await withTimeout(
+    pool.query('SELECT state_key, state_json FROM app_state'),
+    MYSQL_QUERY_TIMEOUT_MS,
+    '读取旧版状态表超时'
+  );
   if (!stateRows.length) return;
   const raw = {};
   for (const row of stateRows) {
@@ -4477,20 +4574,33 @@ async function migrateAppStateToCollectionTablesIfNeeded() {
 }
 
 async function writeNormalizedDbToMySql(normalized, keys = dbCollectionKeys) {
-  const connection = await requireMySqlPool().getConnection();
+  const connection = await withTimeout(
+    requireMySqlPool().getConnection(),
+    10000,
+    'MySQL 连接获取超时'
+  );
+  let destroyed = false;
   try {
-    await connection.beginTransaction();
-    const targetKeys = keys.length ? keys : dbCollectionKeys;
-    for (const key of targetKeys) {
-      const value = normalized[key] !== undefined ? normalized[key] : (isObjectCollection(key) ? {} : []);
-      await writeCollectionRows(connection, key, value);
-    }
-    await connection.commit();
+    await withTimeout((async () => {
+      await connection.beginTransaction();
+      const targetKeys = keys.length ? keys : dbCollectionKeys;
+      for (const key of targetKeys) {
+        const value = normalized[key] !== undefined ? normalized[key] : (isObjectCollection(key) ? {} : []);
+        await writeCollectionRows(connection, key, value);
+      }
+      await connection.commit();
+    })(), MYSQL_TX_TIMEOUT_MS, 'MySQL 事务超时');
   } catch (error) {
-    await connection.rollback();
+    if (error.code === 'ETIMEDOUT') {
+      // 语句仍在服务端执行时不能归还连接，直接销毁让 MySQL 回滚未提交事务。
+      destroyed = true;
+      try { connection.destroy(); } catch (_) {}
+    } else {
+      try { await connection.rollback(); } catch (_) {}
+    }
     throw error;
   } finally {
-    connection.release();
+    if (!destroyed) connection.release();
   }
 }
 
@@ -4659,6 +4769,8 @@ function mergeStaleObjectCollection(targetRoot, key, base, cur) {
 }
 
 async function writeDb(db, options = {}) {
+  // 会话活跃度只携带增量时间戳，冷启动时没有权威基线，落库会把整个 data/db.json 覆盖进 MySQL。
+  if (options.sessionActivityByToken instanceof Map && !latestFileDbCache) return;
   const previousLock = dbWriteLock;
   let releaseLock;
   dbWriteLock = new Promise(resolve => { releaseLock = resolve; });
@@ -4969,9 +5081,11 @@ async function getSystemServicesStatus(db) {
       checkedAt
     }
   ];
+  let pool = null;
   try {
     await ensureMySqlReady();
-    await mysqlPool.query('SELECT 1');
+    pool = requireMySqlPool();
+    await withTimeout(pool.query('SELECT 1'), MYSQL_QUERY_TIMEOUT_MS, 'MySQL 健康检查超时');
     services.push({
       key: 'mysql',
       name: 'MySQL 数据库',
@@ -4981,7 +5095,7 @@ async function getSystemServicesStatus(db) {
       checkedAt
     });
   } catch (error) {
-    await resetMySqlConnection();
+    if (pool && isTransientStorageError(error)) await resetMySqlConnection(pool);
     if (allowFileDbFallback) {
       services.push({
         key: 'mysql',
@@ -5123,7 +5237,8 @@ async function respondJsonDocument(res, extraHeaders, data) {
 }
 
 async function writeJsonFileStreaming(filePath, data) {
-  const stream = fs.createWriteStream(filePath);
+  // 备份包含完整数据快照与附件，仅允许运行用户读取。
+  const stream = fs.createWriteStream(filePath, { mode: 0o600 });
   const finished = new Promise((resolve, reject) => {
     stream.once('finish', resolve);
     stream.once('error', reject);
@@ -5325,6 +5440,8 @@ function getIdleLimitMs(db) {
 }
 
 function persistSessionActivity(db) {
+  // 冷启动阶段权威快照尚未从 MySQL 载入，此时落库会用本地文件覆盖数据库，直接跳过本轮活跃度写入。
+  if (!latestFileDbCache) return;
   const ts = Date.now();
   if (ts - lastSessionActivityPersistMs < sessionActivityPersistIntervalMs) return;
   lastSessionActivityPersistMs = ts;
@@ -5494,11 +5611,12 @@ function appendAuditLog(db, user, action, targetType, targetId, detail, projectI
     if (overflow.length) {
       try {
         archiveJsonLines(auditArchiveDir, `overflow-${formatDateKey(new Date())}.jsonl`, overflow);
+        db.auditLogs = db.auditLogs.slice(-5000);
       } catch (error) {
-        console.error('archive audit overflow failed', error.message);
+        // 归档失败时保留全部记录，下一轮继续尝试；此时裁剪会直接丢掉未归档的审计数据。
+        console.error('archive audit overflow failed, keeping audit logs for retry:', error.message);
       }
     }
-    db.auditLogs = db.auditLogs.slice(-5000);
   }
 }
 
@@ -9123,7 +9241,8 @@ const requestHandler = async (req, res) => {
 
     if (req.method === 'POST' && pathname === '/api/login') {
       const body = await readBody(req);
-      const username = String(body.username || '').trim();
+      const username = normalizeLoginUsername(body.username);
+      if (!username) return json(res, 400, { message: '请输入账号，长度不超过 64 位' });
       const rateLimitState = getLoginRateLimitState(db, req, username);
       if (rateLimitState.blocked) {
         return json(res, 429, { message: loginBlockedMessage(rateLimitState.retryAfterMs) }, rateLimitResponseHeaders(rateLimitState.retryAfterMs));
@@ -9272,9 +9391,15 @@ const requestHandler = async (req, res) => {
       if (!/[a-zA-Z]/.test(body.newPassword) || !/[0-9]/.test(body.newPassword) || !/[^a-zA-Z0-9]/.test(body.newPassword)) {
         return json(res, 400, { message: '密码必须包含字母、数字和特殊字符' });
       }
+      const changePasswordLock = getPasswordReauthLockState(user);
+      if (changePasswordLock.locked) {
+        return json(res, 429, { message: '密码尝试次数过多，请稍后重试' }, rateLimitResponseHeaders(changePasswordLock.retryAfterMs));
+      }
       if (!verifyPassword(body.oldPassword, user.passwordHash)) {
+        recordPasswordReauthFailure(user);
         return json(res, 401, { message: '当前密码错误' });
       }
+      clearPasswordReauthFailures(user);
       user.passwordHash = hash(body.newPassword);
       db.sessions = (db.sessions || []).filter(item => item.userId !== user.id);
       appendAuditLog(db, user, 'update', 'user', user.id, '修改个人密码');
@@ -9305,9 +9430,15 @@ const requestHandler = async (req, res) => {
         return json(res, 400, { message: '动态令牌已启用，如需更换请先关闭' });
       }
       const body = await readBody(req);
+      const setupReauthLock = getPasswordReauthLockState(user);
+      if (setupReauthLock.locked) {
+        return json(res, 429, { message: '密码尝试次数过多，请稍后重试' }, rateLimitResponseHeaders(setupReauthLock.retryAfterMs));
+      }
       if (!verifyTwoFactorPassword(user, body.password)) {
+        recordPasswordReauthFailure(user);
         return json(res, 401, { message: '当前密码错误' });
       }
+      clearPasswordReauthFailures(user);
       const secret = generateTotpSecret();
       user.twoFactorPendingSecret = encryptCredential(secret);
       appendAuditLog(db, user, 'update', 'user', user.id, '申请绑定动态令牌');
@@ -9360,9 +9491,15 @@ const requestHandler = async (req, res) => {
         return json(res, 400, { message: '管理员已要求该账号启用动态令牌，无法自行关闭' });
       }
       const body = await readBody(req);
+      const disableReauthLock = getPasswordReauthLockState(user);
+      if (disableReauthLock.locked) {
+        return json(res, 429, { message: '密码尝试次数过多，请稍后重试' }, rateLimitResponseHeaders(disableReauthLock.retryAfterMs));
+      }
       if (!verifyTwoFactorPassword(user, body.password)) {
+        recordPasswordReauthFailure(user);
         return json(res, 401, { message: '当前密码错误' });
       }
+      clearPasswordReauthFailures(user);
       const totpSecret = readUserTotpSecret(user);
       if (!totpSecret) {
         return json(res, 400, { message: '动态令牌配置异常，请联系管理员重置' });
@@ -9408,7 +9545,8 @@ const requestHandler = async (req, res) => {
 
     if (req.method === 'POST' && pathname === '/api/forgot-password/verify') {
       const body = await readBody(req);
-      const username = String(body.username || '').trim();
+      const username = normalizeLoginUsername(body.username);
+      if (!username) return json(res, 400, { message: '请输入账号，长度不超过 64 位' });
       const clientIp = getRequestClientIp(req);
       const rateKey = `forgot:verify:${clientIp}:${username}`;
       const rateState = getForgotPasswordRateLimitState(db, rateKey);
@@ -9425,7 +9563,8 @@ const requestHandler = async (req, res) => {
 
     if (req.method === 'POST' && pathname === '/api/forgot-password/reset') {
       const body = await readBody(req);
-      const username = String(body.username || '').trim();
+      const username = normalizeLoginUsername(body.username);
+      if (!username) return json(res, 400, { message: '请输入账号，长度不超过 64 位' });
       const clientIp = getRequestClientIp(req);
       const rateKey = `forgot:reset:${clientIp}:${username}`;
       const rateState = getForgotPasswordRateLimitState(db, rateKey);
@@ -9668,7 +9807,8 @@ const requestHandler = async (req, res) => {
         return json(res, 501, { message: 'LDAP 未配置，请设置 LDAP_URL 环境变量' });
       }
       const body = await readBody(req);
-      const username = String(body.username || '').trim();
+      const username = normalizeLoginUsername(body.username);
+      if (!username) return json(res, 400, { message: '请输入账号，长度不超过 64 位' });
       const password = String(body.password || '');
       const rateLimitState = getLoginRateLimitState(db, req, username);
       if (rateLimitState.blocked) {
@@ -11283,6 +11423,9 @@ const requestHandler = async (req, res) => {
       if (!target) return json(res, 404, { message: '资料不存在' });
       if (!canDeleteOwnedRecord(user, target, target.createdBy || '')) return json(res, 403, { message: '仅支持修改自己创建的资料' });
       const contentType = req.headers['content-type'] || '';
+      // 附件文件在落库成功后才删除旧文件，避免写库失败时数据库仍指向已删除的路径。
+      let replacedAttachmentPath = '';
+      let uploadedAttachmentPath = '';
       if (contentType.includes('multipart/form-data')) {
         const boundary = parseMultipartBoundary(contentType);
         if (!boundary) return json(res, 400, { message: '无效的上传格式' });
@@ -11368,12 +11511,10 @@ const requestHandler = async (req, res) => {
             try { fs.rmSync(tempAttachmentPath, { force: true }); } catch (_) {}
             throw error;
           }
-          // 新附件落盘成功后再清理旧文件，避免上传目录残留孤儿附件。
-          if (previousAttachmentPath && previousAttachmentPath !== nextAttachmentPath) {
-            try { fs.rmSync(previousAttachmentPath, { force: true }); } catch (_) {}
-          }
           target.attachmentPath = nextAttachmentPath;
           target.attachmentSize = filePart.data.length;
+          replacedAttachmentPath = previousAttachmentPath;
+          uploadedAttachmentPath = nextAttachmentPath;
         }
         // 与 JSON 分支保持一致：非设备类型资料必须存在附件。
         if (newType !== 'device') {
@@ -11382,7 +11523,19 @@ const requestHandler = async (req, res) => {
         }
         target.updatedAt = now();
         appendAuditLog(db, user, 'update', 'document', docId, `修改资料 ${target.title}`, target.projectId);
-        await writeDb(db);
+        try {
+          await writeDb(db);
+        } catch (error) {
+          // 落库失败时回收本次上传的新文件，避免留下数据库从未引用的孤儿附件。
+          if (uploadedAttachmentPath && uploadedAttachmentPath !== replacedAttachmentPath) {
+            try { fs.rmSync(uploadedAttachmentPath, { force: true }); } catch (_) {}
+          }
+          throw error;
+        }
+        if (replacedAttachmentPath && replacedAttachmentPath !== uploadedAttachmentPath) {
+          // 旧文件在数据库确认不再引用后才删除，写库失败时保持原附件可用。
+          try { fs.rmSync(replacedAttachmentPath, { force: true }); } catch (_) {}
+        }
         // 与详情接口保持一致：受保护字段需通过访问密码校验（X-Document-Access-Token）后才可下发。
         const revealProtectedOnUpdate = !target.accessPasswordHash || verifyDocumentAccessToken(readDocumentAccessToken(req), docId, user.id).ok;
         return json(res, 200, sanitizeDocumentForApi(target, revealProtectedOnUpdate));
@@ -14121,6 +14274,10 @@ const requestHandler = async (req, res) => {
     if (req.method === 'POST' && pathname === '/api/system/upgrade') {
       const user = requireAdmin(req, res, db);
       if (!user) return;
+      // pending 与 UPGRADE_READY 路径固定，已有包等待应用时直接拒绝，避免覆盖仍在等待的升级包。
+      if (upgradeApplyScheduled) {
+        return rejectUpgradeUpload(res, db, user, '', '已有升级包正在等待应用，请等待系统重启后重试', { status: 409 });
+      }
       const contentType = req.headers['content-type'] || '';
       if (!contentType.includes('multipart/form-data')) {
         return rejectUpgradeUpload(res, db, user, '', '请上传升级包文件（tar.gz 格式）');
@@ -14303,28 +14460,41 @@ const requestHandler = async (req, res) => {
         return rejectUpgradeUpload(res, db, user, upgradeFilename, `写入 SHA256SUMS 失败：${error.message}`, { toVersion: upgradeVersion });
       }
 
+      const readyFlagPath = path.join(upgradesDir, 'UPGRADE_READY');
+      const readyFlagTemp = `${readyFlagPath}.tmp-${crypto.randomBytes(6).toString('hex')}`;
       try {
-        fs.writeFileSync(path.join(upgradesDir, 'UPGRADE_READY'), JSON.stringify({
+        // 先写临时文件验证目录可写，审计日志落库成功后再切换为正式标记。
+        fs.writeFileSync(readyFlagTemp, JSON.stringify({
           version: upgradeVersion,
           timestamp: now(),
           requestedBy: user.username
-        }));
+        }), { mode: 0o600 });
       } catch (error) {
         cleanUpgradeDir(pendingDir);
         return rejectUpgradeUpload(res, db, user, upgradeFilename, `写入升级就绪标记失败：${error.message}。请确认 data/upgrades 属于容器内运行用户（node，uid 1000）`, { toVersion: upgradeVersion });
       }
+      upgradeApplyScheduled = true;
 
-      appendAuditLog(db, user, 'upgrade', 'system', '', `上传升级包 v${upgradeVersion}，系统即将自动重启完成升级`);
-      await appendUpgradeLog(db, user, {
-        filename: upgradeFilename,
-        status: 'accepted',
-        toVersion: upgradeVersion,
-        message: `升级包 v${upgradeVersion} 已接收，系统将自动应用升级并重启`
-      });
+      try {
+        appendAuditLog(db, user, 'upgrade', 'system', '', `上传升级包 v${upgradeVersion}，系统即将自动重启完成升级`);
+        await appendUpgradeLog(db, user, {
+          filename: upgradeFilename,
+          status: 'accepted',
+          toVersion: upgradeVersion,
+          message: `升级包 v${upgradeVersion} 已接收，系统将自动应用升级并重启`
+        });
+        fs.renameSync(readyFlagTemp, readyFlagPath);
+      } catch (error) {
+        upgradeApplyScheduled = false;
+        try { fs.unlinkSync(readyFlagTemp); } catch (_) {}
+        cleanUpgradeDir(pendingDir);
+        return rejectUpgradeUpload(res, db, user, upgradeFilename, `升级准备失败：${error.message}`, { toVersion: upgradeVersion, status: 500 });
+      }
 
       const applyAndRestart = () => {
         if (!isProduction) {
           console.error('[upgrade] 非生产环境，跳过自动落地与重启。请手动重启服务以应用升级。');
+          upgradeApplyScheduled = false;
           return;
         }
         try {
@@ -14340,6 +14510,7 @@ const requestHandler = async (req, res) => {
           if (criticalFailures.length) {
             console.error(`[upgrade] 升级未完整应用: ${criticalFailures.map(entry => `${entry.name}: ${entry.message}`).join('; ')}`);
             console.error('[upgrade] 升级包已保留在 data/upgrades/pending，修复上述文件权限后重启容器即可重试');
+            upgradeApplyScheduled = false;
             return;
           }
           if (result.failed.length) {
@@ -14352,6 +14523,7 @@ const requestHandler = async (req, res) => {
           console.error(`[upgrade] v${upgradeVersion} 升级完成，即将重启...`);
         } catch (e) {
           console.error(`[upgrade] 升级失败: ${e.message}`);
+          upgradeApplyScheduled = false;
           return;
         }
         process.exit(0);

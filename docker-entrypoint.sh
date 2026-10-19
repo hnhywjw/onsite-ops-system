@@ -5,10 +5,22 @@ PENDING_DIR="$UPGRADE_DIR/pending"
 READY_FLAG="$UPGRADE_DIR/UPGRADE_READY"
 HASHES_FILE="$PENDING_DIR/SHA256SUMS"
 
+mkdir -p "$UPGRADE_DIR" 2>/dev/null
+
 if [ -f "$READY_FLAG" ] && [ -d "$PENDING_DIR" ]; then
   echo "[upgrade] Applying upgrade from $PENDING_DIR"
 
-  FILES_COPIED=0
+  CRITICAL_FAILED=0
+
+  # 包内容必须与上传时生成的 SHA256SUMS 一致，避免 data 目录被篡改后启动即执行。
+  if [ ! -f "$HASHES_FILE" ]; then
+    echo "[upgrade] 缺少 SHA256SUMS，保留 pending 且不应用升级" >&2
+    exec node /app/server.js
+  fi
+  if ! (cd "$PENDING_DIR" && sha256sum -c "$HASHES_FILE" >/dev/null 2>&1); then
+    echo "[upgrade] SHA256 校验失败，保留 pending 且不应用升级" >&2
+    exec node /app/server.js
+  fi
 
   copy_file() {
     local src="$1"
@@ -57,15 +69,15 @@ if [ -f "$READY_FLAG" ] && [ -d "$PENDING_DIR" ]; then
     return 0
   }
 
-  copy_file "$PENDING_DIR/server.js" /app/server.js && FILES_COPIED=$((FILES_COPIED + 1))
-  copy_file "$PENDING_DIR/package.json" /app/package.json && FILES_COPIED=$((FILES_COPIED + 1))
+  copy_file "$PENDING_DIR/server.js" /app/server.js || CRITICAL_FAILED=1
+  copy_file "$PENDING_DIR/package.json" /app/package.json || CRITICAL_FAILED=1
 
   if [ -d "$PENDING_DIR/public" ]; then
-    copy_dir "$PENDING_DIR/public" /app/public public && FILES_COPIED=$((FILES_COPIED + 1))
+    copy_dir "$PENDING_DIR/public" /app/public public || CRITICAL_FAILED=1
   fi
 
   if [ -d "$PENDING_DIR/scripts" ]; then
-    copy_dir "$PENDING_DIR/scripts" /app/scripts scripts
+    copy_dir "$PENDING_DIR/scripts" /app/scripts scripts || CRITICAL_FAILED=1
   fi
 
   copy_file "$PENDING_DIR/Dockerfile" /app/Dockerfile
@@ -76,11 +88,19 @@ if [ -f "$READY_FLAG" ] && [ -d "$PENDING_DIR" ]; then
   # 入口脚本可执行位丢失不会阻止启动（镜像用 sh 显式调用），但仍需尽量纠正。
   [ -f /app/docker-entrypoint.sh ] && chmod 755 /app/docker-entrypoint.sh 2>/dev/null
 
+  # 关键文件失败时保留 pending 并启动旧代码，避免新前端配旧后端的半升级状态。
+  if [ "$CRITICAL_FAILED" -eq 1 ]; then
+    echo "[upgrade] 关键文件应用失败，保留 pending 等待下次重启重试" >&2
+    exec node /app/server.js
+  fi
+
   if [ -f "$PENDING_DIR/migrate.sh" ]; then
     if [ -f "$HASHES_FILE" ]; then
       EXPECTED=$(grep 'migrate.sh$' "$HASHES_FILE" | awk '{print $1}')
       ACTUAL=$(sha256sum "$PENDING_DIR/migrate.sh" | awk '{print $1}')
-      if [ -n "$EXPECTED" ] && [ "$EXPECTED" != "$ACTUAL" ]; then
+      if [ -z "$EXPECTED" ]; then
+        echo "[upgrade] migrate.sh 未在 SHA256SUMS 中声明，跳过执行" >&2
+      elif [ "$EXPECTED" != "$ACTUAL" ]; then
         echo "[upgrade] migrate.sh SHA256 mismatch, skipping migration" >&2
       else
         echo "[upgrade] Running migration script"

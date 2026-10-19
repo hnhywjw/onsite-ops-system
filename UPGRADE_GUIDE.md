@@ -1,4 +1,10 @@
-# 驻场运维管理系统 v1.0.16 构建与升级手册
+# 驻场运维管理系统构建与升级手册
+
+本文中的 `<version>` 指 `package.json` 中的当前版本号，可用下面的命令取值：
+
+```bash
+V=$(node -e "console.log(require('./package.json').version)")
+```
 
 本文档说明如何在本地构建完整安装包与离线升级包，以及如何把升级包应用到已运行的系统。生产首次部署请先阅读 `PRODUCTION_DEPLOY.md`。
 
@@ -6,9 +12,9 @@
 
 | 文件 | 用途 | 是否含依赖 |
 | --- | --- | --- |
-| `onsite-ops-system-v1.0.16-production.tar.gz` | 全新安装、跨版本替换 | 否，镜像构建时 `npm ci` |
-| `onsite-ops-upgrade-v1.0.16.tar.gz` | 已运行系统在线升级 | 否，只替换应用文件 |
-| `onsite-ops-system-v1.0.16.sha256` | 两个产物的校验和 | - |
+| `onsite-ops-system-v<version>-production.tar.gz` | 全新安装、跨版本替换 | 否，镜像构建时 `npm ci` |
+| `onsite-ops-upgrade-v<version>.tar.gz` | 已运行系统在线升级 | 否，只替换应用文件 |
+| `onsite-ops-system-v<version>.sha256` | 两个产物的校验和 | - |
 
 两个压缩包都按平铺目录打包，解压后直接得到 `server.js`、`public/` 等文件，不会产生额外的父级目录。
 
@@ -40,7 +46,7 @@ node -e "console.log(require('./package.json').version)"
 在源码根目录执行打包，注意保持平铺结构并排除本地数据与下载目录：
 
 ```bash
-tar -czf onsite-ops-system-v1.0.16-production.tar.gz \
+tar -czf "onsite-ops-system-v$V-production.tar.gz" \
   --exclude=public/downloads \
   README.md PRODUCTION_DEPLOY.md UPGRADE_GUIDE.md DEPLOY.md \
   .env.production.example Dockerfile docker-compose.yml docker-compose.prod.yml \
@@ -51,7 +57,7 @@ tar -czf onsite-ops-system-v1.0.16-production.tar.gz \
 检查包内容，确认没有父级目录、没有 `data/`、没有 `node_modules/`：
 
 ```bash
-tar -tzf onsite-ops-system-v1.0.16-production.tar.gz | head -20
+tar -tzf "onsite-ops-system-v$V-production.tar.gz" | head -20
 ```
 
 ## 4. 制作离线升级包
@@ -60,9 +66,9 @@ tar -tzf onsite-ops-system-v1.0.16-production.tar.gz | head -20
 
 ### 4.1 为什么提示「升级包缺少签名」
 
-生产环境（`NODE_ENV=production`）上传升级包时会强制校验 HMAC 签名。GitHub Release 中的 `onsite-ops-upgrade-v1.0.16.tar.gz` 是用仓库默认方式构建的，`manifest.json` 里没有 `signature` 字段，因此上传后被直接拒绝，提示「升级包缺少签名」。
+生产环境（`NODE_ENV=production`）上传升级包时会强制校验 HMAC 签名。Release 中的升级包可能由发布方用构建密钥签名，而每个部署环境的 `UPGRADE_SIGNING_KEY` 各不相同，签名对不上时同样会被拒绝，提示「升级包缺少签名」或「升级包签名校验失败」。
 
-这不是包损坏，而是设计如此：签名密钥不能进入公开仓库，任何拿到密钥的人都能伪造升级包。每个部署环境必须用自己的密钥在本地重新构建。
+这是设计如此：签名密钥不能进入公开仓库，任何拿到密钥的人都能伪造升级包。每个部署环境必须用自己的密钥在本地重新构建升级包。
 
 相关校验逻辑：
 
@@ -72,7 +78,7 @@ tar -tzf onsite-ops-system-v1.0.16-production.tar.gz | head -20
 
 ### 4.2 准备条件
 
-- 与目标版本一致的源码目录（完整安装包解压即可，例如 `onsite-ops-system-v1.0.16-production.tar.gz`）
+- 与目标版本一致的源码目录（完整安装包解压即可，例如 `onsite-ops-system-v<version>-production.tar.gz`）
 - Node.js 20 LTS 及以上，`tar` 可用
 - 目标服务器当前的 `UPGRADE_SIGNING_KEY`
 - 目标服务器当前版本低于待安装版本，服务端不接受平级或降级包
@@ -137,7 +143,7 @@ docker compose --env-file .env.production -f docker-compose.prod.yml up -d
 在源码目录中执行，`UPGRADE_SIGNING_KEY` 通过环境变量传入，不修改任何文件。
 
 ```bash
-cd /tmp/build-1.0.16
+cd /tmp/build-$V
 UPGRADE_SIGNING_KEY="$KEY" UPGRADE_REQUIRE_SIGNATURE=1 npm run build-upgrade
 ```
 
@@ -146,7 +152,7 @@ UPGRADE_SIGNING_KEY="$KEY" UPGRADE_REQUIRE_SIGNATURE=1 npm run build-upgrade
 宿主机没有 Node 时，用官方镜像挂载源码目录构建：
 
 ```bash
-docker run --rm -v /tmp/build-1.0.16:/src -w /src \
+docker run --rm -v /tmp/build-$V:/src -w /src \
   -e UPGRADE_SIGNING_KEY="$KEY" -e UPGRADE_REQUIRE_SIGNATURE=1 \
   node:20-slim node build-upgrade.js
 ```
@@ -154,8 +160,8 @@ docker run --rm -v /tmp/build-1.0.16:/src -w /src \
 容器以 root 写入产物，上传前把属主改回当前用户：
 
 ```bash
-sudo chown "$(id -u):$(id -g)" /tmp/build-1.0.16/onsite-ops-upgrade-v1.0.16.tar.gz \
-  /tmp/build-1.0.16/manifest.json
+sudo chown "$(id -u):$(id -g)" "/tmp/build-$V/onsite-ops-upgrade-v$V.tar.gz" \
+  "/tmp/build-$V/manifest.json"
 ```
 
 ### 4.6 构建输出
@@ -166,8 +172,8 @@ sudo chown "$(id -u):$(id -g)" /tmp/build-1.0.16/onsite-ops-upgrade-v1.0.16.tar.
   SHA256 server.js: 00d62488e748e4cd...
   SHA256 public/index.html: ffd015d5f5a70797...
 Upgrade package signed with UPGRADE_SIGNING_KEY
-Upgrade package created: onsite-ops-upgrade-v1.0.16.tar.gz (0.7 MB)
-Version: 1.0.16
+Upgrade package created: onsite-ops-upgrade-v<version>.tar.gz (0.7 MB)
+Version: <version>
   manifest.json written (19 files)
 ```
 
@@ -178,30 +184,30 @@ Version: 1.0.16
 用同一个密钥在本地复算签名，确认包能被生产端接受：
 
 ```bash
-UPGRADE_SIGNING_KEY="$KEY" npm run verify-upgrade -- onsite-ops-upgrade-v1.0.16.tar.gz
+UPGRADE_SIGNING_KEY="$KEY" npm run verify-upgrade -- "onsite-ops-upgrade-v$V.tar.gz"
 ```
 
 通过时输出：
 
 ```text
-校验通过：版本 1.0.16，19 个文件，签名有效
+校验通过：版本 <version>，19 个文件，签名有效
 ```
 
 自检覆盖清单文件一致性、每个文件的 SHA256、清单是否存在未声明条目与文件，以及 HMAC 签名是否与当前密钥匹配。任何一项不通过都会以非零退出码结束并指出具体原因。
 
 ### 4.8 生成校验和
 
-两个产物都要写入 `onsite-ops-system-v1.0.16.sha256`，每行一个文件：
+两个产物都要写入 `onsite-ops-system-v<version>.sha256`，每行一个文件：
 
 ```bash
-sha256sum onsite-ops-system-v1.0.16-production.tar.gz \
-  onsite-ops-upgrade-v1.0.16.tar.gz > onsite-ops-system-v1.0.16.sha256
+sha256sum "onsite-ops-system-v$V-production.tar.gz" \
+  "onsite-ops-upgrade-v$V.tar.gz" > "onsite-ops-system-v$V.sha256"
 ```
 
 下载后校验：
 
 ```bash
-sha256sum -c onsite-ops-system-v1.0.16.sha256
+sha256sum -c "onsite-ops-system-v$V.sha256"
 ```
 
 ## 5. 升级包结构
@@ -223,7 +229,7 @@ sha256sum -c onsite-ops-system-v1.0.16.sha256
 
 ```json
 {
-  "version": "1.0.16",
+  "version": "<version>",
   "files": ["server.js", "public/index.html", "..."],
   "sha256": {
     "server.js": "64 位十六进制摘要",
@@ -252,7 +258,7 @@ sha256sum -c onsite-ops-system-v1.0.16.sha256
 ## 6. 通过页面执行在线升级
 
 1. 用管理员账号登录，进入「系统治理 - 软件升级」
-2. 上传 `onsite-ops-upgrade-v1.0.16.tar.gz`
+2. 上传 `onsite-ops-upgrade-v<version>.tar.gz`
 3. 上传完成后重启容器，由 `docker-entrypoint.sh` 应用升级
 
 ```bash
@@ -266,7 +272,7 @@ docker compose --env-file .env.production -f docker-compose.prod.yml \
   logs --tail=100 onsite-ops-system
 ```
 
-日志中出现 `[upgrade] Upgrade complete. Current version: 1.0.16` 表示应用成功。旧文件会归档到 `data/upgrades/<时间戳>/`。
+日志中出现 `[upgrade] Upgrade complete. Current version: <version>` 表示应用成功。旧文件会归档到 `data/upgrades/<时间戳>/`。
 
 `docker compose restart` 只重启容器，不会重建镜像。升级包替换的是容器内的 `/app` 目录，属于临时层；要让变更在重新创建容器后继续生效，还需按第 7 节重建镜像。
 
@@ -287,7 +293,7 @@ cp -a data data.backup.$(date +%Y%m%d%H%M%S)
 
 ```bash
 cd /opt/onsite-ops-system
-tar -xzf onsite-ops-system-v1.0.16-production.tar.gz
+tar -xzf "onsite-ops-system-v$V-production.tar.gz"
 docker compose --env-file .env.production -f docker-compose.prod.yml up -d --build
 ```
 
@@ -310,7 +316,7 @@ curl -fsS http://127.0.0.1:3000/api/ready
 页面侧确认：
 
 - 登录页可正常加载，浏览器控制台无 CSP 报错
-- 管理员可登录，侧栏版本号显示 `1.0.16`
+- 管理员可登录，侧栏版本号与 `package.json` 一致
 - 资产、巡检、资料、系统备份各打开一次
 - 「系统治理 - 软件升级」显示当前版本与升级记录
 
@@ -323,7 +329,7 @@ curl -fsS http://127.0.0.1:3000/api/ready
 
 ```bash
 docker compose --env-file .env.production -f docker-compose.prod.yml down
-tar -xzf onsite-ops-system-v1.0.15-production.tar.gz
+tar -xzf "onsite-ops-system-v<上一版本>-production.tar.gz"
 docker compose --env-file .env.production -f docker-compose.prod.yml up -d --build
 ```
 
@@ -333,7 +339,7 @@ docker compose --env-file .env.production -f docker-compose.prod.yml up -d --bui
 
 ### 10.1 上传提示「升级包缺少签名」
 
-生产环境，但包是无签名构建。GitHub Release 直接提供的升级包属于这一类。按第 4.3 到 4.5 节取得密钥并重新构建。
+生产环境，但包是无签名构建，或包内的签名与服务器密钥不匹配。按第 4.3 到 4.5 节取得密钥并重新构建。
 
 ### 10.2 上传提示「升级包签名校验失败」
 
@@ -377,7 +383,7 @@ sudo chown -R 1000:1000 data
 exec: "/app/docker-entrypoint.sh": permission denied
 ```
 
-v1.0.16 之前的升级逻辑用 `copyFileSync` 落地文件，会沿用包内权限；当时的仓库把该脚本记录为 0644。容器已经在运行，因此上传升级包时不会报错，重启才暴露。
+早期版本的升级逻辑用 `copyFileSync` 落地文件，会沿用包内权限；当时的仓库把该脚本记录为 0644。容器已经在运行，因此上传升级包时不会报错，重启才暴露。
 
 恢复方式一，重建镜像：
 

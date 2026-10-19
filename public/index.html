@@ -11639,7 +11639,7 @@
       try {
         await api(`/api/inspection-plans/${id}`, { method: 'PUT', body: JSON.stringify(data) });
         closeModal('inspectionPlanEditModal');
-        state.inspectionPlans = (await api('/api/inspection-plans')).data;
+        state.inspectionPlans = (await apiCollection('/api/inspection-plans')).data;
         renderAssetOps();
         showToast('巡检计划修改成功');
       } catch (error) {
@@ -11668,7 +11668,7 @@
       try {
         await api(`/api/inspection-executions/${id}`, { method: 'PUT', body: JSON.stringify(data) });
         closeModal('inspectionExecutionEditModal');
-        state.inspectionExecutions = (await api('/api/inspection-executions')).data;
+        state.inspectionExecutions = (await apiCollection('/api/inspection-executions')).data;
         renderAssetOps();
         showToast('执行记录修改成功');
       } catch (error) {
@@ -11698,7 +11698,7 @@
       try {
         await api(`/api/change-records/${id}`, { method: 'PUT', body: JSON.stringify(data) });
         closeModal('changeRecordEditModal');
-        state.changeRecords = (await api('/api/change-records')).data;
+        state.changeRecords = (await apiCollection('/api/change-records')).data;
         renderAssetOps();
         showToast('变更记录修改成功');
       } catch (error) {
@@ -11729,7 +11729,7 @@
       try {
         await api(`/api/incidents/${id}`, { method: 'PUT', body: JSON.stringify(data) });
         closeModal('incidentEditModal');
-        state.incidents = (await api('/api/incidents')).data;
+        state.incidents = (await apiCollection('/api/incidents')).data;
         renderAssetOps();
         showToast('故障记录修改成功');
       } catch (error) {

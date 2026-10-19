@@ -1,14 +1,14 @@
 #!/usr/bin/env node
 // 一次性维护脚本：调用管理员接口为历史通知补齐 sourceType/sourceId。
 // 用法：node scripts/backfill-notification-sources.js [用户名] [密码]
-// 默认读取 ADMIN_USERNAME/ADMIN_PASSWORD 或使用 admin/Admin123!。
+// 也可通过 ADMIN_USERNAME/ADMIN_PASSWORD 提供凭据，缺失时由命令行参数补齐。
 const http = require('http');
 const https = require('https');
 const { decodeCaptchaFromSvg } = require('./captcha-glyphs');
 
 const base = process.env.BASE_URL || `http://localhost:${process.env.PORT || 3000}`;
-const username = process.argv[2] || process.env.ADMIN_USERNAME || 'admin';
-const password = process.argv[3] || process.env.ADMIN_PASSWORD || 'Admin123!';
+const username = process.argv[2] || process.env.ADMIN_USERNAME || '';
+const password = process.argv[3] || process.env.ADMIN_PASSWORD || '';
 
 function request(url, options = {}) {
   return new Promise((resolve, reject) => {
@@ -25,7 +25,8 @@ function request(url, options = {}) {
         ...(options.headers || {}),
         ...(payload ? { 'Content-Length': payload.length } : {})
       },
-      rejectUnauthorized: false
+      // 默认保持证书校验；自签证书场景通过 NODE_EXTRA_CA_CERTS 提供 CA。
+      rejectUnauthorized: true
     }, res => {
       const chunks = [];
       res.on('data', chunk => chunks.push(chunk));
@@ -46,6 +47,9 @@ function request(url, options = {}) {
 }
 
 async function main() {
+  if (!username || !password) {
+    throw new Error('请通过命令行参数或 ADMIN_USERNAME/ADMIN_PASSWORD 提供管理员凭据');
+  }
   const captcha = await request('/api/captcha');
   const login = await request('/api/login', {
     method: 'POST',
