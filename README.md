@@ -109,16 +109,23 @@ docker compose --env-file .env.production -f docker-compose.prod.yml up -d --bui
 
 ## 版本
 
-当前版本：`1.0.16`
+当前版本：`1.0.17`
 
 ### 软件包下载
 
-最新版本：**[v1.0.16](https://github.com/hnhywjw/onsite-ops-system/releases/tag/v1.0.16)**
+最新版本：**[v1.0.17](https://github.com/hnhywjw/onsite-ops-system/releases/tag/v1.0.17)**
 
-- 完整安装包 `onsite-ops-system-v1.0.16-production.tar.gz`
-- 离线升级包 `onsite-ops-upgrade-v1.0.16.tar.gz`
+- 完整安装包 `onsite-ops-system-v1.0.17-production.tar.gz`
+- 离线升级包 `onsite-ops-upgrade-v1.0.17.tar.gz`
 - SHA256 校验文件
 - 部署说明见仓库 `PRODUCTION_DEPLOY.md`
+
+### v1.0.17 更新说明
+
+功能与修复：
+- 运维日志、巡检计划与执行、变更记录、故障记录、备件流水、AI 巡检任务与结果支持“只看我的 / 项目全部”切换，工程师默认只看本人
+- 审批正文与驳回原因仅对提交人、审批人、甲方客户和管理员可见，其他项目成员只保留流转状态
+- 补充同项目双工程师可见性、范围切换与审批脱敏回归用例
 
 ### v1.0.16 更新说明
 
