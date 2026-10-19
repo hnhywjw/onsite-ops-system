@@ -319,7 +319,7 @@ function createTarGz(entries) {
   }
 }
 
-const regressionTestProjectPrefixes = ['提醒回归项目-', '时区提醒项目-', '布局隔离项目-'];
+const regressionTestProjectPrefixes = ['提醒回归项目-', '时区提醒项目-', '布局隔离项目-', '视图范围回归项目-'];
 
 // 回归用例创建的项目不会自动消失，长期累积会撑爆登录时的项目下拉（pageSize=100）并让 e2e 偶发失败。
 // 用例结束统一强制删除本轮项目及其关联数据，并清理中断运行时残留的测试周期任务。
@@ -2946,6 +2946,193 @@ async function main() {
   });
   assert(privateAfterClear.status === 201, '清空白名单后内网地址应默认放行');
   await request(`/api/ai-inspection/targets/${privateAfterClear.data.id}`, { method: 'DELETE', headers: { cookie } });
+
+  // 列表视图范围：同项目工程师默认只看本人，scope=project 可查看项目全量
+  const scopeProject = await request('/api/projects', {
+    method: 'POST', headers: { cookie, 'Content-Type': 'application/json' },
+    body: JSON.stringify({ name: `视图范围回归项目-${suffix}`, customerName: '视图范围客户' })
+  });
+  assert(scopeProject.status === 201, `创建视图范围项目失败: ${scopeProject.status} ${JSON.stringify(scopeProject.data)}`);
+  const scopeProjectId = scopeProject.data.id;
+  const scopeAsset = await request('/api/assets', {
+    method: 'POST', headers: { cookie, 'Content-Type': 'application/json' },
+    body: JSON.stringify({ name: '视图范围资产', type: '服务器', status: '运行中', projectId: scopeProjectId })
+  });
+  assert(scopeAsset.status === 201, '创建视图范围资产失败');
+  const createScopeUser = async (role, label) => {
+    const result = await request('/api/users', {
+      method: 'POST', headers: { cookie, 'Content-Type': 'application/json' },
+      body: JSON.stringify({ name: `视图范围${label}`, username: `scope_${label}_${suffix}`, password: 'Scope123!', role, projectId: scopeProjectId })
+    });
+    assert(result.status === 201, `创建视图范围${label}失败: ${result.status} ${JSON.stringify(result.data)}`);
+    return result.data;
+  };
+  const scopeEngineerA = await createScopeUser('engineer', '工程师A');
+  const scopeEngineerB = await createScopeUser('engineer', '工程师B');
+  const scopeEngineerC = await createScopeUser('engineer', '工程师C');
+  const scopeCustomer = await createScopeUser('customer', '客户');
+  const scopeCookieA = (await login(scopeEngineerA.username, 'Scope123!')).cookie;
+  const scopeCookieB = (await login(scopeEngineerB.username, 'Scope123!')).cookie;
+  const scopeCookieC = (await login(scopeEngineerC.username, 'Scope123!')).cookie;
+  const scopeCustomerCookie = (await login(scopeCustomer.username, 'Scope123!')).cookie;
+  assert(scopeCookieA && scopeCookieB && scopeCookieC && scopeCustomerCookie, '视图范围测试账号登录失败');
+
+  const scopeLogPayload = event => ({
+    projectId: scopeProjectId,
+    assetId: scopeAsset.data.id,
+    date: formatDateKey(new Date()),
+    ticketType: '事务工作',
+    event,
+    relatedTarget: '视图范围设备',
+    result: '已完成',
+    process: '视图范围回归',
+    conclusion: '完成',
+    durationHours: 1
+  });
+  const scopeLogA = await request('/api/logs', {
+    method: 'POST', headers: { cookie: scopeCookieA, 'Content-Type': 'application/json' },
+    body: JSON.stringify(scopeLogPayload('视图范围日志A'))
+  });
+  const scopeLogB = await request('/api/logs', {
+    method: 'POST', headers: { cookie: scopeCookieB, 'Content-Type': 'application/json' },
+    body: JSON.stringify(scopeLogPayload('视图范围日志B'))
+  });
+  assert(scopeLogA.status === 201 && scopeLogB.status === 201, '创建视图范围日志失败');
+  const scopeLogsMine = await request(`/api/logs?all=1&scope=mine&projectId=${encodeURIComponent(scopeProjectId)}`, { headers: { cookie: scopeCookieA } });
+  assert(scopeLogsMine.status === 200 && (scopeLogsMine.data.data || []).length === 1 && scopeLogsMine.data.data[0].id === scopeLogA.data.id, 'scope=mine 应只返回本人日志');
+  const scopeLogsProject = await request(`/api/logs?all=1&scope=project&projectId=${encodeURIComponent(scopeProjectId)}`, { headers: { cookie: scopeCookieA } });
+  assert(scopeLogsProject.status === 200 && (scopeLogsProject.data.data || []).length === 2, 'scope=project 应返回同项目全部日志');
+  const scopeLogsDefault = await request(`/api/logs?all=1&projectId=${encodeURIComponent(scopeProjectId)}`, { headers: { cookie: scopeCookieA } });
+  assert(scopeLogsDefault.status === 200 && (scopeLogsDefault.data.data || []).length === 2, '未传 scope 时应保持项目全量，避免影响报表数据');
+
+  const scopePlanA = await request('/api/inspection-plans', {
+    method: 'POST', headers: { cookie: scopeCookieA, 'Content-Type': 'application/json' },
+    body: JSON.stringify({ projectId: scopeProjectId, assetId: scopeAsset.data.id, title: '视图范围巡检A', cycle: 'monthly', nextDate: '2099-12-31' })
+  });
+  const scopePlanB = await request('/api/inspection-plans', {
+    method: 'POST', headers: { cookie: scopeCookieB, 'Content-Type': 'application/json' },
+    body: JSON.stringify({ projectId: scopeProjectId, assetId: scopeAsset.data.id, title: '视图范围巡检B', cycle: 'monthly', nextDate: '2099-12-31' })
+  });
+  assert(scopePlanA.status === 201 && scopePlanB.status === 201, '创建视图范围巡检计划失败');
+  const scopePlansMine = await request(`/api/inspection-plans?all=1&scope=mine&projectId=${encodeURIComponent(scopeProjectId)}`, { headers: { cookie: scopeCookieA } });
+  assert(scopePlansMine.status === 200 && (scopePlansMine.data.data || []).length === 1 && scopePlansMine.data.data[0].id === scopePlanA.data.id, 'scope=mine 应只返回本人巡检计划');
+  const scopePlansProject = await request(`/api/inspection-plans?all=1&scope=project&projectId=${encodeURIComponent(scopeProjectId)}`, { headers: { cookie: scopeCookieA } });
+  assert(scopePlansProject.status === 200 && (scopePlansProject.data.data || []).length === 2, 'scope=project 应返回同项目全部巡检计划');
+  const scopeExecutionA = await request('/api/inspection-executions', {
+    method: 'POST', headers: { cookie: scopeCookieA, 'Content-Type': 'application/json' },
+    body: JSON.stringify({ planId: scopePlanA.data.id, executedAt: '2026-06-19T13:00', result: '正常', checklist: '视图范围检查' })
+  });
+  const scopeExecutionB = await request('/api/inspection-executions', {
+    method: 'POST', headers: { cookie: scopeCookieB, 'Content-Type': 'application/json' },
+    body: JSON.stringify({ planId: scopePlanB.data.id, executedAt: '2026-06-19T13:00', result: '正常', checklist: '视图范围检查' })
+  });
+  assert(scopeExecutionA.status === 201 && scopeExecutionB.status === 201, '创建视图范围巡检执行失败');
+  const scopeExecutionsMine = await request(`/api/inspection-executions?all=1&scope=mine&projectId=${encodeURIComponent(scopeProjectId)}`, { headers: { cookie: scopeCookieA } });
+  assert(scopeExecutionsMine.status === 200 && (scopeExecutionsMine.data.data || []).length === 1 && scopeExecutionsMine.data.data[0].id === scopeExecutionA.data.id, 'scope=mine 应只返回本人巡检执行');
+
+  const scopeIncidentA = await request('/api/incidents', {
+    method: 'POST', headers: { cookie: scopeCookieA, 'Content-Type': 'application/json' },
+    body: JSON.stringify({ projectId: scopeProjectId, assetId: scopeAsset.data.id, title: '视图范围故障A', faultType: '硬件故障', severity: '低', status: '处理中', occurredAt: '2099-01-01T10:00' })
+  });
+  const scopeIncidentB = await request('/api/incidents', {
+    method: 'POST', headers: { cookie: scopeCookieB, 'Content-Type': 'application/json' },
+    body: JSON.stringify({ projectId: scopeProjectId, assetId: scopeAsset.data.id, title: '视图范围故障B', faultType: '软件故障', severity: '低', status: '处理中', occurredAt: '2099-01-01T10:00' })
+  });
+  assert(scopeIncidentA.status === 201 && scopeIncidentB.status === 201, '创建视图范围故障失败');
+  const scopeIncidentsMine = await request(`/api/incidents?all=1&scope=mine&projectId=${encodeURIComponent(scopeProjectId)}`, { headers: { cookie: scopeCookieA } });
+  assert(scopeIncidentsMine.status === 200 && (scopeIncidentsMine.data.data || []).length === 1 && scopeIncidentsMine.data.data[0].id === scopeIncidentA.data.id, 'scope=mine 应只返回本人故障记录');
+  const scopeIncidentsProject = await request(`/api/incidents?all=1&scope=project&projectId=${encodeURIComponent(scopeProjectId)}`, { headers: { cookie: scopeCookieA } });
+  assert(scopeIncidentsProject.status === 200 && (scopeIncidentsProject.data.data || []).length === 2, 'scope=project 应返回同项目全部故障记录');
+
+  const scopeSpare = await request('/api/spare-parts', {
+    method: 'POST', headers: { cookie: scopeCookieA, 'Content-Type': 'application/json' },
+    body: JSON.stringify({ projectId: scopeProjectId, assetId: scopeAsset.data.id, name: '视图范围备件', quantity: 10, safeStock: 1 })
+  });
+  assert(scopeSpare.status === 201, '创建视图范围备件失败');
+  const scopeStockA = await request(`/api/spare-parts/${scopeSpare.data.id}/stock`, {
+    method: 'POST', headers: { cookie: scopeCookieA, 'Content-Type': 'application/json' },
+    body: JSON.stringify({ type: 'inbound', quantity: 5, reason: '视图范围A入库' })
+  });
+  const scopeStockB = await request(`/api/spare-parts/${scopeSpare.data.id}/stock`, {
+    method: 'POST', headers: { cookie: scopeCookieB, 'Content-Type': 'application/json' },
+    body: JSON.stringify({ type: 'inbound', quantity: 3, reason: '视图范围B入库' })
+  });
+  assert(scopeStockA.status === 200 && scopeStockB.status === 200, '创建视图范围备件流水失败');
+  const scopeMovementsMine = await request(`/api/spare-part-movements?all=1&scope=mine&projectId=${encodeURIComponent(scopeProjectId)}`, { headers: { cookie: scopeCookieA } });
+  assert(scopeMovementsMine.status === 200 && (scopeMovementsMine.data.data || []).length === 1 && scopeMovementsMine.data.data[0].operatorId === scopeEngineerA.id, 'scope=mine 应只返回本人备件流水');
+  const scopeMovementsProject = await request(`/api/spare-part-movements?all=1&scope=project&projectId=${encodeURIComponent(scopeProjectId)}`, { headers: { cookie: scopeCookieA } });
+  assert(scopeMovementsProject.status === 200 && (scopeMovementsProject.data.data || []).length === 2, 'scope=project 应返回同项目全部备件流水');
+
+  const scopeChangeA = await request('/api/change-records', {
+    method: 'POST', headers: { cookie: scopeCookieA, 'Content-Type': 'application/json' },
+    body: JSON.stringify({ projectId: scopeProjectId, assetId: scopeAsset.data.id, title: '视图范围变更A', content: '视图范围变更内容A', approverId: scopeEngineerB.id, customerId: scopeCustomer.id })
+  });
+  const scopeChangeB = await request('/api/change-records', {
+    method: 'POST', headers: { cookie: scopeCookieB, 'Content-Type': 'application/json' },
+    body: JSON.stringify({ projectId: scopeProjectId, assetId: scopeAsset.data.id, title: '视图范围变更B', content: '视图范围变更内容B', approverId: scopeEngineerA.id, customerId: scopeCustomer.id })
+  });
+  assert(scopeChangeA.status === 201 && scopeChangeB.status === 201, `创建视图范围变更失败: ${scopeChangeA.status}/${scopeChangeB.status}`);
+  const scopeChangesMine = await request(`/api/change-records?all=1&scope=mine&projectId=${encodeURIComponent(scopeProjectId)}`, { headers: { cookie: scopeCookieA } });
+  assert(scopeChangesMine.status === 200 && (scopeChangesMine.data.data || []).length === 1 && scopeChangesMine.data.data[0].id === scopeChangeA.data.id, 'scope=mine 应只返回本人变更记录');
+  const scopeChangesProject = await request(`/api/change-records?all=1&scope=project&projectId=${encodeURIComponent(scopeProjectId)}`, { headers: { cookie: scopeCookieA } });
+  assert(scopeChangesProject.status === 200 && (scopeChangesProject.data.data || []).length === 2, 'scope=project 应返回同项目全部变更记录');
+
+  const scopeApprovalsC = await request(`/api/approvals?all=1&projectId=${encodeURIComponent(scopeProjectId)}`, { headers: { cookie: scopeCookieC } });
+  const scopeApprovalA = (scopeApprovalsC.data.data || []).find(item => item.relatedId === scopeChangeA.data.id);
+  assert(scopeApprovalA && scopeApprovalA.content === '' && !scopeApprovalA.rejectionReason, '无关人员不应看到审批正文与驳回原因');
+  const scopeApprovalsB = await request(`/api/approvals?all=1&projectId=${encodeURIComponent(scopeProjectId)}`, { headers: { cookie: scopeCookieB } });
+  const scopeApprovalForB = (scopeApprovalsB.data.data || []).find(item => item.relatedId === scopeChangeA.data.id);
+  assert(scopeApprovalForB && scopeApprovalForB.content === '视图范围变更内容A', '审批人应看到审批正文');
+  const scopeDecisionDenied = await request(`/api/approvals/${scopeApprovalA.id}/decision`, {
+    method: 'POST', headers: { cookie: scopeCookieC, 'Content-Type': 'application/json' },
+    body: JSON.stringify({ status: 'approved' })
+  });
+  assert(scopeDecisionDenied.status === 403, '无关人员不应能处理审批');
+  const scopeDecisionApproved = await request(`/api/approvals/${scopeApprovalA.id}/decision`, {
+    method: 'POST', headers: { cookie: scopeCookieB, 'Content-Type': 'application/json' },
+    body: JSON.stringify({ status: 'approved' })
+  });
+  assert(scopeDecisionApproved.status === 200 && scopeDecisionApproved.data.status === '待客户确认', '指定审批人应能通过运维审批');
+  const scopeDecisionCustomer = await request(`/api/approvals/${scopeApprovalA.id}/decision`, {
+    method: 'POST', headers: { cookie: scopeCustomerCookie, 'Content-Type': 'application/json' },
+    body: JSON.stringify({ status: 'approved' })
+  });
+  assert(scopeDecisionCustomer.status === 200 && scopeDecisionCustomer.data.status === '已通过', '甲方客户应能完成最终确认');
+
+  const scopeTemplates = await request('/api/ai-inspection/templates', { headers: { cookie } });
+  const scopeTemplate = (scopeTemplates.data.data || []).find(item => item.category === 'server');
+  assert(scopeTemplate, '未找到可用于视图范围的巡检模板');
+  const scopeTarget = await request('/api/ai-inspection/targets', {
+    method: 'POST', headers: { cookie, 'Content-Type': 'application/json' },
+    body: JSON.stringify({ projectId: scopeProjectId, assetId: scopeAsset.data.id, name: '视图范围巡检对象', category: 'server', address: '10.0.0.10', protocol: 'winrm', port: 5985, authType: 'password', account: 'administrator', password: 'P@ssw0rd!' })
+  });
+  assert(scopeTarget.status === 201, '创建视图范围巡检对象失败');
+  const scopeTaskPayload = (title, executedAt) => ({
+    targetId: scopeTarget.data.id,
+    templateId: scopeTemplate.id,
+    title,
+    executedAt,
+    metrics: (scopeTemplate.metrics || []).map(metric => ({ ...metric, value: 10 }))
+  });
+  const scopeTaskA = await request('/api/ai-inspection/tasks', {
+    method: 'POST', headers: { cookie: scopeCookieA, 'Content-Type': 'application/json' },
+    body: JSON.stringify(scopeTaskPayload('视图范围巡检任务A', '2026-01-01T10:00'))
+  });
+  const scopeTaskB = await request('/api/ai-inspection/tasks', {
+    method: 'POST', headers: { cookie: scopeCookieB, 'Content-Type': 'application/json' },
+    body: JSON.stringify(scopeTaskPayload('视图范围巡检任务B', '2099-01-01T10:00'))
+  });
+  assert(scopeTaskA.status === 201 && scopeTaskB.status === 201, `创建视图范围巡检任务失败: ${scopeTaskA.status}/${scopeTaskB.status}`);
+  const scopeTasksMine = await request(`/api/ai-inspection/tasks?all=1&scope=mine&projectId=${encodeURIComponent(scopeProjectId)}`, { headers: { cookie: scopeCookieA } });
+  assert(scopeTasksMine.status === 200 && (scopeTasksMine.data.data || []).length === 1 && scopeTasksMine.data.data[0].id === scopeTaskA.data.task.id, 'scope=mine 应只返回本人巡检任务');
+  const scopeTasksProject = await request(`/api/ai-inspection/tasks?all=1&scope=project&projectId=${encodeURIComponent(scopeProjectId)}`, { headers: { cookie: scopeCookieA } });
+  assert(scopeTasksProject.status === 200 && (scopeTasksProject.data.data || []).length === 2, 'scope=project 应返回同项目全部巡检任务');
+  const scopeResultsA = await request(`/api/ai-inspection/results?all=1&scope=mine&projectId=${encodeURIComponent(scopeProjectId)}`, { headers: { cookie: scopeCookieA } });
+  assert(scopeResultsA.status === 200 && (scopeResultsA.data.data || []).length >= 1 && (scopeResultsA.data.data || []).every(item => item.createdBy === scopeEngineerA.id), 'scope=mine 应只返回本人巡检结果');
+  const scopeResultsB = await request(`/api/ai-inspection/results?all=1&scope=mine&projectId=${encodeURIComponent(scopeProjectId)}`, { headers: { cookie: scopeCookieB } });
+  assert(scopeResultsB.status === 200 && (scopeResultsB.data.data || []).length === 0, '无巡检结果的人员 scope=mine 应为空');
+  const scopeResultsProject = await request(`/api/ai-inspection/results?all=1&scope=project&projectId=${encodeURIComponent(scopeProjectId)}`, { headers: { cookie: scopeCookieB } });
+  assert(scopeResultsProject.status === 200 && (scopeResultsProject.data.data || []).length >= 1, 'scope=project 应返回同项目巡检结果');
 
   await cleanupRegressionArtifacts(cookie);
 

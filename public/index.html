@@ -2317,6 +2317,10 @@
           <div class="card">
             <div style="display:flex;align-items:center;gap:8px;margin-bottom:8px;">
               <h3 style="margin:0;">日志列表</h3>
+              <div class="toolbar" data-scope-area="logs" style="gap:4px;">
+                <button class="secondary" data-scope="mine" type="button" style="font-size:12px;padding:4px 10px;">只看我的</button>
+                <button class="secondary" data-scope="project" type="button" style="font-size:12px;padding:4px 10px;">项目全部</button>
+              </div>
               <label style="font-size:12px;display:flex;align-items:center;gap:4px;margin-left:auto;">项目<select id="logFilterProject" style="width:auto;padding:2px 4px;font-size:12px;height:auto;"><option value="">全部项目</option></select></label>
               <label style="font-size:12px;display:flex;align-items:center;gap:4px;">人员<select id="logFilterUser" style="width:auto;padding:2px 4px;font-size:12px;height:auto;"><option value="">全部人员</option></select></label>
               <button class="secondary" id="logExportBtn" type="button" style="font-size:12px;padding:4px 10px;">导出选中</button>
@@ -2605,6 +2609,10 @@
             </div>
             <div class="card" style="margin-top: 16px;">
               <h3 style="margin-top:0;">巡检计划列表</h3>
+              <div class="toolbar" data-scope-area="assetOps" style="gap:4px;margin-bottom:8px;">
+                <button class="secondary" data-scope="mine" type="button" style="font-size:12px;padding:4px 10px;">只看我的</button>
+                <button class="secondary" data-scope="project" type="button" style="font-size:12px;padding:4px 10px;">项目全部</button>
+              </div>
               <div class="table-wrap"><table><thead><tr><th>计划</th><th>资产</th><th>周期</th><th>下次巡检</th><th>负责人</th><th>状态</th><th>操作</th></tr></thead><tbody id="inspectionPlanTable"></tbody></table></div>
               <div class="pagination-bar">
                 <button class="secondary" id="inspectionPlanPrevBtn" type="button">上一页</button>
@@ -2631,6 +2639,10 @@
             </div>
             <div class="card" style="margin-top: 16px;">
               <h3 style="margin-top:0;">执行记录列表</h3>
+              <div class="toolbar" data-scope-area="assetOps" style="gap:4px;margin-bottom:8px;">
+                <button class="secondary" data-scope="mine" type="button" style="font-size:12px;padding:4px 10px;">只看我的</button>
+                <button class="secondary" data-scope="project" type="button" style="font-size:12px;padding:4px 10px;">项目全部</button>
+              </div>
               <div class="table-wrap"><table><thead><tr><th>执行计划名称</th><th>执行时间</th><th>执行人</th><th>巡检项清单</th><th>异常说明</th><th>整改建议</th><th>巡检结果</th><th>附件</th><th>下次巡检</th><th>操作</th></tr></thead><tbody id="inspectionExecutionTable"></tbody></table></div>
               <div class="pagination-bar">
                 <button class="secondary" id="inspectionExecutionPrevBtn" type="button">上一页</button>
@@ -2666,6 +2678,10 @@
             </div>
           <div class="card" style="margin-top: 16px;">
             <h3 style="margin-top:0;">备件出入库记录</h3>
+              <div class="toolbar" data-scope-area="assetOps" style="gap:4px;margin-bottom:8px;">
+                <button class="secondary" data-scope="mine" type="button" style="font-size:12px;padding:4px 10px;">只看我的</button>
+                <button class="secondary" data-scope="project" type="button" style="font-size:12px;padding:4px 10px;">项目全部</button>
+              </div>
               <div class="table-wrap"><table><thead><tr><th>时间</th><th>备件</th><th>类型</th><th>数量</th><th>原因</th><th>操作人</th></tr></thead><tbody id="sparePartMovementTable"></tbody></table></div>
               <div class="pagination-bar">
                 <button class="secondary" id="sparePartMovementPrevBtn" type="button">上一页</button>
@@ -2692,6 +2708,10 @@
             </div>
             <div class="card" style="margin-top: 16px;">
               <h3 style="margin-top:0;">变更记录列表</h3>
+              <div class="toolbar" data-scope-area="assetOps" style="gap:4px;margin-bottom:8px;">
+                <button class="secondary" data-scope="mine" type="button" style="font-size:12px;padding:4px 10px;">只看我的</button>
+                <button class="secondary" data-scope="project" type="button" style="font-size:12px;padding:4px 10px;">项目全部</button>
+              </div>
               <div class="table-wrap"><table><thead><tr><th>标题</th><th>变更内容</th><th>风险</th><th>运维审批人</th><th>甲方客户</th><th>审批状态</th><th>关联资产</th><th>项目</th><th>操作</th></tr></thead><tbody id="changeRecordTable"></tbody></table></div>
               <div class="pagination-bar">
                 <button class="secondary" id="changeRecordPrevBtn" type="button">上一页</button>
@@ -2720,6 +2740,10 @@
             </div>
             <div class="card" style="margin-top: 16px;">
               <h3 style="margin-top:0;">故障处理记录</h3>
+              <div class="toolbar" data-scope-area="assetOps" style="gap:4px;margin-bottom:8px;">
+                <button class="secondary" data-scope="mine" type="button" style="font-size:12px;padding:4px 10px;">只看我的</button>
+                <button class="secondary" data-scope="project" type="button" style="font-size:12px;padding:4px 10px;">项目全部</button>
+              </div>
               <div class="table-wrap"><table><thead><tr><th>标题</th><th>故障类型</th><th>严重等级</th><th>SLA</th><th>状态</th><th>处理结果</th><th>发生时间</th><th>项目</th><th>操作</th></tr></thead><tbody id="incidentTable"></tbody></table></div>
               <div class="pagination-bar">
                 <button class="secondary" id="incidentPrevBtn" type="button">上一页</button>
@@ -2850,6 +2874,10 @@
             <div class="card" style="margin-top: 16px;">
               <h3 style="margin-top:0;">任务列表</h3>
               <div style="display:flex;gap:8px;margin-bottom:8px;">
+                <div class="toolbar" data-scope-area="aiInspection" style="gap:4px;">
+                  <button class="secondary" data-scope="mine" type="button" style="font-size:12px;padding:4px 10px;">只看我的</button>
+                  <button class="secondary" data-scope="project" type="button" style="font-size:12px;padding:4px 10px;">项目全部</button>
+                </div>
                 <input type="text" id="aiTaskSearch" placeholder="搜索任务或执行人..." style="flex: 2; min-width: 200px; font-size:13px;" />
                 <select id="aiTaskStatusFilter" style="font-size:13px;"><option value="">全部状态</option><option value="待执行">待执行</option><option value="执行中">执行中</option><option value="已完成">已完成</option><option value="失败">失败</option><option value="已停用">已停用</option></select>
               </div>
@@ -2861,6 +2889,10 @@
           <div class="card">
             <h3 style="margin-top:0;">巡检结果</h3>
             <div class="toolbar ai-result-filter-toolbar">
+              <div class="toolbar" data-scope-area="aiInspection" style="gap:4px;">
+                <button class="secondary" data-scope="mine" type="button" style="font-size:12px;padding:4px 10px;">只看我的</button>
+                <button class="secondary" data-scope="project" type="button" style="font-size:12px;padding:4px 10px;">项目全部</button>
+              </div>
               <input type="text" id="aiResultSearch" placeholder="搜索总结或风险..." />
               <select id="aiResultLevelFilter"><option value="">全部等级</option><option value="正常">正常</option><option value="关注">关注</option><option value="异常">异常</option><option value="严重">严重</option></select>
             </div>
@@ -3645,6 +3677,7 @@
       incidents: [],
       sparePartMovements: [],
       approvals: [],
+      listScopes: {},
       pendingRejectionId: '',
       aiInspectionTargets: [],
       aiInspectionTemplates: [],
@@ -5109,6 +5142,37 @@
       if (state.user?.role === 'admin') return arr;
       if (!state.user?.projectId) return [];
       return arr.filter(item => item.projectId === state.user.projectId);
+    }
+
+    // 列表「只看我的 / 项目全部」视图。工程师默认只看本人，其余角色可切换到项目全量。
+    function canSwitchListScope() {
+      return ['admin', 'engineer', 'auditor'].includes(state.user?.role);
+    }
+
+    function getListScope(area) {
+      const saved = state.listScopes?.[area];
+      if (saved === 'mine' || saved === 'project') return saved;
+      return state.user?.role === 'engineer' ? 'mine' : 'project';
+    }
+
+    function filterByListScope(arr, area, getOwnerId) {
+      const scoped = filterByUserProject(arr);
+      if (!canSwitchListScope() || getListScope(area) !== 'mine') return scoped;
+      const userId = state.user?.id;
+      if (!userId) return scoped;
+      return scoped.filter(item => getOwnerId(item) === userId);
+    }
+
+    function syncListScopeControls() {
+      document.querySelectorAll('[data-scope-area]').forEach(group => {
+        group.classList.toggle('hidden', !canSwitchListScope());
+        const active = getListScope(group.dataset.scopeArea);
+        group.querySelectorAll('button[data-scope]').forEach(button => {
+          const isActive = button.dataset.scope === active;
+          button.classList.toggle('primary', isActive);
+          button.classList.toggle('secondary', !isActive);
+        });
+      });
     }
 
     function fillSelect(selectId, list, includeEmpty = true) {
@@ -7623,7 +7687,7 @@
 
     function renderLogs() {
       const pageSize = state.logPageSize || 10;
-      let sourceLogs = filterByUserProject(state.logs);
+      let sourceLogs = filterByListScope(state.logs, 'logs', item => item.userId || '');
       const projectFilter = state.logFilterProjectId || '';
       const userFilter = state.logFilterUserId || '';
       if (projectFilter) sourceLogs = sourceLogs.filter(item => item.projectId === projectFilter);
@@ -7657,6 +7721,7 @@
       document.getElementById('logNextBtn').disabled = state.logPage >= totalPages;
       document.getElementById('logSelectAll').checked = pageItems.length > 0 && pageItems.every(item => selectedSet.has(item.id));
       document.getElementById('logPageSizeSelect').value = String(pageSize);
+      syncListScopeControls();
     }
 
     function renderKb() {
@@ -8069,7 +8134,7 @@
 
     function renderAssetOps() {
       const inspectionPlanPageSize = 10;
-      const sourceInspectionPlans = filterByUserProject(state.inspectionPlans);
+      const sourceInspectionPlans = filterByListScope(state.inspectionPlans, 'assetOps', item => item.createdBy || '');
       const inspectionPlanTotalPages = Math.max(1, Math.ceil(sourceInspectionPlans.length / inspectionPlanPageSize));
       state.inspectionPlanPage = Math.min(Math.max(1, state.inspectionPlanPage || 1), inspectionPlanTotalPages);
       const inspectionPlanStart = (state.inspectionPlanPage - 1) * inspectionPlanPageSize;
@@ -8079,7 +8144,7 @@
       document.getElementById('inspectionPlanPrevBtn').disabled = state.inspectionPlanPage <= 1;
       document.getElementById('inspectionPlanNextBtn').disabled = state.inspectionPlanPage >= inspectionPlanTotalPages;
       const inspectionExecutionPageSize = 5;
-      const sourceInspectionExecutions = filterByUserProject(state.inspectionExecutions);
+      const sourceInspectionExecutions = filterByListScope(state.inspectionExecutions, 'assetOps', item => item.createdBy || '');
       const inspectionExecutionTotalPages = Math.max(1, Math.ceil(sourceInspectionExecutions.length / inspectionExecutionPageSize));
       state.inspectionExecutionPage = Math.min(Math.max(1, state.inspectionExecutionPage || 1), inspectionExecutionTotalPages);
       const inspectionExecutionStart = (state.inspectionExecutionPage - 1) * inspectionExecutionPageSize;
@@ -8099,7 +8164,7 @@
       document.getElementById('sparePartPrevBtn').disabled = state.sparePartPage <= 1;
       document.getElementById('sparePartNextBtn').disabled = state.sparePartPage >= sparePartTotalPages;
       const changePageSize = 10;
-      const sourceChangeRecords = filterByUserProject(state.changeRecords);
+      const sourceChangeRecords = filterByListScope(state.changeRecords, 'assetOps', item => item.createdBy || '');
       const changeTotalPages = Math.max(1, Math.ceil(sourceChangeRecords.length / changePageSize));
       state.changeRecordPage = Math.min(Math.max(1, state.changeRecordPage || 1), changeTotalPages);
       const changeStart = (state.changeRecordPage - 1) * changePageSize;
@@ -8109,7 +8174,7 @@
       document.getElementById('changeRecordPrevBtn').disabled = state.changeRecordPage <= 1;
       document.getElementById('changeRecordNextBtn').disabled = state.changeRecordPage >= changeTotalPages;
       const incidentPageSize = 10;
-      const sourceIncidents = filterByUserProject(state.incidents);
+      const sourceIncidents = filterByListScope(state.incidents, 'assetOps', item => item.createdBy || '');
       const incidentTotalPages = Math.max(1, Math.ceil(sourceIncidents.length / incidentPageSize));
       state.incidentPage = Math.min(Math.max(1, state.incidentPage || 1), incidentTotalPages);
       const incidentStart = (state.incidentPage - 1) * incidentPageSize;
@@ -8120,7 +8185,8 @@
       document.getElementById('incidentNextBtn').disabled = state.incidentPage >= incidentTotalPages;
       const spmPageSize = 10;
       const sourceSparePartIds = new Set(sourceSpareParts.map(item => item.id));
-      const sourceMovements = state.sparePartMovements.filter(item => sourceSparePartIds.has(item.sparePartId));
+      const sourceMovements = filterByListScope(state.sparePartMovements, 'assetOps', item => item.operatorId || '')
+        .filter(item => sourceSparePartIds.has(item.sparePartId));
       const spmTotalPages = Math.max(1, Math.ceil(sourceMovements.length / spmPageSize));
       state.sparePartMovementPage = Math.min(Math.max(1, state.sparePartMovementPage || 1), spmTotalPages);
       const spmStart = (state.sparePartMovementPage - 1) * spmPageSize;
@@ -8130,6 +8196,7 @@
       document.getElementById('sparePartMovementPrevBtn').disabled = state.sparePartMovementPage <= 1;
       document.getElementById('sparePartMovementNextBtn').disabled = state.sparePartMovementPage >= spmTotalPages;
       fillInspectionExecutionPlanSelect();
+      syncListScopeControls();
     }
 
     function renderAiInspection() {
@@ -8180,7 +8247,7 @@
       const taskSearch = (document.getElementById('aiTaskSearch')?.value || '').toLowerCase();
       const taskStatusFilter = document.getElementById('aiTaskStatusFilter')?.value || '';
       const taskPageSize = 5;
-      const taskRowsAll = filterByUserProject(state.aiInspectionTasks)
+      const taskRowsAll = filterByListScope(state.aiInspectionTasks, 'aiInspection', item => item.createdBy || '')
         .filter(item => {
           if (taskStatusFilter && item.status !== taskStatusFilter) return false;
           if (taskSearch && !(item.title || '').toLowerCase().includes(taskSearch) && !(item.executor || '').toLowerCase().includes(taskSearch)) return false;
@@ -8242,6 +8309,7 @@
       document.getElementById('aiInspectionResultPageInfo').textContent = `第 ${state.aiInspectionResultPage} / ${resultTotalPages} 页`;
       document.getElementById('aiInspectionResultPrevBtn').disabled = state.aiInspectionResultPage <= 1;
       document.getElementById('aiInspectionResultNextBtn').disabled = state.aiInspectionResultPage >= resultTotalPages;
+      syncListScopeControls();
 
       const reportRows = Array.isArray(state.aiInspectionReportRows) ? state.aiInspectionReportRows : [];
       const reportTotalPages = Math.max(1, Number(state.aiInspectionReportTotalPages || 1));
@@ -9750,6 +9818,7 @@
     ];
 
     function clearBaseDataState() {
+      state.listScopes = {};
       BASE_DATA_ENDPOINTS.forEach(endpoint => {
         state[endpoint.key] = [];
       });
@@ -9814,7 +9883,8 @@
         page: String(page),
         pageSize: '5',
         sortDirection: 'desc',
-        sortBy: 'createdAt'
+        sortBy: 'createdAt',
+        scope: getListScope('aiInspection')
       };
       const level = document.getElementById('aiResultLevelFilter')?.value || '';
       const keyword = (document.getElementById('aiResultSearch')?.value || '').trim();
@@ -10852,7 +10922,7 @@
       renderAiInspection();
     });
     document.getElementById('aiInspectionTaskNextBtn').addEventListener('click', () => {
-      const totalPages = Math.max(1, Math.ceil(filterByUserProject(state.aiInspectionTasks).length / 5));
+      const totalPages = Math.max(1, Math.ceil(filterByListScope(state.aiInspectionTasks, 'aiInspection', item => item.createdBy || '').length / 5));
       state.aiInspectionTaskPage = Math.min(totalPages, state.aiInspectionTaskPage + 1);
       renderAiInspection();
     });
@@ -10897,7 +10967,7 @@
       renderAssetOps();
     });
     document.getElementById('inspectionExecutionNextBtn').addEventListener('click', () => {
-      const totalPages = Math.max(1, Math.ceil(filterByUserProject(state.inspectionExecutions).length / 5));
+      const totalPages = Math.max(1, Math.ceil(filterByListScope(state.inspectionExecutions, 'assetOps', item => item.createdBy || '').length / 5));
       state.inspectionExecutionPage = Math.min(totalPages, state.inspectionExecutionPage + 1);
       renderAssetOps();
     });
@@ -10906,7 +10976,7 @@
       renderAssetOps();
     });
     document.getElementById('changeRecordNextBtn').addEventListener('click', () => {
-      const totalPages = Math.max(1, Math.ceil(filterByUserProject(state.changeRecords).length / 10));
+      const totalPages = Math.max(1, Math.ceil(filterByListScope(state.changeRecords, 'assetOps', item => item.createdBy || '').length / 10));
       state.changeRecordPage = Math.min(totalPages, state.changeRecordPage + 1);
       renderAssetOps();
     });
@@ -10915,7 +10985,7 @@
       renderAssetOps();
     });
     document.getElementById('incidentNextBtn').addEventListener('click', () => {
-      const totalPages = Math.max(1, Math.ceil(filterByUserProject(state.incidents).length / 10));
+      const totalPages = Math.max(1, Math.ceil(filterByListScope(state.incidents, 'assetOps', item => item.createdBy || '').length / 10));
       state.incidentPage = Math.min(totalPages, state.incidentPage + 1);
       renderAssetOps();
     });
@@ -10924,7 +10994,7 @@
       renderLogs();
     });
     document.getElementById('logNextBtn').addEventListener('click', () => {
-      let sourceLogs = filterByUserProject(state.logs);
+      let sourceLogs = filterByListScope(state.logs, 'logs', item => item.userId || '');
       if (state.logFilterProjectId) sourceLogs = sourceLogs.filter(item => item.projectId === state.logFilterProjectId);
       if (state.logFilterUserId) sourceLogs = sourceLogs.filter(item => item.userId === state.logFilterUserId);
       const totalPages = Math.max(1, Math.ceil(sourceLogs.length / (state.logPageSize || 10)));
@@ -10966,6 +11036,35 @@
       state.logFilterUserId = document.getElementById('logFilterUser').value;
       state.logPage = 1;
       renderLogs();
+    });
+    document.addEventListener('click', event => {
+      const button = event.target.closest('[data-scope-area] button[data-scope]');
+      if (!button) return;
+      const area = button.closest('[data-scope-area]')?.dataset.scopeArea;
+      if (!area) return;
+      state.listScopes = state.listScopes || {};
+      state.listScopes[area] = button.dataset.scope === 'project' ? 'project' : 'mine';
+      if (area === 'logs') {
+        state.logPage = 1;
+        renderLogs();
+        return;
+      }
+      if (area === 'assetOps') {
+        state.inspectionPlanPage = 1;
+        state.inspectionExecutionPage = 1;
+        state.changeRecordPage = 1;
+        state.incidentPage = 1;
+        state.sparePartMovementPage = 1;
+        renderAssetOps();
+        return;
+      }
+      if (area === 'aiInspection') {
+        state.aiInspectionTaskPage = 1;
+        syncListScopeControls();
+        loadAiInspectionResults({ page: 1 }).then(() => renderAiInspection()).catch(error => {
+          showGlobalError(error.message || '巡检结果加载失败');
+        });
+      }
     });
     document.getElementById('kbPrevBtn').addEventListener('click', () => {
       state.kbPage = Math.max(1, state.kbPage - 1);
@@ -11061,7 +11160,7 @@
       renderAssetOps();
     });
     document.getElementById('inspectionPlanNextBtn').addEventListener('click', () => {
-      const totalPages = Math.max(1, Math.ceil(filterByUserProject(state.inspectionPlans).length / 10));
+      const totalPages = Math.max(1, Math.ceil(filterByListScope(state.inspectionPlans, 'assetOps', item => item.createdBy || '').length / 10));
       state.inspectionPlanPage = Math.min(totalPages, state.inspectionPlanPage + 1);
       renderAssetOps();
     });
@@ -11080,7 +11179,8 @@
     });
     document.getElementById('sparePartMovementNextBtn').addEventListener('click', () => {
       const sourceSparePartIds = new Set(filterByUserProject(state.spareParts).map(item => item.id));
-      const sourceMovements = state.sparePartMovements.filter(item => sourceSparePartIds.has(item.sparePartId));
+      const sourceMovements = filterByListScope(state.sparePartMovements, 'assetOps', item => item.operatorId || '')
+        .filter(item => sourceSparePartIds.has(item.sparePartId));
       const totalPages = Math.max(1, Math.ceil(sourceMovements.length / 10));
       state.sparePartMovementPage = Math.min(totalPages, state.sparePartMovementPage + 1);
       renderAssetOps();

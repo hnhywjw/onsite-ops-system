@@ -5297,6 +5297,14 @@ function filterByProjectScope(list, user, getProjectId) {
   });
 }
 
+// 列表「只看我的 / 项目全部」：scope=mine 时在项目可见范围内再按记录归属人收窄。
+// 未传 scope 时保持项目级全量，避免影响报表、仪表盘等依赖完整数据的调用方。
+function filterByRecordScope(list, user, query, getOwnerId) {
+  const scoped = filterByProjectScope(list, user, item => item.projectId);
+  if (String(query?.scope || '') !== 'mine') return scoped;
+  return scoped.filter(item => getOwnerId(item) === user.id);
+}
+
 // 无归属项目的模板（内置或管理员创建）对所有项目可见，带 projectId 的自建模板仅在所属项目内可见。
 function canUseAiInspectionTemplate(user, item) {
   if (!user || !item) return false;
@@ -6646,6 +6654,15 @@ function canDecideApproval(user, approval) {
   if (user.role !== 'engineer') return false;
   if (!user.projectId || approval.projectId !== user.projectId) return false;
   return user.id === approval.approverId;
+}
+
+// 审批详情仅对提交人、审批人、甲方客户和管理员开放，其他项目成员只能看到流转状态。
+function canViewApprovalDetail(user, approval) {
+  if (!user || !approval) return false;
+  if (user.role === 'admin') return true;
+  return approval.requestedBy === user.id
+    || approval.approverId === user.id
+    || approval.customerId === user.id;
 }
 
 function canDeleteOwnedRecord(user, item, creatorId) {
@@ -10712,7 +10729,7 @@ const requestHandler = async (req, res) => {
       if (user.role === 'customer') {
         return json(res, 200, paginateResult([], query, user));
       }
-      let list = filterByProjectScope(db.logs || [], user, item => item.projectId);
+      let list = filterByRecordScope(db.logs || [], user, query, item => item.userId || '');
       if (query.projectId) list = list.filter(item => item.projectId === query.projectId);
       if (query.userId) list = list.filter(item => item.userId === query.userId);
       const sorted = parseSortQuery(query, list, 'createdAt');
@@ -11301,9 +11318,9 @@ const requestHandler = async (req, res) => {
       const user = requireAuth(req, res, db);
       if (!user) return;
       const todayKey = formatDateKey(new Date());
-      const list = filterByProjectScope(db.inspectionPlans || [], user, item => item.projectId)
-        .map(plan => sanitizeInspectionPlanForViewer({ ...plan, status: resolveInspectionPlanStatus(plan, todayKey) }, user));
       const query = Object.fromEntries(reqUrl.searchParams);
+      const list = filterByRecordScope(db.inspectionPlans || [], user, query, item => item.createdBy || '')
+        .map(plan => sanitizeInspectionPlanForViewer({ ...plan, status: resolveInspectionPlanStatus(plan, todayKey) }, user));
       const sorted = parseSortQuery(query, list, 'createdAt');
       return json(res, 200, paginateResult(sorted, query, user));
     }
@@ -11391,9 +11408,9 @@ const requestHandler = async (req, res) => {
     if (req.method === 'GET' && pathname === '/api/inspection-executions') {
       const user = requireAuth(req, res, db);
       if (!user) return;
-      const list = filterByProjectScope(db.inspectionExecutions || [], user, item => item.projectId)
-        .map(item => sanitizeInspectionExecutionForViewer(item, user));
       const query = Object.fromEntries(reqUrl.searchParams);
+      const list = filterByRecordScope(db.inspectionExecutions || [], user, query, item => item.createdBy || '')
+        .map(item => sanitizeInspectionExecutionForViewer(item, user));
       const sorted = parseSortQuery(query, list, 'createdAt');
       return json(res, 200, paginateResult(sorted, query, user));
     }
@@ -11535,8 +11552,8 @@ const requestHandler = async (req, res) => {
         const query = Object.fromEntries(reqUrl.searchParams);
         return json(res, 200, paginateResult([], query, user));
       }
-      const list = filterByProjectScope(db.sparePartMovements || [], user, item => item.projectId);
       const query = Object.fromEntries(reqUrl.searchParams);
+      const list = filterByRecordScope(db.sparePartMovements || [], user, query, item => item.operatorId || '');
       const sorted = parseSortQuery(query, list, 'createdAt');
       return json(res, 200, paginateResult(sorted, query, user));
     }
@@ -11727,6 +11744,7 @@ const requestHandler = async (req, res) => {
     if (req.method === 'GET' && pathname === '/api/change-records') {
       const user = requireAuth(req, res, db);
       if (!user) return;
+      const query = Object.fromEntries(reqUrl.searchParams);
       const rejectionMap = new Map();
       (db.approvals || []).forEach(a => {
         if (a.category === 'change' && a.status === '已驳回' && a.rejectionReason) {
@@ -11734,9 +11752,8 @@ const requestHandler = async (req, res) => {
         }
       });
       // GET 不应改写共享状态，驳回原因以只读视图方式合成。
-      const list = filterByProjectScope(db.changeRecords || [], user, item => item.projectId)
+      const list = filterByRecordScope(db.changeRecords || [], user, query, item => item.createdBy || '')
         .map(item => (!item.rejectionReason && rejectionMap.has(item.id) ? { ...item, rejectionReason: rejectionMap.get(item.id) } : item));
-      const query = Object.fromEntries(reqUrl.searchParams);
       const sorted = parseSortQuery(query, list, 'createdAt');
       const presented = sorted.map(item => sanitizeChangeRecordForViewer(item, user));
       return json(res, 200, paginateResult(presented, query, user));
@@ -11935,8 +11952,8 @@ const requestHandler = async (req, res) => {
     if (req.method === 'GET' && pathname === '/api/incidents') {
       const user = requireAuth(req, res, db);
       if (!user) return;
-      const list = filterByProjectScope(db.incidentRecords || [], user, item => item.projectId);
       const query = Object.fromEntries(reqUrl.searchParams);
+      const list = filterByRecordScope(db.incidentRecords || [], user, query, item => item.createdBy || '');
       const sorted = parseSortQuery(query, list, 'createdAt');
       const presented = user.role === 'customer'
         ? sorted.map(item => ({ ...item, description: '', resolution: '' }))
@@ -12058,7 +12075,7 @@ const requestHandler = async (req, res) => {
           createdAt: item.createdAt,
           customerId: item.customerId
         }))
-        : sorted;
+        : sorted.map(item => (canViewApprovalDetail(user, item) ? item : { ...item, content: '', rejectionReason: '' }));
       return json(res, 200, paginateResult(presented, query, user));
     }
 
@@ -12507,12 +12524,12 @@ const requestHandler = async (req, res) => {
         if (task.status === '已完成' || task.status === '失败') task.status = '待执行';
       });
       if (changed) await writeDb(db, { silent: true });
-      const list = filterByProjectScope(db.aiInspectionTasks || [], user, item => item.projectId).map(task => {
+      const query = Object.fromEntries(reqUrl.searchParams);
+      const list = filterByRecordScope(db.aiInspectionTasks || [], user, query, item => item.createdBy || '').map(task => {
         const result = resultMap.get(task.id);
         if (!result || result.probeError) return task;
         return { ...task, latestResultId: result.id };
       });
-      const query = Object.fromEntries(reqUrl.searchParams);
       const sorted = parseSortQuery(query, list, 'createdAt');
       return json(res, 200, paginateResult(sorted, query, user));
     }
@@ -12838,7 +12855,7 @@ const requestHandler = async (req, res) => {
         const user = requireAuth(req, res, db);
         if (!user) return;
       const query = Object.fromEntries(reqUrl.searchParams);
-      let list = filterByProjectScope(db.aiInspectionResults || [], user, item => item.projectId);
+      let list = filterByRecordScope(db.aiInspectionResults || [], user, query, item => item.createdBy || '');
       if (query.excludeProbeError === '1') list = list.filter(item => !item.probeError);
       if (query.level) list = list.filter(item => item.level === query.level);
       if (query.q) {
