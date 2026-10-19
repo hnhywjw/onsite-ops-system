@@ -36,6 +36,9 @@
       background: var(--bg);
     }
     .hidden { display: none !important; }
+    /* 固定定位的告警与提示条在大屏固定 380-400px，手机宽度不足时需按视口收缩。 */
+    #alertPopup { max-width: calc(100vw - 32px); }
+    #globalErrorToast { max-width: calc(100vw - 24px); }
     .sidebar {
       background: #0f172a;
       color: #e5eefc;
@@ -170,6 +173,9 @@
       gap: 16px;
     }
     .grid.cols-2 { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+    .https-cert-row { grid-template-columns: minmax(0, 1fr) minmax(0, 1fr) max-content; gap: 14px; align-items: end; }
+    /* 项目筛选等下拉框的宽度由最长选项撑开，不限制会在窄屏横向溢出卡片。 */
+    select, input, textarea { max-width: 100%; }
     .grid.cols-3 { grid-template-columns: repeat(3, minmax(0, 1fr)); }
     .grid.cols-4 { grid-template-columns: repeat(4, minmax(0, 1fr)); }
     .card {
@@ -1098,6 +1104,16 @@
       h3 { font-size: 15px; }
       .section-tabs button { font-size: 13px; padding: 4px 8px; }
       .system-upgrade-grid { grid-template-columns: 1fr; }
+      /* 固定列数在窄屏会把指标卡与表单压到无法阅读，改为按可用宽度自动换列。
+         指标卡最小 150px，375px 屏保留两列；表单与图表卡片最小 260px，手机端自然退化为单列。 */
+      .grid.cols-3, .grid.cols-4 { grid-template-columns: repeat(auto-fit, minmax(150px, 1fr)); }
+      .grid.cols-2 { grid-template-columns: repeat(auto-fit, minmax(260px, 1fr)); }
+      form.grid-form, .grid-form { grid-template-columns: repeat(auto-fit, minmax(240px, 1fr)); }
+      .chart-wrap { grid-template-columns: minmax(0, 1fr); }
+      .sso-buttons { grid-template-columns: 1fr; }
+      .metric-value { font-size: 24px; word-break: break-all; }
+      .pagination-bar { justify-content: space-between; }
+      .https-cert-row { grid-template-columns: minmax(0, 1fr); }
     }
     .topo-node.selected { border-color: #3b82f6; box-shadow: 0 0 0 3px rgba(59,130,246,0.4), 0 0 12px rgba(59,130,246,0.25); background:#eff6ff; }
     .topo-node.selected::before { content:'✓'; position:absolute; top:-10px; left:-10px; width:20px; height:20px; border-radius:50%; background:#3b82f6; color:#fff; font-size:11px; font-weight:700; display:flex; align-items:center; justify-content:center; z-index:5; }
@@ -1907,7 +1923,7 @@
         <label>关联项目<select id="edDocumentProjectId"></select></label>
         <label>资料类型<select id="edDocumentType"><option value="">请选择</option><option value="device">设备管理信息</option><option value="topology">网络拓扑图</option><option value="layout">设备位置布局图</option><option value="proposal">项目方案</option><option value="config">配置文档</option><option value="contract">项目合同</option><option value="acceptance">项目验收报告</option></select></label>
         <label class="full"><span id="edDocumentTitleLabel">资料名称</span><input id="edDocumentTitle" required /></label>
-        <div id="edDocumentDeviceFields" class="full" style="display:grid;grid-template-columns:1fr 1fr;gap:8px;">
+        <div id="edDocumentDeviceFields" class="full grid-form" style="gap:8px;">
           <label>品牌<input id="edDocumentBrand" /></label>
           <label>规格型号<input id="edDocumentModel" /></label>
           <label class="full">序列号<input id="edDocumentSerialNumber" /></label>
@@ -2249,7 +2265,7 @@
         </div>
         <div class="subtab-panel hidden" data-section="users" data-subtab="list">
           <div class="card">
-            <div style="display:flex;align-items:center;gap:8px;margin-bottom:8px;">
+            <div style="display:flex;align-items:center;gap:8px;flex-wrap:wrap;margin-bottom:8px;">
               <h3 style="margin:0;">人员列表</h3>
               <select id="userProjectFilter" style="width:auto;margin-left:auto;padding:2px 4px;font-size:12px;height:auto;"><option value="">全部项目</option></select>
             </div>
@@ -2315,14 +2331,14 @@
         </div>
         <div class="subtab-panel hidden" data-section="logs" data-subtab="list">
           <div class="card">
-            <div style="display:flex;align-items:center;gap:8px;margin-bottom:8px;">
+            <div style="display:flex;align-items:center;gap:8px;flex-wrap:wrap;margin-bottom:8px;">
               <h3 style="margin:0;">日志列表</h3>
               <div class="toolbar" data-scope-area="logs" style="gap:4px;">
                 <button class="secondary" data-scope="mine" type="button" style="font-size:12px;padding:4px 10px;">只看我的</button>
                 <button class="secondary" data-scope="project" type="button" style="font-size:12px;padding:4px 10px;">项目全部</button>
               </div>
-              <label style="font-size:12px;display:flex;align-items:center;gap:4px;margin-left:auto;">项目<select id="logFilterProject" style="width:auto;padding:2px 4px;font-size:12px;height:auto;"><option value="">全部项目</option></select></label>
-              <label style="font-size:12px;display:flex;align-items:center;gap:4px;">人员<select id="logFilterUser" style="width:auto;padding:2px 4px;font-size:12px;height:auto;"><option value="">全部人员</option></select></label>
+              <label style="font-size:12px;display:flex;align-items:center;gap:4px;margin-left:auto;">项目<select id="logFilterProject" style="width:auto;max-width:160px;padding:2px 4px;font-size:12px;height:auto;"><option value="">全部项目</option></select></label>
+              <label style="font-size:12px;display:flex;align-items:center;gap:4px;">人员<select id="logFilterUser" style="width:auto;max-width:160px;padding:2px 4px;font-size:12px;height:auto;"><option value="">全部人员</option></select></label>
               <button class="secondary" id="logExportBtn" type="button" style="font-size:12px;padding:4px 10px;">导出选中</button>
             </div>
             <div class="table-wrap">
@@ -2369,10 +2385,10 @@
         </div>
         <div class="subtab-panel hidden" data-section="kb" data-subtab="list">
           <div class="card">
-            <div style="display:flex;align-items:center;gap:8px;margin-bottom:12px;">
+            <div style="display:flex;align-items:center;gap:8px;flex-wrap:wrap;margin-bottom:12px;">
               <h3 style="margin:0;">知识列表</h3>
-              <label style="font-size:12px;display:flex;align-items:center;gap:4px;margin-left:auto;">项目<select id="kbFilterProject" style="width:auto;padding:2px 4px;font-size:12px;height:auto;"><option value="">全部项目</option></select></label>
-              <label style="font-size:12px;display:flex;align-items:center;gap:4px;">人员<select id="kbFilterUser" style="width:auto;padding:2px 4px;font-size:12px;height:auto;"><option value="">全部人员</option></select></label>
+              <label style="font-size:12px;display:flex;align-items:center;gap:4px;margin-left:auto;">项目<select id="kbFilterProject" style="width:auto;max-width:160px;padding:2px 4px;font-size:12px;height:auto;"><option value="">全部项目</option></select></label>
+              <label style="font-size:12px;display:flex;align-items:center;gap:4px;">人员<select id="kbFilterUser" style="width:auto;max-width:160px;padding:2px 4px;font-size:12px;height:auto;"><option value="">全部人员</option></select></label>
               <button class="secondary" id="kbExportBtn" type="button" style="font-size:12px;padding:4px 10px;">导出选中</button>
               <input id="kbKeyword" placeholder="输入关键字搜索" style="width:150px;font-size:12px;padding:2px 4px;margin-left:20px;" />
               <button class="secondary" id="kbSearchBtn" type="button" style="font-size:12px;padding:4px 10px;">搜索</button>
@@ -2983,7 +2999,7 @@
             <div style="display:flex;align-items:center;gap:8px;margin-bottom:8px;flex-wrap:wrap;">
               <h3 style="margin:0;">资料列表</h3>
               <select id="documentProjectFilter" style="width:auto;padding:2px 4px;font-size:12px;height:auto;margin-left:auto;"><option value="">全部项目</option></select>
-              <select id="documentTypeFilter" style="width:auto;padding:2px 4px;font-size:12px;height:auto;"><option value="">全部类型</option><option value="device">设备管理信息</option><option value="topology">网络拓扑图</option><option value="layout">设备位置布局图</option><option value="proposal">项目方案</option><option value="config">配置文档</option><option value="contract">项目合同</option><option value="acceptance">项目验收报告</option></select>
+              <select id="documentTypeFilter" style="width:auto;max-width:160px;padding:2px 4px;font-size:12px;height:auto;"><option value="">全部类型</option><option value="device">设备管理信息</option><option value="topology">网络拓扑图</option><option value="layout">设备位置布局图</option><option value="proposal">项目方案</option><option value="config">配置文档</option><option value="contract">项目合同</option><option value="acceptance">项目验收报告</option></select>
               <input id="documentSearch" placeholder="搜索名称" style="width:160px;padding:4px 8px;font-size:12px;height:auto;margin-left:8px;" />
             </div>
             <div class="table-wrap"><table><thead><tr><th>资料名称</th><th>资料类型</th><th>关联项目</th><th>品牌|规格型号</th><th>保修剩余时间</th><th>创建时间</th><th>操作</th></tr></thead><tbody id="documentTable"></tbody></table></div>
@@ -3422,7 +3438,7 @@
                   <div class="muted" style="margin-bottom:8px;">当前证书状态</div>
                   <div id="httpsCertificateStatus">未上传证书</div>
                 </div>
-                <div class="grid" style="grid-template-columns:minmax(0,1fr) minmax(0,1fr) max-content; gap:14px; align-items:end;">
+                <div class="grid https-cert-row">
                   <label>
                     <span>证书文件（PEM/CRT）</span>
                     <input id="httpsCertFile" type="file" accept=".pem,.crt,.cer" />
