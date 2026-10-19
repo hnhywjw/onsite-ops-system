@@ -109,16 +109,24 @@ docker compose --env-file .env.production -f docker-compose.prod.yml up -d --bui
 
 ## 版本
 
-当前版本：`1.0.20`
+当前版本：`1.0.21`
 
 ### 软件包下载
 
-最新版本：**[v1.0.20](https://github.com/hnhywjw/onsite-ops-system/releases/tag/v1.0.20)**
+最新版本：**[v1.0.21](https://github.com/hnhywjw/onsite-ops-system/releases/tag/v1.0.21)**
 
-- 完整安装包 `onsite-ops-system-v1.0.20-production.tar.gz`
-- 离线升级包 `onsite-ops-upgrade-v1.0.20.tar.gz`
+- 完整安装包 `onsite-ops-system-v1.0.21-production.tar.gz`
+- 离线升级包 `onsite-ops-upgrade-v1.0.21.tar.gz`
 - SHA256 校验文件
 - 部署说明见仓库 `PRODUCTION_DEPLOY.md`
+
+### v1.0.21 更新说明
+
+功能与修复：
+- 读请求改用内存权威快照，MySQL 短暂不可用期间页面与查询继续可用，写操作返回明确的 503 而不是整站失败
+- 连接池增加连接超时、TCP 保活与空闲连接回收；数据库不可达时快速失败并进入短暂退避，恢复后自动重连
+- 巡检调度、资产监控、流量监控、自动备份与中断任务复原在存储不可用时自动退避重试，合并重复日志避免刷屏
+- 关闭流程为剩余长连接设置宽限期，避免升级重启被慢连接拖住
 
 ### v1.0.20 更新说明
 

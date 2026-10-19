@@ -193,6 +193,10 @@ const trustedProxyEntries = String(process.env.TRUSTED_PROXY_IPS || '')
   .filter(Boolean);
 let mysqlPool = null;
 let mysqlReadyPromise = null;
+let mysqlUnavailableUntil = 0;
+let mysqlAppStateMigrated = false;
+let mysqlReadyFailures = 0;
+let shuttingDown = false;
 let httpsServer = null;
 let httpsServerMutex = Promise.resolve();
 let httpsServerStatus = {
@@ -4123,53 +4127,153 @@ function clearDirectoryContents(dirPath) {
   }
 }
 
+// 连接级故障才值得立即重试；语义错误（约束冲突、SQL 写错）重试没有意义。
+const transientStorageErrorCodes = new Set([
+  'ECONNREFUSED', 'ECONNRESET', 'ETIMEDOUT', 'EPIPE', 'ENOTFOUND', 'EHOSTUNREACH', 'EAI_AGAIN',
+  'PROTOCOL_CONNECTION_LOST', 'PROTOCOL_ENQUEUE_AFTER_FATAL_ERROR', 'ER_CON_COUNT_ERROR',
+  'ER_LOCK_WAIT_TIMEOUT', 'ER_SERVER_SHUTDOWN'
+]);
+
+function isTransientStorageError(error) {
+  if (!error) return false;
+  if (error.code === 'STORAGE_BACKOFF' || error.code === 'STORAGE_UNAVAILABLE') return true;
+  if (transientStorageErrorCodes.has(String(error.code || ''))) return true;
+  return /ECONNREFUSED|ECONNRESET|ETIMEDOUT|Connection lost|Server shutdown in progress|Cannot enqueue/i
+    .test(String(error.message || ''));
+}
+
+// 单条连接失效可以立刻重试；数据库整体不可达则直接失败，让调用方走退避与降级。
+function isRetryableInPlace(error) {
+  return /PROTOCOL_CONNECTION_LOST|ECONNRESET|EPIPE|Cannot enqueue|Connection lost/i
+    .test(`${error && error.code || ''} ${error && error.message || ''}`);
+}
+
+// 并发请求可能刚好在别的请求重建连接池的窗口内访问；此时按连接级故障处理，走重连而非 500。
+function requireMySqlPool() {
+  if (!mysqlPool) {
+    const error = new Error('MySQL 连接池尚未就绪');
+    error.code = 'PROTOCOL_CONNECTION_LOST';
+    throw error;
+  }
+  return mysqlPool;
+}
+
+function sleep(ms) {
+  return new Promise(resolve => setTimeout(resolve, ms));
+}
+
+// 有些故障表现为「TCP 已连上但不再响应」，此时连接超时不会生效，需要请求级兜底。
+function withTimeout(promise, ms, message) {
+  let timer;
+  const timeout = new Promise((_, reject) => {
+    timer = setTimeout(() => {
+      const error = new Error(message);
+      error.code = 'ETIMEDOUT';
+      reject(error);
+    }, ms);
+    timer.unref?.();
+  });
+  return Promise.race([promise, timeout]).finally(() => clearTimeout(timer));
+}
+
+// 数据库短暂不可用时，后台任务每个周期都会失败；合并日志避免刷屏误导运维。
+const storageFailureLogState = { lastAt: 0, suppressed: 0 };
+function logStorageFailure(context, error) {
+  if (!isTransientStorageError(error)) {
+    console.error(`${context}: ${error.message}`);
+    return;
+  }
+  const nowTs = Date.now();
+  if (nowTs - storageFailureLogState.lastAt < 60000) {
+    storageFailureLogState.suppressed += 1;
+    return;
+  }
+  const suppressed = storageFailureLogState.suppressed;
+  storageFailureLogState.lastAt = nowTs;
+  storageFailureLogState.suppressed = 0;
+  const suffix = suppressed ? `（已合并 ${suppressed} 条同类日志）` : '';
+  console.warn(`${context}: 数据存储暂时不可用（${error.message}），将在后续周期自动重试${suffix}`);
+}
+
+const mysqlPoolOptions = {
+  host: dbConfig.host,
+  port: dbConfig.port,
+  user: dbConfig.user,
+  password: dbConfig.password,
+  database: dbConfig.database,
+  waitForConnections: true,
+  connectionLimit: 10,
+  queueLimit: 0,
+  // 数据库不可达时默认会等满 10 秒，期间请求一直挂起；5 秒内失败交给上层降级。
+  connectTimeout: 5000,
+  // MySQL 或中间网关会清理长时间空闲连接，保活可避免第一次请求必定踩到断连。
+  enableKeepAlive: true,
+  keepAliveInitialDelay: 10000,
+  maxIdle: 10,
+  idleTimeout: 60000
+};
+
 async function ensureMySqlReady() {
-  if (!mysqlReadyPromise) {
-    mysqlReadyPromise = (async () => {
-      const bootstrapPool = mysql.createPool({
-        host: dbConfig.host,
-        port: dbConfig.port,
-        user: dbConfig.user,
-        password: dbConfig.password,
-        waitForConnections: true,
-        connectionLimit: 10,
-        queueLimit: 0
-      });
+  if (mysqlReadyPromise) return mysqlReadyPromise;
+  // 失败后短时间内直接拒绝，避免数据库宕机时每个请求都排队等 connectTimeout。
+  const backoffMs = mysqlUnavailableUntil - Date.now();
+  if (backoffMs > 0) {
+    const error = new Error(`数据存储暂时不可用，${Math.ceil(backoffMs / 1000)} 秒后重试`);
+    error.code = 'STORAGE_BACKOFF';
+    throw error;
+  }
+  const promise = (async () => {
+    // 建库阶段目标库可能还不存在，连接必须不带 database。
+    const bootstrapPool = mysql.createPool({ ...mysqlPoolOptions, database: undefined });
+    try {
       await bootstrapPool.query(`CREATE DATABASE IF NOT EXISTS \`${dbConfig.database}\` CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci`);
-      await bootstrapPool.end();
-      mysqlPool = mysql.createPool({
-        host: dbConfig.host,
-        port: dbConfig.port,
-        user: dbConfig.user,
-        password: dbConfig.password,
-        database: dbConfig.database,
-        waitForConnections: true,
-        connectionLimit: 10,
-        queueLimit: 0,
-        charset: 'utf8mb4'
-      });
+    } finally {
+      await bootstrapPool.end().catch(() => {});
+    }
+    mysqlPool = mysql.createPool({ ...mysqlPoolOptions, charset: 'utf8mb4' });
+    await mysqlPool.query(`
+      CREATE TABLE IF NOT EXISTS app_state (
+        state_key VARCHAR(64) PRIMARY KEY,
+        state_json LONGTEXT NOT NULL,
+        updated_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP
+      ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci
+    `);
+    for (const key of dbCollectionKeys) {
+      const table = collectionTableName(key);
       await mysqlPool.query(`
-        CREATE TABLE IF NOT EXISTS app_state (
-          state_key VARCHAR(64) PRIMARY KEY,
-          state_json LONGTEXT NOT NULL,
-          updated_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP
+        CREATE TABLE IF NOT EXISTS \`${table}\` (
+          id VARCHAR(191) NOT NULL,
+          payload LONGTEXT NOT NULL,
+          batch_id BIGINT NOT NULL DEFAULT 0,
+          updated_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+          PRIMARY KEY (id)
         ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci
       `);
-      for (const key of dbCollectionKeys) {
-        const table = collectionTableName(key);
-        await mysqlPool.query(`
-          CREATE TABLE IF NOT EXISTS \`${table}\` (
-            id VARCHAR(191) NOT NULL,
-            payload LONGTEXT NOT NULL,
-            batch_id BIGINT NOT NULL DEFAULT 0,
-            updated_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
-            PRIMARY KEY (id)
-          ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci
-        `);
-      }
-    })();
+    }
+    mysqlAppStateMigrated = false;
+    mysqlReadyFailures = 0;
+    mysqlUnavailableUntil = 0;
+  })();
+  mysqlReadyPromise = promise;
+  try {
+    await promise;
+  } catch (error) {
+    // 共享同一个 promise 的调用方都会收到拒绝，只允许最先到达的一方回收连接池，
+    // 否则可能误关其它请求随后刚重建的新池。
+    if (mysqlReadyPromise === promise) {
+      mysqlReadyPromise = null;
+      // 建表阶段失败时 mysqlPool 已创建但不可用，必须回收，否则下次重建会泄漏连接。
+      const failedPool = mysqlPool;
+      mysqlPool = null;
+      if (failedPool) failedPool.end().catch(() => {});
+      mysqlReadyFailures += 1;
+      // 指数退避，避免长时间宕机时每个写请求都反复等待连接超时。
+      const backoffMs = Math.min(30000, 3000 * 2 ** (mysqlReadyFailures - 1));
+      mysqlUnavailableUntil = Date.now() + backoffMs;
+    }
+    throw error;
   }
-  return mysqlReadyPromise;
+  return promise;
 }
 
 function readDbFromFile() {
@@ -4212,68 +4316,92 @@ function readDbInternalSync() {
 
 let mysqlResetMutex = Promise.resolve();
 
+function snapshotFromCache() {
+  const cached = cloneDbSnapshot(latestFileDbCache);
+  cached._seq = dbSequence;
+  cached._normalized = true;
+  // 读取时的状态引用；后续写入会替换缓存对象而非原地改写，因此可用于计算增量。
+  cached._base = latestFileDbCache;
+  return cached;
+}
+
+async function readDbOnce() {
+  // 已加载权威快照后，读请求直接走内存：MySQL 短暂故障期间查询与页面仍可用，
+  // 写操作会在 writeDb 明确失败并返回 503，避免一次存储抖动让整站不可用。
+  if (latestFileDbCache && !fileDbNeedsSyncToMySql) return snapshotFromCache();
+  await ensureMySqlReady();
+  await syncFileDbToMySqlIfNeeded();
+  // 迁移检查只在新连接池上做一次，否则每个读请求都要多跑一条 COUNT 查询。
+  if (!mysqlAppStateMigrated) {
+    await migrateAppStateToCollectionTablesIfNeeded();
+    mysqlAppStateMigrated = true;
+  }
+  if (latestFileDbCache) return snapshotFromCache();
+  const raw = await readCollectionsFromMySql();
+  const hasCollectionData = dbCollectionKeys.some(key => {
+    const value = raw[key];
+    return Array.isArray(value) ? value.length > 0 : Boolean(value && Object.keys(value).length);
+  });
+  if (!hasCollectionData) {
+    const initial = readDbFromFile();
+    const initialBase = cloneDbSnapshot(initial);
+    await writeDb(initial, { silent: true });
+    fileDbNeedsSyncToMySql = false;
+    initial._seq = dbSequence;
+    initial._normalized = true;
+    initial._base = initialBase;
+    return initial;
+  }
+  const normalized = normalizeDb(raw);
+  rememberLiveDb(normalized);
+  const snapshot = cloneDbSnapshot(normalized);
+  snapshot._seq = dbSequence;
+  snapshot._normalized = true;
+  snapshot._base = cloneDbSnapshot(normalized);
+  return snapshot;
+}
+
 async function readDb() {
   try {
-    await ensureMySqlReady();
-    await syncFileDbToMySqlIfNeeded();
-    await migrateAppStateToCollectionTablesIfNeeded();
-    if (latestFileDbCache) {
-      const cached = cloneDbSnapshot(latestFileDbCache);
-      cached._seq = dbSequence;
-      cached._normalized = true;
-      // 读取时的状态引用；后续写入会替换缓存对象而非原地改写，因此可用于计算增量。
-      cached._base = latestFileDbCache;
-      return cached;
-    }
-    const raw = await readCollectionsFromMySql();
-    const hasCollectionData = dbCollectionKeys.some(key => {
-      const value = raw[key];
-      return Array.isArray(value) ? value.length > 0 : Boolean(value && Object.keys(value).length);
-    });
-    if (!hasCollectionData) {
-      const initial = readDbFromFile();
-      const initialBase = cloneDbSnapshot(initial);
-      await writeDb(initial, { silent: true });
-      fileDbNeedsSyncToMySql = false;
-      initial._seq = dbSequence;
-      initial._normalized = true;
-      initial._base = initialBase;
-      return initial;
-    }
-    const normalized = normalizeDb(raw);
-    rememberLiveDb(normalized);
-    const snapshot = cloneDbSnapshot(normalized);
-    snapshot._seq = dbSequence;
-    snapshot._normalized = true;
-    snapshot._base = cloneDbSnapshot(normalized);
-    return snapshot;
+    return await readDbOnce();
   } catch (error) {
-    await resetMySqlConnection();
+    // 只有连接级故障才回收连接池；语义错误保留现有连接，避免无谓重建。
+    const failedPool = isTransientStorageError(error) ? mysqlPool : null;
+    if (failedPool) await resetMySqlConnection(failedPool);
     if (allowFileDbFallback) {
       const fallback = readDbFromFile();
       rememberLiveDb(fallback);
+      // 文件快照被当作权威数据使用，数据库恢复后必须回写，否则后续读取会一直停留在旧快照。
+      fileDbNeedsSyncToMySql = true;
       const fallbackBase = cloneDbSnapshot(fallback);
       fallback._seq = dbSequence;
       fallback._normalized = true;
       fallback._base = fallbackBase;
       return fallback;
     }
-    throw error;
+    // 已进入退避窗口时直接失败，避免重试把 5 秒连接超时再叠加一次。
+    if (error.code === 'STORAGE_BACKOFF' || !isRetryableInPlace(error)) throw error;
+    return await readDbOnce();
   }
 }
 
-async function resetMySqlConnection() {
+async function resetMySqlConnection(expectedPool = null) {
   let release;
   const lock = new Promise(resolve => { release = resolve; });
   const previous = mysqlResetMutex;
   mysqlResetMutex = lock;
   await previous;
   try {
-    if (mysqlPool) {
-      try { await mysqlPool.end(); } catch (_) {}
-    }
-    mysqlReadyPromise = null;
+    // 并发失败时只允许回收真正出错的那一个连接池，避免把其它请求刚重建的池一起关掉。
+    if (expectedPool && mysqlPool && mysqlPool !== expectedPool) return;
+    const pool = mysqlPool;
     mysqlPool = null;
+    mysqlReadyPromise = null;
+    mysqlAppStateMigrated = false;
+    if (pool) {
+      // end() 在数据库无响应时可能长时间不回调，回收本身不能阻塞请求。
+      await Promise.race([pool.end().catch(() => {}), sleep(3000)]);
+    }
   } finally {
     release();
   }
@@ -4314,7 +4442,7 @@ async function writeCollectionRows(connection, key, value) {
 
 async function readCollectionFromMySql(key) {
   const table = collectionTableName(key);
-  const [rows] = await mysqlPool.query(`SELECT id, payload FROM \`${table}\``);
+  const [rows] = await requireMySqlPool().query(`SELECT id, payload FROM \`${table}\``);
   if (isObjectCollection(key)) {
     const root = rows.find(row => row.id === OBJECT_ROOT_ID);
     return root ? parseJsonPayload(root.payload, {}) : {};
@@ -4334,10 +4462,11 @@ async function readCollectionsFromMySql() {
 }
 
 async function migrateAppStateToCollectionTablesIfNeeded() {
+  const pool = requireMySqlPool();
   const usersTable = collectionTableName('users');
-  const [countRows] = await mysqlPool.query(`SELECT COUNT(*) AS c FROM \`${usersTable}\``);
+  const [countRows] = await pool.query(`SELECT COUNT(*) AS c FROM \`${usersTable}\``);
   if (Number(countRows[0]?.c || 0) > 0) return;
-  const [stateRows] = await mysqlPool.query('SELECT state_key, state_json FROM app_state');
+  const [stateRows] = await pool.query('SELECT state_key, state_json FROM app_state');
   if (!stateRows.length) return;
   const raw = {};
   for (const row of stateRows) {
@@ -4348,7 +4477,7 @@ async function migrateAppStateToCollectionTablesIfNeeded() {
 }
 
 async function writeNormalizedDbToMySql(normalized, keys = dbCollectionKeys) {
-  const connection = await mysqlPool.getConnection();
+  const connection = await requireMySqlPool().getConnection();
   try {
     await connection.beginTransaction();
     const targetKeys = keys.length ? keys : dbCollectionKeys;
@@ -4610,8 +4739,10 @@ async function writeDb(db, options = {}) {
     dbSequence++;
     writeTarget._seq = dbSequence;
     rememberLiveDb(normalized);
+    let activePool = null;
     try {
       await ensureMySqlReady();
+      activePool = mysqlPool;
       await syncFileDbToMySqlIfNeeded();
       if (shouldInjectDbWriteFailure()) {
         throw new Error('injected database write failure (FORCE_DB_WRITE_FAILURE_FILE)');
@@ -4623,7 +4754,8 @@ async function writeDb(db, options = {}) {
       writeDbToFile(normalized);
       fileDbNeedsSyncToMySql = false;
     } catch (error) {
-      await resetMySqlConnection();
+      // 语义错误（如 SQL 约束）保留连接池；只有实际用到的池发生连接级故障才需要重建。
+      if (activePool && isTransientStorageError(error)) await resetMySqlConnection(activePool);
       if (allowFileDbFallback) {
         writeDbToFile(normalized);
         fileDbNeedsSyncToMySql = true;
@@ -4664,6 +4796,7 @@ function parseMultipartBoundary(contentType) {
 }
 
 async function runAiInspectionScheduler() {
+  if (shuttingDown) return;
   if (aiInspectionSchedulerRunning) return;
   aiInspectionSchedulerRunning = true;
   try {
@@ -4677,7 +4810,7 @@ async function runAiInspectionScheduler() {
       await writeDb(db);
     }
   } catch (error) {
-    console.error(`AI inspection scheduler failed: ${error.message}`);
+    logStorageFailure('AI inspection scheduler failed', error);
   } finally {
     aiInspectionSchedulerRunning = false;
   }
@@ -4688,9 +4821,9 @@ let aiInspectionSchedulerRunning = false;
 
 // 进程在任务执行中途被中断时，状态会永久停留在「执行中」并阻断后续调度；启动时统一复位一次。
 let interruptedRunsRecovered = false;
+let interruptedRunsRetryTimer = null;
 async function recoverInterruptedRunsOnce() {
   if (interruptedRunsRecovered) return;
-  interruptedRunsRecovered = true;
   try {
     const db = await readDb();
     let changed = false;
@@ -4707,8 +4840,18 @@ async function recoverInterruptedRunsOnce() {
       }
     }
     if (changed) await writeDb(db);
+    interruptedRunsRecovered = true;
   } catch (error) {
-    console.error(`Interrupted run recovery failed: ${error.message}`);
+    logStorageFailure('Interrupted run recovery failed', error);
+    // 启动瞬间数据库可能还没就绪，此时不能永久放弃复原，否则任务会一直卡在「执行中」。
+    if (isTransientStorageError(error) && !interruptedRunsRetryTimer) {
+      const delay = Math.max(5000, (mysqlUnavailableUntil || 0) - Date.now());
+      interruptedRunsRetryTimer = setTimeout(() => {
+        interruptedRunsRetryTimer = null;
+        recoverInterruptedRunsOnce().catch(() => {});
+      }, delay);
+      interruptedRunsRetryTimer.unref?.();
+    }
   }
 }
 
@@ -6078,12 +6221,14 @@ function getSystemReadiness() {
 
 async function getSystemReadinessAsync() {
   const readiness = getSystemReadiness();
+  let pool = null;
   try {
     await ensureMySqlReady();
-    await mysqlPool.query('SELECT 1');
+    pool = requireMySqlPool();
+    await withTimeout(pool.query('SELECT 1'), 5000, 'MySQL 健康检查超时');
     readiness.checks.push({ name: 'mysql', ok: true, detail: `${dbConfig.user}@${dbConfig.host}:${dbConfig.port}/${dbConfig.database}` });
   } catch (error) {
-    await resetMySqlConnection();
+    if (pool && isTransientStorageError(error)) await resetMySqlConnection(pool);
     if (allowFileDbFallback) {
       readiness.checks.push({ name: 'mysql', ok: true, detail: '文件存储模式（内置数据引擎）' });
     } else {
@@ -8914,7 +9059,7 @@ const requestHandler = async (req, res) => {
     } catch (error) {
       // 数据库故障时页面仍应能打开，否则外部只能看到整站 500，无法判断是登录问题还是存储问题。
       const staticRequest = (req.method === 'GET' || req.method === 'HEAD') && !pathname.startsWith('/api/');
-      console.error(`[storage] 数据库不可用，${staticRequest ? '降级下发静态资源' : '拒绝接口请求'}: ${error.message}`);
+      logStorageFailure(`[storage] 数据库不可用，${staticRequest ? '降级下发静态资源' : '拒绝接口请求'}`, error);
       if (staticRequest) return await serveStatic(req, res, pathname, null);
       return json(res, 503, { message: '数据存储暂时不可用，请稍后重试或联系管理员' }, { 'Retry-After': '30' });
     }
@@ -14275,6 +14420,12 @@ const requestHandler = async (req, res) => {
       if (!res.writableEnded) res.end();
       return;
     }
+    // 存储不可用时给出 503 与重试间隔，让反向代理和前端能区分「临时故障」与真正的 500。
+    if (isTransientStorageError(error)) {
+      const retryAfter = Math.max(1, Math.ceil(((mysqlUnavailableUntil || 0) - Date.now()) / 1000));
+      res.setHeader('Retry-After', String(retryAfter));
+      return json(res, 503, { message: '数据存储暂时不可用，请稍后重试' });
+    }
     const status = Number(error.status) || 500;
     return json(res, status, { message: status < 500 ? error.message : '服务器内部错误' });
   }
@@ -14488,10 +14639,10 @@ async function initializeRuntimeServices() {
 }
 
 initializeRuntimeServices().catch(error => {
-  console.error(`Runtime services initialization failed: ${error.message}`);
+  logStorageFailure('Runtime services initialization failed', error);
 });
 recoverInterruptedRunsOnce().catch(error => {
-  console.error(`Interrupted run recovery failed: ${error.message}`);
+  logStorageFailure('Interrupted run recovery failed', error);
 });
 runAiInspectionScheduler();
 const schedulerIntervalId = setInterval(runAiInspectionScheduler, maintenanceIntervalMs);
@@ -14736,6 +14887,7 @@ async function notifyMonitorChange(asset, prevStatus, newStatus) {
 
 let assetMonitorSchedulerRunning = false;
 async function runAssetMonitorScheduler() {
+  if (shuttingDown) return;
   // 单轮探测可能超过调度间隔，必须防止重叠执行导致重复告警与资源翻倍。
   if (assetMonitorSchedulerRunning) return;
   assetMonitorSchedulerRunning = true;
@@ -14761,7 +14913,7 @@ async function runAssetMonitorScheduler() {
       await writeDb(stateDb, { replaceCollections: ['runtimeState'], silent: true });
     } catch (_) {}
   } catch (error) {
-    console.warn('Asset monitor scheduler error:', error.message);
+    logStorageFailure('Asset monitor scheduler error', error);
   } finally {
     assetMonitorSchedulerRunning = false;
   }
@@ -14889,6 +15041,7 @@ async function updateLinkPortStatuses() {
 
 let trafficMonitorSchedulerRunning = false;
 async function runTrafficMonitorScheduler() {
+  if (shuttingDown) return;
   if (trafficMonitorSchedulerRunning) return;
   trafficMonitorSchedulerRunning = true;
   try {
@@ -14951,7 +15104,7 @@ async function runTrafficMonitorScheduler() {
       broadcastTrafficUpdate(pid);
     }
   } catch (e) {
-    console.warn('Traffic monitor scheduler error:', e.message);
+    logStorageFailure('Traffic monitor scheduler error', e);
   } finally {
     trafficMonitorSchedulerRunning = false;
   }
@@ -14961,6 +15114,7 @@ const trafficMonitorIntervalId = setInterval(runTrafficMonitorScheduler, 30000);
 setTimeout(() => runTrafficMonitorScheduler(), 15000);
 
 async function runAutoBackup() {
+  if (shuttingDown) return;
   try {
     // 通过 readDb() 读取权威快照；readDbInternalSync() 在 MySQL 加载完成前只能拿到本地文件，
     // 启动时直接调用会把陈旧文件内容写入自动备份。
@@ -14976,13 +15130,21 @@ async function runAutoBackup() {
     // （默认 180 天）保留，超期在可恢复区与归档区一并清理。
     cleanupExpiredBackupFiles();
   } catch (e) {
-    console.error('Auto backup failed:', e.message);
+    logStorageFailure('Auto backup failed', e);
+    // 自动备份每天只跑一次，启动时数据库未就绪不能等 24 小时，需尽快补跑。
+    if (isTransientStorageError(e) && !autoBackupRetryTimer) {
+      autoBackupRetryTimer = setTimeout(() => {
+        autoBackupRetryTimer = null;
+        runAutoBackup().catch(() => {});
+      }, 60000);
+      autoBackupRetryTimer.unref?.();
+    }
   }
 }
-runAutoBackup().catch(error => console.error('Auto backup failed:', error.message));
+let autoBackupRetryTimer = null;
+runAutoBackup().catch(error => logStorageFailure('Auto backup failed', error));
 const backupIntervalId = setInterval(runAutoBackup, 24 * 60 * 60 * 1000);
 
-let shuttingDown = false;
 function gracefulShutdown(signal, exitCode = 0) {
   if (shuttingDown) return;
   shuttingDown = true;
@@ -15009,6 +15171,10 @@ function gracefulShutdown(signal, exitCode = 0) {
       process.exit(exitCode);
     }
   });
+  // 保持长连接或慢请求不应拖住发布流程，宽限期后主动断开剩余连接。
+  setTimeout(() => {
+    if (typeof server.closeAllConnections === 'function') server.closeAllConnections();
+  }, 5000).unref();
   setTimeout(() => {
     console.error('Forced shutdown after timeout');
     process.exit(1);
