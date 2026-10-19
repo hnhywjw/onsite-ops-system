@@ -109,16 +109,24 @@ docker compose --env-file .env.production -f docker-compose.prod.yml up -d --bui
 
 ## 版本
 
-当前版本：`1.0.17`
+当前版本：`1.0.18`
 
 ### 软件包下载
 
-最新版本：**[v1.0.17](https://github.com/hnhywjw/onsite-ops-system/releases/tag/v1.0.17)**
+最新版本：**[v1.0.18](https://github.com/hnhywjw/onsite-ops-system/releases/tag/v1.0.18)**
 
-- 完整安装包 `onsite-ops-system-v1.0.17-production.tar.gz`
-- 离线升级包 `onsite-ops-upgrade-v1.0.17.tar.gz`
+- 完整安装包 `onsite-ops-system-v1.0.18-production.tar.gz`
+- 离线升级包 `onsite-ops-upgrade-v1.0.18.tar.gz`
 - SHA256 校验文件
 - 部署说明见仓库 `PRODUCTION_DEPLOY.md`
+
+### v1.0.18 更新说明
+
+功能与修复：
+- 修复升级时目标文件属主为 root 或只读导致 `EACCES: permission denied` 的问题，改为同目录临时文件加 rename 覆盖，只依赖目录写权限
+- 升级内容与磁盘一致时直接跳过，不再把「无需覆盖」误判为失败，并顺带纠正入口脚本可执行位
+- 关键文件（`server.js`、`package.json`、`public/`、`scripts/`）应用失败时保留 `data/upgrades/pending` 且不自动重启，避免半升级状态；非关键文件失败保留 pending 供下次启动重试
+- 容器入口脚本同步改为临时文件加 rename，并输出复制失败目标文件的属主与权限，便于排查
 
 ### v1.0.17 更新说明
 

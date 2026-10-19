@@ -13,38 +13,59 @@ if [ -f "$READY_FLAG" ] && [ -d "$PENDING_DIR" ]; then
   copy_file() {
     local src="$1"
     local dest="$2"
-    if [ -f "$src" ]; then
-      if cp "$src" "$dest"; then
-        echo "[upgrade] Copied $(basename "$src")"
-        return 0
-      else
-        echo "[upgrade] Failed to copy $(basename "$src")" >&2
-        return 1
-      fi
+    [ -f "$src" ] || return 1
+    if [ -f "$dest" ] && [ "$(sha256sum "$src" | awk '{print $1}')" = "$(sha256sum "$dest" | awk '{print $1}')" ]; then
+      echo "[upgrade] Unchanged $(basename "$src")"
+      return 0
     fi
+    local tmp="${dest}.upgrade.$$"
+    # 直接覆盖可能因目标文件属主为 root 而 EACCES，先写临时文件再 rename 只依赖目录写权限。
+    if cp "$src" "$tmp" 2>/dev/null && mv -f "$tmp" "$dest" 2>/dev/null; then
+      echo "[upgrade] Copied $(basename "$src")"
+      return 0
+    fi
+    rm -f "$tmp" 2>/dev/null
+    echo "[upgrade] Failed to copy $(basename "$src")" >&2
     return 1
+  }
+
+  copy_dir() {
+    local src="$1"
+    local dest="$2"
+    local name="$3"
+    local staged="${dest}.upgrade.$$"
+    local backup="${dest}.upgrade-old.$$"
+    rm -rf "$staged" 2>/dev/null
+    if ! cp -r "$src" "$staged"; then
+      rm -rf "$staged" 2>/dev/null
+      echo "[upgrade] Failed to copy $name/" >&2
+      return 1
+    fi
+    if [ -e "$dest" ] && ! mv "$dest" "$backup"; then
+      rm -rf "$staged" 2>/dev/null
+      echo "[upgrade] Failed to replace $name/" >&2
+      return 1
+    fi
+    if ! mv "$staged" "$dest"; then
+      [ -e "$backup" ] && mv "$backup" "$dest" 2>/dev/null
+      rm -rf "$staged" 2>/dev/null
+      echo "[upgrade] Failed to activate $name/" >&2
+      return 1
+    fi
+    rm -rf "$backup" 2>/dev/null
+    echo "[upgrade] Copied $name/"
+    return 0
   }
 
   copy_file "$PENDING_DIR/server.js" /app/server.js && FILES_COPIED=$((FILES_COPIED + 1))
   copy_file "$PENDING_DIR/package.json" /app/package.json && FILES_COPIED=$((FILES_COPIED + 1))
 
   if [ -d "$PENDING_DIR/public" ]; then
-    if cp -r "$PENDING_DIR/public" /app/public.new && rm -rf /app/public && mv /app/public.new /app/public; then
-      echo "[upgrade] Copied public/"
-      FILES_COPIED=$((FILES_COPIED + 1))
-    else
-      echo "[upgrade] Failed to copy public/" >&2
-      rm -rf /app/public.new 2>/dev/null
-    fi
+    copy_dir "$PENDING_DIR/public" /app/public public && FILES_COPIED=$((FILES_COPIED + 1))
   fi
 
   if [ -d "$PENDING_DIR/scripts" ]; then
-    if cp -r "$PENDING_DIR/scripts" /app/scripts.new && rm -rf /app/scripts && mv /app/scripts.new /app/scripts; then
-      echo "[upgrade] Copied scripts/"
-    else
-      echo "[upgrade] Failed to copy scripts/" >&2
-      rm -rf /app/scripts.new 2>/dev/null
-    fi
+    copy_dir "$PENDING_DIR/scripts" /app/scripts scripts
   fi
 
   copy_file "$PENDING_DIR/Dockerfile" /app/Dockerfile
@@ -52,6 +73,8 @@ if [ -f "$READY_FLAG" ] && [ -d "$PENDING_DIR" ]; then
   copy_file "$PENDING_DIR/docker-compose.prod.yml" /app/docker-compose.prod.yml
   copy_file "$PENDING_DIR/pptx-template.json" /app/pptx-template.json
   copy_file "$PENDING_DIR/docker-entrypoint.sh" /app/docker-entrypoint.sh
+  # 入口脚本可执行位丢失不会阻止启动（镜像用 sh 显式调用），但仍需尽量纠正。
+  [ -f /app/docker-entrypoint.sh ] && chmod 755 /app/docker-entrypoint.sh 2>/dev/null
 
   if [ -f "$PENDING_DIR/migrate.sh" ]; then
     if [ -f "$HASHES_FILE" ]; then

@@ -8604,6 +8604,8 @@ const upgradeApplyFiles = ['server.js', 'package.json', 'Dockerfile', 'docker-co
 const upgradeApplyDirs = ['public', 'scripts'];
 // 入口脚本必须以可执行位落地，否则容器下次启动会报 permission denied。
 const upgradeExecutableFiles = new Set(['docker-entrypoint.sh']);
+// 关键文件决定升级后能否正常启动，任一失败都不重启，避免线上跑出「新前端 + 旧后端」的半升级状态。
+const upgradeCriticalEntries = new Set(['server.js', 'package.json', 'public', 'scripts']);
 
 function writeUpgradeSha256Sums(pendingDir) {
   const manifestPath = path.join(pendingDir, 'manifest.json');
@@ -8613,35 +8615,103 @@ function writeUpgradeSha256Sums(pendingDir) {
   fs.writeFileSync(path.join(pendingDir, 'SHA256SUMS'), lines.join('\n') + '\n');
 }
 
+function describeUpgradeTarget(target) {
+  try {
+    const stat = fs.statSync(target);
+    return `${target}（mode ${(stat.mode & 0o777).toString(8)}，uid ${stat.uid}，gid ${stat.gid}）`;
+  } catch (_) {
+    return target;
+  }
+}
+
+function fileContentEquals(left, right) {
+  try {
+    const leftStat = fs.statSync(left);
+    const rightStat = fs.statSync(right);
+    if (!rightStat.isFile() || leftStat.size !== rightStat.size) return false;
+    const digest = file => crypto.createHash('sha256').update(fs.readFileSync(file)).digest('hex');
+    return digest(left) === digest(right);
+  } catch (_) {
+    return false;
+  }
+}
+
+// 目标文件可能被 docker cp 或手工操作改成 root/只读，直接覆盖会 EACCES。
+// 先写同目录临时文件，再用 rename 覆盖：rename 只要求目录可写，并顺带把属主落回容器用户。
+function replaceFileFromStaged(src, dest, executable) {
+  const parent = path.dirname(dest);
+  const staged = path.join(parent, `.upgrade-${path.basename(dest)}-${process.pid}-${Date.now()}`);
+  try {
+    fs.copyFileSync(src, staged);
+    // copyFileSync 会沿用源文件权限，升级包内若是 0644 会覆盖镜像里的 0755。
+    if (executable) fs.chmodSync(staged, 0o755);
+    fs.renameSync(staged, dest);
+  } catch (error) {
+    try { fs.rmSync(staged, { force: true }); } catch (_) {}
+    error.message = `${error.message}（目标 ${describeUpgradeTarget(dest)}）`;
+    throw error;
+  }
+}
+
+// 目录同样用 rename 切换：先整体拷到临时目录，再原子替换，避免逐文件删除时被旧属主卡住。
+function replaceDirFromStaged(src, dest) {
+  const parent = path.dirname(dest);
+  const suffix = `${process.pid}-${Date.now()}`;
+  const staged = path.join(parent, `.upgrade-${path.basename(dest)}-${suffix}`);
+  const backup = path.join(parent, `.upgrade-old-${path.basename(dest)}-${suffix}`);
+  try {
+    fs.cpSync(src, staged, { recursive: true });
+    const existed = fs.existsSync(dest);
+    if (existed) fs.renameSync(dest, backup);
+    try {
+      fs.renameSync(staged, dest);
+    } catch (error) {
+      if (existed) {
+        try { fs.renameSync(backup, dest); } catch (_) {}
+      }
+      throw error;
+    }
+    if (existed) {
+      try { fs.rmSync(backup, { recursive: true, force: true }); } catch (_) {}
+    }
+  } catch (error) {
+    try { fs.rmSync(staged, { recursive: true, force: true }); } catch (_) {}
+    error.message = `${error.message}（目标 ${describeUpgradeTarget(dest)}）`;
+    throw error;
+  }
+}
+
 function applyPendingUpgradeFiles(pendingDir, appDir) {
   const applied = [];
+  const unchanged = [];
   const failed = [];
+  const attempt = (name, action) => {
+    try {
+      action();
+      applied.push(name);
+    } catch (error) {
+      failed.push({ name, message: error.message, critical: upgradeCriticalEntries.has(name) });
+    }
+  };
   for (const file of upgradeApplyFiles) {
     const src = path.join(pendingDir, file);
     if (!fs.existsSync(src) || !fs.statSync(src).isFile()) continue;
-    try {
-      const dest = path.join(appDir, file);
-      fs.copyFileSync(src, dest);
-      // copyFileSync 会沿用源文件权限，升级包内若是 0644 会覆盖镜像里的 0755。
-      if (upgradeExecutableFiles.has(file)) fs.chmodSync(dest, 0o755);
-      applied.push(file);
-    } catch (error) {
-      failed.push(`${file}: ${error.message}`);
+    const dest = path.join(appDir, file);
+    const executable = upgradeExecutableFiles.has(file);
+    if (fileContentEquals(src, dest)) {
+      // 内容一致时不再覆盖，但仍要纠正历史遗留的可执行位。
+      if (executable) attempt(file, () => fs.chmodSync(dest, 0o755));
+      else unchanged.push(file);
+      continue;
     }
+    attempt(file, () => replaceFileFromStaged(src, dest, executable));
   }
   for (const dir of upgradeApplyDirs) {
     const src = path.join(pendingDir, dir);
     if (!fs.existsSync(src) || !fs.statSync(src).isDirectory()) continue;
-    const dest = path.join(appDir, dir);
-    try {
-      fs.rmSync(dest, { recursive: true, force: true });
-      fs.cpSync(src, dest, { recursive: true });
-      applied.push(dir);
-    } catch (error) {
-      failed.push(`${dir}: ${error.message}`);
-    }
+    attempt(dir, () => replaceDirFromStaged(src, path.join(appDir, dir)));
   }
-  return { applied, failed };
+  return { applied, unchanged, failed };
 }
 
 function validateUpgradePackageIntegrity(pendingDir) {
@@ -14094,13 +14164,23 @@ const requestHandler = async (req, res) => {
           const pendingDir = path.join(dataDir, 'upgrades', 'pending');
           const readyFlag = path.join(dataDir, 'upgrades', 'UPGRADE_READY');
           const result = applyPendingUpgradeFiles(pendingDir, appDir);
-          if (result.failed.length) {
-            console.error(`[upgrade] 升级未完整应用: ${result.failed.join('; ')}`);
+          result.applied.forEach(entry => console.error(`[upgrade] Applied ${entry}`));
+          result.unchanged.forEach(entry => console.error(`[upgrade] Unchanged ${entry}`));
+          result.failed.forEach(entry => console.error(`[upgrade] 应用失败 ${entry.name}: ${entry.message}`));
+          // 关键文件缺失会让新前端配旧后端，属于半升级状态，宁可保留旧进程等人工处理。
+          const criticalFailures = result.failed.filter(entry => entry.critical);
+          if (criticalFailures.length) {
+            console.error(`[upgrade] 升级未完整应用: ${criticalFailures.map(entry => `${entry.name}: ${entry.message}`).join('; ')}`);
+            console.error('[upgrade] 升级包已保留在 data/upgrades/pending，修复上述文件权限后重启容器即可重试');
             return;
           }
-          result.applied.forEach(entry => console.error(`[upgrade] Applied ${entry}`));
-          fs.rmSync(pendingDir, { recursive: true, force: true });
-          try { fs.unlinkSync(readyFlag); } catch (_) {}
+          if (result.failed.length) {
+            // 非关键文件失败时保留 pending，入口脚本下次启动会再应用一次后归档。
+            console.error('[upgrade] 非关键文件未应用，已保留 pending 供下次启动重试');
+          } else {
+            fs.rmSync(pendingDir, { recursive: true, force: true });
+            try { fs.unlinkSync(readyFlag); } catch (_) {}
+          }
           console.error(`[upgrade] v${upgradeVersion} 升级完成，即将重启...`);
         } catch (e) {
           console.error(`[upgrade] 升级失败: ${e.message}`);
