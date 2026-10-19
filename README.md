@@ -109,16 +109,23 @@ docker compose --env-file .env.production -f docker-compose.prod.yml up -d --bui
 
 ## 版本
 
-当前版本：`1.0.18`
+当前版本：`1.0.19`
 
 ### 软件包下载
 
-最新版本：**[v1.0.18](https://github.com/hnhywjw/onsite-ops-system/releases/tag/v1.0.18)**
+最新版本：**[v1.0.19](https://github.com/hnhywjw/onsite-ops-system/releases/tag/v1.0.19)**
 
-- 完整安装包 `onsite-ops-system-v1.0.18-production.tar.gz`
-- 离线升级包 `onsite-ops-upgrade-v1.0.18.tar.gz`
+- 完整安装包 `onsite-ops-system-v1.0.19-production.tar.gz`
+- 离线升级包 `onsite-ops-upgrade-v1.0.19.tar.gz`
 - SHA256 校验文件
 - 部署说明见仓库 `PRODUCTION_DEPLOY.md`
+
+### v1.0.19 更新说明
+
+功能与修复：
+- 修复重启或升级后已启用动态令牌的账号被静默关闭的问题，用户归一化时保留动态令牌密钥、启用状态、启用时间、恢复码哈希与强制启用标记
+- 动态令牌密钥缺失时不再保留「已启用」状态，避免登录被直接拒绝而锁死账号
+- 补充导入与快照恢复链路的动态令牌字段保留回归用例，并校验人员列表不返回密钥与恢复码哈希
 
 ### v1.0.18 更新说明
 

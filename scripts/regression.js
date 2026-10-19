@@ -769,6 +769,18 @@ async function main() {
   const customerId = users.data.data.find(item => item.role === 'customer' && item.projectId === projectId)?.id || '';
   assert(engineerAccount?.username, '未找到可用的工程师测试账号');
 
+  // 导入/重启都会经过 normalizeDb，动态令牌字段若被白名单丢弃，已启用二步验证的账号会被静默关闭。
+  const twoFactorSnapshotUser = (snapshot.users || []).find(item => item.role === 'customer')
+    || (snapshot.users || []).find(item => item.username !== 'admin');
+  assert(twoFactorSnapshotUser?.id, '导入快照缺少可验证动态令牌保留的用户');
+  Object.assign(twoFactorSnapshotUser, {
+    twoFactorEnabled: true,
+    twoFactorEnabledAt: '2026-01-02T03:04:05.000Z',
+    twoFactorEnforced: true,
+    twoFactorSecret: 'regression-totp-secret-cipher',
+    twoFactorRecoveryCodeHashes: ['regression-recovery-hash-1', 'regression-recovery-hash-2']
+  });
+
   const importDenied = await request('/api/system/import', {
     method: 'POST',
     headers: { cookie, 'Content-Type': 'application/json' },
@@ -787,6 +799,14 @@ async function main() {
   assert(hasAuditLog(auditAfterImport.data.data, 'import', '导入系统数据'), '导入系统数据未写入操作日志');
   const sessionAfterImport = await request('/api/session', { headers: { cookie } });
   assert(sessionAfterImport.status === 200 && sessionAfterImport.data.user?.username === 'admin', '导入后当前会话未保留');
+  const usersAfterImport = await request('/api/users?all=1', { headers: { cookie } });
+  const twoFactorUserAfterImport = (usersAfterImport.data.data || []).find(item => item.id === twoFactorSnapshotUser.id);
+  assert(twoFactorUserAfterImport, '导入后未找到动态令牌测试用户');
+  assert(twoFactorUserAfterImport.twoFactorEnabled === true, '导入后动态令牌启用状态丢失');
+  assert(twoFactorUserAfterImport.twoFactorEnforced === true, '导入后强制启用动态令牌设置丢失');
+  assert(twoFactorUserAfterImport.twoFactorEnabledAt === '2026-01-02T03:04:05.000Z', '导入后动态令牌启用时间丢失');
+  assert(!Object.prototype.hasOwnProperty.call(twoFactorUserAfterImport, 'twoFactorSecret'), '人员列表不应返回动态令牌密钥');
+  assert(!Object.prototype.hasOwnProperty.call(twoFactorUserAfterImport, 'twoFactorRecoveryCodeHashes'), '人员列表不应返回恢复码哈希');
 
   const engineer = await login(engineerAccount.username, 'Engineer123!');
   assert(engineer.status === 200, '工程师登录失败');

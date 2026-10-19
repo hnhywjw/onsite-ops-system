@@ -3320,24 +3320,38 @@ function normalizeDb(raw = {}) {
     description: project.description || '',
     createdAt: project.createdAt || now()
   }));
-  const users = (raw.users || []).map(user => ({
-    id: user.id || id('user'),
-    username: user.username || '',
-    passwordHash: user.passwordHash || hash(crypto.randomUUID()),
-    role: allowedUserRoles.includes(user.role) ? user.role : 'engineer',
-    name: user.name || user.username || '',
-    phone: user.phone || '',
-    idCard: user.idCard || '',
-    email: user.email || '',
-    wechat: user.wechat || '',
-    projectId: user.projectId || '',
-    startDate: user.startDate || '',
-    endDate: user.endDate || '',
-    securityQuestion: user.securityQuestion || '',
-    securityAnswerHash: user.securityAnswerHash || '',
-    status: user.status || 'active',
-    createdAt: user.createdAt || now()
-  }));
+  const users = (raw.users || []).map(user => {
+    const twoFactorSecret = typeof user.twoFactorSecret === 'string' ? user.twoFactorSecret : '';
+    const twoFactorPendingSecret = typeof user.twoFactorPendingSecret === 'string' ? user.twoFactorPendingSecret : '';
+    return {
+      id: user.id || id('user'),
+      username: user.username || '',
+      passwordHash: user.passwordHash || hash(crypto.randomUUID()),
+      role: allowedUserRoles.includes(user.role) ? user.role : 'engineer',
+      name: user.name || user.username || '',
+      phone: user.phone || '',
+      idCard: user.idCard || '',
+      email: user.email || '',
+      wechat: user.wechat || '',
+      projectId: user.projectId || '',
+      startDate: user.startDate || '',
+      endDate: user.endDate || '',
+      securityQuestion: user.securityQuestion || '',
+      securityAnswerHash: user.securityAnswerHash || '',
+      status: user.status || 'active',
+      // 动态令牌配置必须跨重启保留，否则升级重启后所有已启用二步验证的账号会被静默关闭。
+      // secret 缺失时不能维持 enabled，否则登录会因无法解密而直接拒绝，等于把账号锁死。
+      twoFactorSecret,
+      twoFactorPendingSecret,
+      twoFactorRecoveryCodeHashes: Array.isArray(user.twoFactorRecoveryCodeHashes)
+        ? user.twoFactorRecoveryCodeHashes.filter(item => typeof item === 'string' && item)
+        : [],
+      twoFactorEnabled: Boolean(twoFactorSecret) && (user.twoFactorEnabled === true || user.twoFactorEnabled === 'true'),
+      twoFactorEnabledAt: user.twoFactorEnabledAt || '',
+      twoFactorEnforced: user.twoFactorEnforced === true || user.twoFactorEnforced === 'true',
+      createdAt: user.createdAt || now()
+    };
+  });
   const userProjectMap = new Map(users.map(user => [user.id, user.projectId || '']));
   const resolveInspectionExecutionCreatedBy = item => {
     const existing = String(item.createdBy || '').trim();
