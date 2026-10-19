@@ -109,16 +109,27 @@ docker compose --env-file .env.production -f docker-compose.prod.yml up -d --bui
 
 ## 版本
 
-当前版本：`1.0.22`
+当前版本：`1.0.23`
 
 ### 软件包下载
 
-最新版本：**[v1.0.22](https://github.com/hnhywjw/onsite-ops-system/releases/tag/v1.0.22)**
+最新版本：**[v1.0.23](https://github.com/hnhywjw/onsite-ops-system/releases/tag/v1.0.23)**
 
-- 完整安装包 `onsite-ops-system-v1.0.22-production.tar.gz`
-- 离线升级包 `onsite-ops-upgrade-v1.0.22.tar.gz`
+- 完整安装包 `onsite-ops-system-v1.0.23-production.tar.gz`
+- 离线升级包 `onsite-ops-upgrade-v1.0.23.tar.gz`
 - SHA256 校验文件
 - 部署说明见仓库 `PRODUCTION_DEPLOY.md`
+
+### v1.0.23 更新说明
+
+界面适配修复：
+- 手机与平板宽度下指标卡、看板卡片按可用宽度自动换列，数值不再被挤断
+- 各类录入表单在窄屏自动退化为单列，标签与输入框不再相互挤压
+- 仪表板趋势图在窄屏改为上下排列，图表可读性恢复
+- 人员、日志、知识库列表的工具行允许换行，项目与人员筛选下拉限制最大宽度，超长项目名不再撑破卡片
+- HTTPS 证书上传行、设备资料编辑弹窗字段网格在窄屏改为堆叠
+- 告警弹窗与全局错误提示条按视口宽度收缩，不再超出手机屏幕
+- 桌面端布局保持不变，仪表板指标仍为四列、表单仍为两列
 
 ### v1.0.22 更新说明
 
