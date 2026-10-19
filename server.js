@@ -8908,7 +8908,16 @@ const requestHandler = async (req, res) => {
       const readiness = await getSystemReadinessAsync();
       return json(res, readiness.ok ? 200 : 503, { ok: readiness.ok, checkedAt: readiness.checkedAt, version: readiness.version });
     }
-    const db = await readDb();
+    let db;
+    try {
+      db = await readDb();
+    } catch (error) {
+      // 数据库故障时页面仍应能打开，否则外部只能看到整站 500，无法判断是登录问题还是存储问题。
+      const staticRequest = (req.method === 'GET' || req.method === 'HEAD') && !pathname.startsWith('/api/');
+      console.error(`[storage] 数据库不可用，${staticRequest ? '降级下发静态资源' : '拒绝接口请求'}: ${error.message}`);
+      if (staticRequest) return await serveStatic(req, res, pathname, null);
+      return json(res, 503, { message: '数据存储暂时不可用，请稍后重试或联系管理员' }, { 'Retry-After': '30' });
+    }
     systemTimezoneOffsetMinutes = db.systemConfig?.timezoneOffset ?? 480;
     refreshMonitorTargetPolicy(db.systemConfig);
     if (!validateCsrf(req, res, db, pathname)) return;

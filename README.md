@@ -109,16 +109,22 @@ docker compose --env-file .env.production -f docker-compose.prod.yml up -d --bui
 
 ## 版本
 
-当前版本：`1.0.19`
+当前版本：`1.0.20`
 
 ### 软件包下载
 
-最新版本：**[v1.0.19](https://github.com/hnhywjw/onsite-ops-system/releases/tag/v1.0.19)**
+最新版本：**[v1.0.20](https://github.com/hnhywjw/onsite-ops-system/releases/tag/v1.0.20)**
 
-- 完整安装包 `onsite-ops-system-v1.0.19-production.tar.gz`
-- 离线升级包 `onsite-ops-upgrade-v1.0.19.tar.gz`
+- 完整安装包 `onsite-ops-system-v1.0.20-production.tar.gz`
+- 离线升级包 `onsite-ops-upgrade-v1.0.20.tar.gz`
 - SHA256 校验文件
 - 部署说明见仓库 `PRODUCTION_DEPLOY.md`
+
+### v1.0.20 更新说明
+
+功能与修复：
+- 数据库不可用时静态页面仍可正常打开，不再整站返回 500；接口改为返回 503 与明确提示，便于区分登录问题与存储故障
+- `/api/ready` 继续返回 503，容器健康检查能准确反映存储不可用状态
 
 ### v1.0.19 更新说明
 

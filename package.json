@@ -1,6 +1,6 @@
 {
   "name": "onsite-ops-system",
-  "version": "1.0.19",
+  "version": "1.0.20",
   "private": true,
   "scripts": {
     "start": "node server.js",
