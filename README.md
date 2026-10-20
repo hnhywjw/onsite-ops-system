@@ -109,16 +109,23 @@ docker compose --env-file .env.production -f docker-compose.prod.yml up -d --bui
 
 ## 版本
 
-当前版本：`1.0.23`
+当前版本：`1.0.24`
 
 ### 软件包下载
 
-最新版本：**[v1.0.23](https://github.com/hnhywjw/onsite-ops-system/releases/tag/v1.0.23)**
+最新版本：**[v1.0.24](https://github.com/hnhywjw/onsite-ops-system/releases/tag/v1.0.24)**
 
-- 完整安装包 `onsite-ops-system-v1.0.23-production.tar.gz`
-- 离线升级包 `onsite-ops-upgrade-v1.0.23.tar.gz`
+- 完整安装包 `onsite-ops-system-v1.0.24-production.tar.gz`
+- 离线升级包 `onsite-ops-upgrade-v1.0.24.tar.gz`
 - SHA256 校验文件
 - 部署说明见仓库 `PRODUCTION_DEPLOY.md`
+
+### v1.0.24 更新说明
+
+启动稳定性修复：
+- 容器启动时先探测 MySQL 端口，最多等待 `MYSQL_WAIT_TIMEOUT_SECONDS`（默认 60 秒）再启动应用
+- 宿主机或 Docker 守护进程重启导致容器组并行拉起时，不再出现启动瞬间接口连续 503
+- 等待超时后照常启动，由应用自身的重连与重试机制继续恢复，不会阻塞容器就绪
 
 ### v1.0.23 更新说明
 
