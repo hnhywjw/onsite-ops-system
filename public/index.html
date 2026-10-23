@@ -1680,6 +1680,7 @@
         <label>周期<select id="edInspPlanCycle"><option value="daily">每日</option><option value="weekly">每周</option><option value="monthly">每月</option><option value="quarterly">每季度</option></select></label>
         <label>下次巡检日<input id="edInspPlanNextDate" type="date" required /></label>
         <label class="full">负责人<select id="edInspPlanOwner"></select></label>
+        <label class="full">检查项模板<textarea id="edInspPlanChecklistTemplate" rows="4" placeholder="设备外观与指示灯&#10;系统资源使用率&#10;备份任务执行情况"></textarea></label>
       </div>
       <div id="inspectionPlanEditMessage" style="margin:8px 0;font-size:13px;"></div>
       <div class="btn-row">
@@ -1699,6 +1700,10 @@
         <label>执行人<select id="edInspExecExecutor"></select></label>
         <label>巡检结果<select id="edInspExecResult"><option value="正常">正常</option><option value="异常">异常</option></select></label>
         <label class="full">巡检项清单<textarea id="edInspExecChecklist" required></textarea></label>
+        <div class="full">
+          <span>逐项检查结果</span>
+          <div class="table-wrap"><table><thead><tr><th>检查项</th><th style="width:130px;">结果</th><th>备注</th></tr></thead><tbody id="edInspExecChecklistTable"><tr><td colspan="3">暂无检查项</td></tr></tbody></table></div>
+        </div>
         <label class="full">异常说明<textarea id="edInspExecIssue"></textarea></label>
         <label class="full">整改建议<textarea id="edInspExecSuggestion"></textarea></label>
         <label>下次巡检日<input id="edInspExecNextDate" type="date" /></label>
@@ -1849,6 +1854,40 @@
       <div class="btn-row">
         <button class="secondary" type="button" data-action="close-modal" data-modal="aiTaskEditModal">取消</button>
         <button class="primary" id="aiTaskEditSaveBtn" type="button">保存修改</button>
+      </div>
+    </div>
+  </div>
+
+  <div id="ticketActionModal" class="modal-overlay hidden">
+    <div class="modal-box" style="max-width:520px;">
+      <h3 id="ticketActionTitle">处理工单</h3>
+      <div class="grid-form" style="max-height:60vh; overflow-y:auto;">
+        <input id="edTicketActionId" type="hidden" />
+        <label class="full hidden" id="ticketActionTransferField"><span>转派处理人</span><select id="edTicketTransferAssignee"></select></label>
+        <label class="full hidden" id="ticketActionResolveField"><span>处理结论</span><textarea id="edTicketResolution" rows="4"></textarea></label>
+        <label class="full hidden" id="ticketActionConfirmField"><span>客户确认意见</span><textarea id="edTicketCustomerComment" rows="3"></textarea></label>
+      </div>
+      <div id="ticketActionMessage" style="margin:8px 0;font-size:13px;"></div>
+      <div class="btn-row">
+        <button class="secondary" type="button" data-action="close-modal" data-modal="ticketActionModal">取消</button>
+        <button class="primary" id="ticketActionSaveBtn" type="button">确认</button>
+      </div>
+    </div>
+  </div>
+
+  <div id="dutyHandoverModal" class="modal-overlay hidden">
+    <div class="modal-box" style="max-width:520px;">
+      <h3>值班交接</h3>
+      <div class="grid-form" style="max-height:60vh; overflow-y:auto;">
+        <input id="edDutyHandoverId" type="hidden" />
+        <label class="full"><span>交接内容</span><textarea id="edDutyHandoverContent" rows="4" required></textarea></label>
+        <label class="full"><span>遗留问题</span><textarea id="edDutyHandoverIssue" rows="3"></textarea></label>
+        <label class="full"><span>接班人</span><select id="edDutyReceivedBy"></select></label>
+      </div>
+      <div id="dutyHandoverMessage" style="margin:8px 0;font-size:13px;"></div>
+      <div class="btn-row">
+        <button class="secondary" type="button" data-action="close-modal" data-modal="dutyHandoverModal">取消</button>
+        <button class="primary" id="dutyHandoverSaveBtn" type="button">完成交接</button>
       </div>
     </div>
   </div>
@@ -2042,6 +2081,7 @@
         <button data-tab="users" data-admin-only="true"><span class="nav-icon"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M16 21v-2a4 4 0 0 0-4-4H7a4 4 0 0 0-4 4v2"></path><circle cx="9.5" cy="7" r="3"></circle><path d="M20 21v-2a4 4 0 0 0-3-3.87"></path><path d="M16 4.13a3 3 0 0 1 0 5.74"></path></svg></span><span class="nav-label">人员管理</span></button>
         <button data-tab="assets"><span class="nav-icon"><svg viewBox="0 0 24 24" aria-hidden="true"><rect x="3" y="4" width="18" height="14" rx="2"></rect><path d="M8 20h8"></path><path d="M12 18v2"></path></svg></span><span class="nav-label">资产管理</span></button>
         <button data-tab="logs" data-customer-hidden="true"><span class="nav-icon"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M8 6h13"></path><path d="M8 12h13"></path><path d="M8 18h13"></path><path d="M3 6h.01"></path><path d="M3 12h.01"></path><path d="M3 18h.01"></path></svg></span><span class="nav-label">运维日志</span></button>
+        <button data-tab="tickets"><span class="nav-icon"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 5h16v5a2 2 0 0 0 0 4v5H4v-5a2 2 0 0 0 0-4z"></path><path d="M9 9h6"></path><path d="M9 15h6"></path></svg></span><span class="nav-label">工单中心</span></button>
         <button data-tab="assetOps"><span class="nav-icon"><svg viewBox="0 0 24 24" aria-hidden="true"><rect x="3" y="4" width="18" height="6" rx="1"></rect><rect x="3" y="14" width="18" height="6" rx="1"></rect><path d="M7 7h.01"></path><path d="M7 17h.01"></path></svg></span><span class="nav-label">深化运维</span></button>
         <button data-tab="aiInspection"><span class="nav-icon"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 3l2.8 5.7 6.2.9-4.5 4.4 1.1 6.2L12 17.8 6.4 20.2l1.1-6.2L3 9.6l6.2-.9z"></path></svg></span><span class="nav-label">自动化巡检</span></button>
         <button data-tab="governance"><span class="nav-icon"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 3l7 4v5c0 5-3.5 8-7 9-3.5-1-7-4-7-9V7l7-4z"></path><path d="M9 12l2 2 4-4"></path></svg></span><span class="nav-label">审批管理</span></button>
@@ -2595,6 +2635,103 @@
         </div>
       </section>
 
+      <section class="tab-panel hidden" data-tab="tickets">
+        <div class="page-header">
+          <div>
+            <div class="title">工单中心</div>
+            <div class="subtitle">统一受理、派发、处理与客户确认，SLA 超时自动提醒</div>
+          </div>
+        </div>
+        <div class="section-tabs" data-section="tickets">
+          <button class="active" data-subtab="list" type="button">工单列表</button>
+          <button data-subtab="form" data-customer-hidden="true" type="button">新建工单</button>
+          <button data-subtab="duty" data-customer-hidden="true" type="button">值班交接</button>
+        </div>
+        <div class="subtab-panel" data-section="tickets" data-subtab="list">
+          <div class="card">
+            <h3 style="margin-top:0;">工单列表</h3>
+            <div class="toolbar" style="gap:8px;flex-wrap:wrap;margin-bottom:8px;">
+              <input id="ticketSearch" placeholder="搜索工单号 / 标题 / 处理人" style="max-width:260px;" />
+              <select id="ticketStatusFilter" style="max-width:140px;">
+                <option value="">全部状态</option>
+                <option value="待接单">待接单</option>
+                <option value="处理中">处理中</option>
+                <option value="待客户确认">待客户确认</option>
+                <option value="已完成">已完成</option>
+                <option value="已关闭">已关闭</option>
+              </select>
+              <select id="ticketPriorityFilter" style="max-width:120px;">
+                <option value="">全部优先级</option>
+                <option value="紧急">紧急</option>
+                <option value="高">高</option>
+                <option value="中">中</option>
+                <option value="低">低</option>
+              </select>
+              <select id="ticketSlaFilter" style="max-width:120px;">
+                <option value="">全部 SLA</option>
+                <option value="正常">正常</option>
+                <option value="预警">预警</option>
+                <option value="超时">超时</option>
+              </select>
+              <div class="toolbar" data-scope-area="tickets" style="gap:4px;">
+                <button class="secondary" data-scope="mine" type="button" style="font-size:12px;padding:4px 10px;">只看我的</button>
+                <button class="secondary" data-scope="project" type="button" style="font-size:12px;padding:4px 10px;">项目全部</button>
+              </div>
+            </div>
+            <div class="table-wrap"><table><thead><tr><th>工单号</th><th>标题</th><th>分类</th><th>优先级</th><th>SLA</th><th>状态</th><th>处理人</th><th>项目</th><th>创建时间</th><th>操作</th></tr></thead><tbody id="ticketTable"></tbody></table></div>
+            <div class="pagination-bar">
+              <button class="secondary" id="ticketPrevBtn" type="button">上一页</button>
+              <span id="ticketPageInfo">第 1 / 1 页</span>
+              <button class="secondary" id="ticketNextBtn" type="button">下一页</button>
+            </div>
+          </div>
+        </div>
+        <div class="subtab-panel hidden" data-section="tickets" data-subtab="form">
+          <div class="card">
+            <h3 id="ticketFormTitle" style="margin-top:0;">新建工单</h3>
+            <form id="ticketForm" class="grid-form">
+              <input name="id" type="hidden" />
+              <label class="full"><span>工单标题</span><input name="title" required maxlength="120" /></label>
+              <label><span>关联项目</span><select name="projectId" id="ticketProjectId"></select></label>
+              <label><span>关联资产</span><select name="assetId" id="ticketAssetId"></select></label>
+              <label><span>工单分类</span><select name="category"><option value="故障">故障</option><option value="巡检异常">巡检异常</option><option value="变更">变更</option><option value="服务请求" selected>服务请求</option><option value="其他">其他</option></select></label>
+              <label><span>优先级</span><select name="priority"><option value="低">低（24 小时）</option><option value="中" selected>中（8 小时）</option><option value="高">高（4 小时）</option><option value="紧急">紧急（2 小时）</option></select></label>
+              <label><span>指派处理人</span><select name="assigneeId" id="ticketAssigneeId"></select></label>
+              <label class="full"><span>问题描述</span><textarea name="description" rows="5" maxlength="4000"></textarea></label>
+              <button class="primary full" id="ticketSubmitBtn" type="submit">提交工单</button>
+            </form>
+            <div id="ticketMessage"></div>
+          </div>
+        </div>
+        <div class="subtab-panel hidden" data-section="tickets" data-subtab="duty">
+          <div class="card">
+            <h3 id="dutyShiftFormTitle" style="margin-top:0;">新增值班排班</h3>
+            <form id="dutyShiftForm" class="grid-form">
+              <input name="id" type="hidden" />
+              <label><span>关联项目</span><select name="projectId" id="dutyProjectId"></select></label>
+              <label><span>值班日期</span><input name="dutyDate" type="date" required /></label>
+              <label><span>班次类型</span><select name="shiftType"><option value="白班">白班</option><option value="夜班">夜班</option><option value="节假日">节假日</option></select></label>
+              <label><span>开始时间</span><input name="startTime" type="time" required value="09:00" /></label>
+              <label><span>结束时间</span><input name="endTime" type="time" required value="18:00" /></label>
+              <label><span>值班人</span><select name="primaryUserId" id="dutyPrimaryUserId" required></select></label>
+              <label><span>备班人</span><select name="backupUserId" id="dutyBackupUserId"></select></label>
+              <label class="full"><span>排班说明</span><input name="title" placeholder="可留空，默认按日期生成" /></label>
+              <button class="primary full" id="dutyShiftSubmitBtn" type="submit">保存排班</button>
+            </form>
+            <div id="dutyShiftMessage"></div>
+          </div>
+          <div class="card" style="margin-top:16px;">
+            <h3 style="margin-top:0;">值班交接记录</h3>
+            <div class="table-wrap"><table><thead><tr><th>日期</th><th>时段</th><th>班次</th><th>值班人</th><th>备班人</th><th>状态</th><th>交接内容</th><th>操作</th></tr></thead><tbody id="dutyShiftTable"></tbody></table></div>
+            <div class="pagination-bar">
+              <button class="secondary" id="dutyShiftPrevBtn" type="button">上一页</button>
+              <span id="dutyShiftPageInfo">第 1 / 1 页</span>
+              <button class="secondary" id="dutyShiftNextBtn" type="button">下一页</button>
+            </div>
+          </div>
+        </div>
+      </section>
+
       <section class="tab-panel hidden" data-tab="assetOps">
         <div class="page-header">
           <div>
@@ -2619,6 +2756,11 @@
                 <label><span>负责人</span><select name="owner" id="inspectionPlanOwnerId"></select></label>
                 <label><span>周期</span><select name="cycle"><option value="daily">每日</option><option value="weekly">每周</option><option value="monthly" selected>每月</option><option value="quarterly">每季度</option></select></label>
                 <label><span>下次巡检日</span><input name="nextDate" type="date" required /></label>
+                <div class="full">
+                  <span>检查项模板</span>
+                  <div class="muted" style="font-size:12px;margin:4px 0 8px;">每行一个检查项，执行巡检时按模板逐项记录结果；存在异常项时自动生成整改工单。</div>
+                  <textarea name="checklistTemplateText" id="inspectionChecklistTemplate" rows="4" placeholder="设备外观与指示灯&#10;系统资源使用率&#10;备份任务执行情况"></textarea>
+                </div>
                 <button class="primary full" id="inspectionPlanSubmitBtn" type="submit">提交巡检计划</button>
               </form>
               <div id="inspectionPlanMessage"></div>
@@ -2645,6 +2787,11 @@
                 <label><span>执行人</span><select name="executor" id="inspectionExecutionExecutorId"></select></label>
                 <label><span>巡检结果</span><select name="result" id="inspectionResult"><option value="正常" selected>正常</option><option value="异常">异常</option></select></label>
                 <label class="full"><span>巡检项清单</span><textarea name="checklist" required></textarea></label>
+                <div class="full">
+                  <span>逐项检查结果</span>
+                  <div class="muted" style="font-size:12px;margin:4px 0 8px;">按计划模板逐项勾选；任一检查项为异常时，整单自动标记为异常并生成整改工单。</div>
+                  <div class="table-wrap"><table><thead><tr><th>检查项</th><th style="width:140px;">结果</th><th>备注</th></tr></thead><tbody id="inspectionChecklistTable"><tr><td colspan="3">请先选择关联计划</td></tr></tbody></table></div>
+                </div>
                 <label class="full hidden" id="inspectionIssueField"><span>异常说明</span><textarea name="issue"></textarea></label>
                 <label class="full hidden" id="inspectionSuggestionField"><span>整改建议</span><textarea name="suggestion"></textarea></label>
                 <label><span>附件上传</span><input name="attachmentFile" id="inspectionAttachmentFile" type="file" accept="image/*,.doc,.docx,application/msword,application/vnd.openxmlformats-officedocument.wordprocessingml.document" /><span style="font-size:11px;color:var(--sub);white-space:nowrap;">支持照片或 Word，单文件不超过 10MB</span></label>
@@ -2659,7 +2806,7 @@
                 <button class="secondary" data-scope="mine" type="button" style="font-size:12px;padding:4px 10px;">只看我的</button>
                 <button class="secondary" data-scope="project" type="button" style="font-size:12px;padding:4px 10px;">项目全部</button>
               </div>
-              <div class="table-wrap"><table><thead><tr><th>执行计划名称</th><th>执行时间</th><th>执行人</th><th>巡检项清单</th><th>异常说明</th><th>整改建议</th><th>巡检结果</th><th>附件</th><th>下次巡检</th><th>操作</th></tr></thead><tbody id="inspectionExecutionTable"></tbody></table></div>
+              <div class="table-wrap"><table><thead><tr><th>执行计划名称</th><th>执行时间</th><th>执行人</th><th>巡检项清单</th><th>异常说明</th><th>整改建议</th><th>巡检结果</th><th>复查</th><th>附件</th><th>下次巡检</th><th>操作</th></tr></thead><tbody id="inspectionExecutionTable"></tbody></table></div>
               <div class="pagination-bar">
                 <button class="secondary" id="inspectionExecutionPrevBtn" type="button">上一页</button>
                 <span id="inspectionExecutionPageInfo">第 1 / 1 页</span>
@@ -3691,6 +3838,8 @@
       spareParts: [],
       changeRecords: [],
       incidents: [],
+      tickets: [],
+      dutyShifts: [],
       sparePartMovements: [],
       approvals: [],
       listScopes: {},
@@ -3773,6 +3922,8 @@
       inspectionPlanPage: 1,
       sparePartMovementPage: 1,
       incidentPage: 1,
+      ticketPage: 1,
+      dutyShiftPage: 1,
       aiInspectionTargetPage: 1,
       aiInspectionTemplatePage: 1,
       aiInspectionTaskPage: 1,
@@ -5473,9 +5624,11 @@
     function fillInspectionExecutionPlanSelect() {
       const select = document.getElementById('inspectionExecutionPlanId');
       if (!select) return;
+      const currentValue = select.value;
       select.innerHTML = ['<option value="">请选择</option>']
-        .concat(state.inspectionPlans.map(item => `<option value="${item.id}">${esc(item.title)}</option>`))
+        .concat(state.inspectionPlans.filter(item => item.status !== '已停用').map(item => `<option value="${attrEsc(item.id)}">${esc(item.title)}</option>`))
         .join('');
+      if (currentValue && state.inspectionPlans.some(item => item.id === currentValue)) select.value = currentValue;
     }
 
     function fillInspectionExecutionExecutorSelect(planId) {
@@ -5499,6 +5652,31 @@
       fillInspectionExecutionExecutorSelect(planId);
       form.elements.executedAt.value = plan?.nextDate ? `${String(plan.nextDate).slice(0, 10)}T00:00` : '';
       document.getElementById('inspectionExecutionExecutorId').value = plan?.owner || '';
+      const template = plan?.checklistTemplate || [];
+      form.elements.checklist.value = template.map(item => item.name).join('\n');
+      renderInspectionChecklistEditor(template);
+    }
+
+    // 执行记录按计划模板展开为逐项结果；记录本身仍保留 checklist 文本，兼容历史数据导出。
+    function renderInspectionChecklistEditor(template, existingItems = [], tableId = 'inspectionChecklistTable') {
+      const tbody = document.getElementById(tableId);
+      if (!tbody) return;
+      const items = Array.isArray(template) && template.length
+        ? template.map(item => {
+          const existing = existingItems.find(entry => entry.name === item.name);
+          return { name: item.name, result: existing?.result || '未检查', remark: existing?.remark || '' };
+        })
+        : existingItems;
+      tbody.innerHTML = items.map((item, index) => `<tr data-check-index="${index}"><td>${esc(item.name)}</td><td><select data-check-result><option value="未检查"${item.result === '未检查' ? ' selected' : ''}>未检查</option><option value="正常"${item.result === '正常' ? ' selected' : ''}>正常</option><option value="异常"${item.result === '异常' ? ' selected' : ''}>异常</option></select></td><td><input data-check-remark value="${attrEsc(item.remark || '')}" placeholder="备注" /></td></tr>`).join('')
+        || '<tr><td colspan="3">该计划未配置检查项模板，可直接填写巡检项清单</td></tr>';
+    }
+
+    function readInspectionChecklistItems(tableId = 'inspectionChecklistTable') {
+      return [...document.querySelectorAll(`#${tableId} tr[data-check-index]`)].map(row => ({
+        name: row.children[0]?.textContent?.trim() || '',
+        result: row.querySelector('[data-check-result]')?.value || '未检查',
+        remark: row.querySelector('[data-check-remark]')?.value?.trim() || ''
+      })).filter(item => item.name);
     }
 
     function fillAiTaskExecutorSelect() {
@@ -6196,6 +6374,8 @@
       document.getElementById('sparePartForm')?.closest('.card')?.classList.toggle('hidden', !canEditData());
       document.getElementById('changeRecordForm')?.closest('.card')?.classList.toggle('hidden', !canEditData());
       document.getElementById('incidentForm')?.closest('.card')?.classList.toggle('hidden', !canEditData());
+      document.getElementById('ticketForm')?.closest('.card')?.classList.toggle('hidden', !canEditData());
+      document.getElementById('dutyShiftForm')?.closest('.card')?.classList.toggle('hidden', !canEditData());
       document.getElementById('aiInspectionTargetForm')?.closest('.card')?.classList.toggle('hidden', !canEditData());
       document.getElementById('aiInspectionTemplateForm')?.closest('.card')?.classList.toggle('hidden', !canEditData());
       document.getElementById('aiInspectionTaskForm')?.closest('.card')?.classList.toggle('hidden', !canEditData());
@@ -8148,6 +8328,182 @@
       renderDocumentFilters();
     }
 
+    function ticketSlaBadgeClass(status) {
+      if (status === '超时') return 'color:#dc2626;font-weight:600;';
+      if (status === '预警') return 'color:#d97706;font-weight:600;';
+      return 'color:#059669;';
+    }
+
+    function ticketStatusBadgeClass(status) {
+      if (status === '已完成' || status === '已关闭') return 'color:#64748b;';
+      if (status === '待客户确认') return 'color:#7c3aed;font-weight:600;';
+      if (status === '处理中') return 'color:#2563eb;font-weight:600;';
+      return 'color:#d97706;font-weight:600;';
+    }
+
+    function fillTicketSelects() {
+      const ticketProject = document.getElementById('ticketProjectId');
+      const dutyProject = document.getElementById('dutyProjectId');
+      const options = state.projects.map(item => `<option value="${attrEsc(item.id)}">${esc(formatProjectDisplay(item))}</option>`).join('');
+      [ticketProject, dutyProject].forEach(select => {
+        if (!select) return;
+        const currentValue = select.value;
+        select.innerHTML = options;
+        if (currentValue && state.projects.some(item => item.id === currentValue)) select.value = currentValue;
+        if (!select.value && state.projects.length) select.value = state.projects[0].id;
+      });
+      fillTicketAssetSelect(ticketProject?.value || '');
+      fillTicketAssigneeSelect(ticketProject?.value || '');
+      fillDutyUserSelect(dutyProject?.value || '');
+    }
+
+    function fillTicketAssetSelect(projectId) {
+      const target = document.getElementById('ticketAssetId');
+      if (!target) return;
+      const currentValue = target.value;
+      const assets = state.assets.filter(item => !projectId || item.projectId === projectId);
+      target.innerHTML = ['<option value="">请选择</option>']
+        .concat(assets.map(item => `<option value="${attrEsc(item.id)}">${esc(item.name)}</option>`))
+        .join('');
+      if (currentValue && assets.some(item => item.id === currentValue)) target.value = currentValue;
+    }
+
+    function fillTicketAssigneeSelect(projectId) {
+      const target = document.getElementById('ticketAssigneeId');
+      if (!target) return;
+      const currentValue = target.value;
+      const users = getProjectApprovers(projectId);
+      target.innerHTML = ['<option value="">暂不指派</option>']
+        .concat(users.map(item => `<option value="${attrEsc(item.id)}">${esc(item.name)}</option>`))
+        .join('');
+      if (currentValue && users.some(item => item.id === currentValue)) target.value = currentValue;
+    }
+
+    function fillDutyUserSelect(projectId) {
+      const primary = document.getElementById('dutyPrimaryUserId');
+      const backup = document.getElementById('dutyBackupUserId');
+      if (!primary || !backup) return;
+      const users = getProjectApprovers(projectId);
+      const primaryValue = primary.value;
+      const backupValue = backup.value;
+      const options = users.map(item => `<option value="${attrEsc(item.id)}">${esc(item.name)}</option>`).join('');
+      primary.innerHTML = ['<option value="">请选择值班人</option>', options].join('');
+      backup.innerHTML = ['<option value="">无备班人</option>', options].join('');
+      if (primaryValue && users.some(item => item.id === primaryValue)) primary.value = primaryValue;
+      if (backupValue && users.some(item => item.id === backupValue)) backup.value = backupValue;
+    }
+
+    function renderTickets() {
+      fillTicketSelects();
+      const keyword = (document.getElementById('ticketSearch')?.value || '').trim().toLowerCase();
+      const statusFilter = document.getElementById('ticketStatusFilter')?.value || '';
+      const priorityFilter = document.getElementById('ticketPriorityFilter')?.value || '';
+      const slaFilter = document.getElementById('ticketSlaFilter')?.value || '';
+      const sourceTickets = filterByListScope(state.tickets, 'tickets', item => item.assigneeId || item.createdBy || '')
+        .filter(item => {
+          if (statusFilter && item.status !== statusFilter) return false;
+          if (priorityFilter && item.priority !== priorityFilter) return false;
+          if (slaFilter && item.slaStatus !== slaFilter) return false;
+          if (keyword && ![item.ticketNo, item.title, item.assigneeName].some(value => String(value || '').toLowerCase().includes(keyword))) return false;
+          return true;
+        })
+        .slice()
+        .sort((a, b) => String(b.createdAt || '').localeCompare(String(a.createdAt || '')));
+      const pageSize = 10;
+      const totalPages = Math.max(1, Math.ceil(sourceTickets.length / pageSize));
+      state.ticketPage = Math.min(Math.max(1, state.ticketPage || 1), totalPages);
+      const start = (state.ticketPage - 1) * pageSize;
+      const rows = sourceTickets.slice(start, start + pageSize);
+      document.getElementById('ticketTable').innerHTML = rows.map(item => {
+        const actions = [];
+        const canOperate = ['admin', 'engineer'].includes(state.user?.role) && (state.user?.role === 'admin' || item.projectId === state.user?.projectId);
+        if (canOperate && item.status === '待接单') actions.push(`<button class="secondary" data-action="ticket-accept" data-id="${attrEsc(item.id)}" type="button">接单</button>`);
+        if (canOperate && item.status === '处理中') {
+          actions.push(`<button class="secondary" data-action="ticket-resolve" data-id="${attrEsc(item.id)}" type="button">回单</button>`);
+          actions.push(`<button class="secondary" data-action="ticket-transfer" data-id="${attrEsc(item.id)}" type="button">转派</button>`);
+        }
+        if (canOperate && item.status === '待客户确认') actions.push(`<button class="secondary" data-action="ticket-close" data-id="${attrEsc(item.id)}" type="button">关闭</button>`);
+        if (state.user?.role === 'customer' && item.status === '待客户确认' && item.projectId === state.user?.projectId) {
+          actions.push(`<button class="secondary" data-action="ticket-confirm" data-id="${attrEsc(item.id)}" type="button">确认完成</button>`);
+        }
+        if (canOperate && !['已完成', '已关闭'].includes(item.status)) actions.push(`<button class="secondary" data-action="edit-ticket" data-id="${attrEsc(item.id)}" type="button">编辑</button>`);
+        if (canMutateOwnedRecord(item, 'createdBy')) actions.push(`<button class="secondary" data-action="delete-ticket" data-id="${attrEsc(item.id)}" type="button">删除</button>`);
+        return `<tr><td>${esc(item.ticketNo || '-')}</td><td>${esc(item.title)}</td><td>${esc(item.category || '-')}</td><td>${esc(item.priority)}</td><td style="${ticketSlaBadgeClass(item.slaStatus)}">${esc(item.slaStatus)}<div class="muted" style="font-size:11px;">${esc(item.slaDeadline ? String(item.slaDeadline).slice(0, 16).replace('T', ' ') : '-')}</div></td><td style="${ticketStatusBadgeClass(item.status)}">${esc(item.status)}</td><td>${esc(item.assigneeName || '-')}</td><td>${esc(formatProjectDisplayById(item.projectId))}</td><td>${esc(String(item.createdAt || '').slice(0, 16).replace('T', ' '))}</td><td><div class="toolbar">${actions.join('') || '-'}</div></td></tr>`;
+      }).join('') || '<tr><td colspan="10">暂无工单</td></tr>';
+      document.getElementById('ticketPageInfo').textContent = `第 ${state.ticketPage} / ${totalPages} 页`;
+      document.getElementById('ticketPrevBtn').disabled = state.ticketPage <= 1;
+      document.getElementById('ticketNextBtn').disabled = state.ticketPage >= totalPages;
+
+      const sourceShifts = filterByUserProject(state.dutyShifts)
+        .slice()
+        .sort((a, b) => `${b.dutyDate || ''}${b.startTime || ''}`.localeCompare(`${a.dutyDate || ''}${a.startTime || ''}`));
+      const shiftPageSize = 10;
+      const shiftTotalPages = Math.max(1, Math.ceil(sourceShifts.length / shiftPageSize));
+      state.dutyShiftPage = Math.min(Math.max(1, state.dutyShiftPage || 1), shiftTotalPages);
+      const shiftStart = (state.dutyShiftPage - 1) * shiftPageSize;
+      const shiftRows = sourceShifts.slice(shiftStart, shiftStart + shiftPageSize);
+      document.getElementById('dutyShiftTable').innerHTML = shiftRows.map(item => {
+        const canOperate = ['admin', 'engineer'].includes(state.user?.role) && (state.user?.role === 'admin' || item.projectId === state.user?.projectId);
+        const actions = [];
+        if (canOperate && item.status !== '已交接') {
+          if (item.status === '待开始') actions.push(`<button class="secondary" data-action="duty-start" data-id="${attrEsc(item.id)}" type="button">开始值班</button>`);
+          if (item.status === '值班中') actions.push(`<button class="secondary" data-action="duty-handover" data-id="${attrEsc(item.id)}" type="button">交接班</button>`);
+          if (item.status !== '已交接') actions.push(`<button class="secondary" data-action="edit-duty" data-id="${attrEsc(item.id)}" type="button">编辑</button>`);
+          actions.push(`<button class="secondary" data-action="delete-duty" data-id="${attrEsc(item.id)}" type="button">删除</button>`);
+        }
+        return `<tr><td>${esc(item.dutyDate || '-')}</td><td>${esc(`${item.startTime || ''}-${item.endTime || ''}`)}</td><td>${esc(item.shiftType || '-')}</td><td>${esc(formatUserName(item.primaryUserId))}</td><td>${esc(item.backupUserId ? formatUserName(item.backupUserId) : '-')}</td><td>${esc(item.status)}</td><td>${esc(item.handoverContent || '-')}${item.handoverIssue ? `<div class="muted" style="font-size:11px;">遗留：${esc(item.handoverIssue)}</div>` : ''}</td><td><div class="toolbar">${actions.join('') || '-'}</div></td></tr>`;
+      }).join('') || '<tr><td colspan="8">暂无排班</td></tr>';
+      document.getElementById('dutyShiftPageInfo').textContent = `第 ${state.dutyShiftPage} / ${shiftTotalPages} 页`;
+      document.getElementById('dutyShiftPrevBtn').disabled = state.dutyShiftPage <= 1;
+      document.getElementById('dutyShiftNextBtn').disabled = state.dutyShiftPage >= shiftTotalPages;
+      syncListScopeControls();
+      if (state.user?.role === 'customer') {
+        document.getElementById('ticketForm').closest('.card')?.classList.add('hidden');
+        document.getElementById('dutyShiftForm').closest('.card')?.classList.add('hidden');
+      }
+    }
+
+    function resetTicketForm() {
+      const form = document.getElementById('ticketForm');
+      if (!form) return;
+      form.reset();
+      form.elements.id.value = '';
+      document.getElementById('ticketFormTitle').textContent = '新建工单';
+      document.getElementById('ticketSubmitBtn').textContent = '提交工单';
+      fillTicketSelects();
+    }
+
+    function resetDutyShiftForm() {
+      const form = document.getElementById('dutyShiftForm');
+      if (!form) return;
+      form.reset();
+      form.elements.id.value = '';
+      form.elements.startTime.value = '09:00';
+      form.elements.endTime.value = '18:00';
+      document.getElementById('dutyShiftFormTitle').textContent = '新增值班排班';
+      document.getElementById('dutyShiftSubmitBtn').textContent = '保存排班';
+      fillTicketSelects();
+    }
+
+    function editTicket(ticketId) {
+      const ticket = state.tickets.find(item => item.id === ticketId);
+      if (!ticket) return;
+      const form = document.getElementById('ticketForm');
+      form.elements.id.value = ticket.id;
+      form.elements.title.value = ticket.title || '';
+      form.elements.projectId.value = ticket.projectId || '';
+      fillTicketAssetSelect(ticket.projectId || '');
+      form.elements.assetId.value = ticket.assetId || '';
+      form.elements.category.value = ticket.category || '服务请求';
+      form.elements.priority.value = ticket.priority || '中';
+      fillTicketAssigneeSelect(ticket.projectId || '');
+      form.elements.assigneeId.value = ticket.assigneeId || '';
+      form.elements.description.value = ticket.description || '';
+      document.getElementById('ticketFormTitle').textContent = '编辑工单';
+      document.getElementById('ticketSubmitBtn').textContent = '保存修改';
+      openTabWithSubtab('tickets', 'form');
+    }
+
     function renderAssetOps() {
       const inspectionPlanPageSize = 10;
       const sourceInspectionPlans = filterByListScope(state.inspectionPlans, 'assetOps', item => item.createdBy || '');
@@ -8165,7 +8521,18 @@
       state.inspectionExecutionPage = Math.min(Math.max(1, state.inspectionExecutionPage || 1), inspectionExecutionTotalPages);
       const inspectionExecutionStart = (state.inspectionExecutionPage - 1) * inspectionExecutionPageSize;
       const inspectionExecutionRows = sourceInspectionExecutions.slice().sort((a, b) => String(b.executedAt || b.createdAt || '').localeCompare(String(a.executedAt || a.createdAt || ''))).slice(inspectionExecutionStart, inspectionExecutionStart + inspectionExecutionPageSize);
-      document.getElementById('inspectionExecutionTable').innerHTML = inspectionExecutionRows.map(item => `<tr><td>${esc(state.inspectionPlans.find(plan => plan.id === item.planId)?.title || '-')}</td><td>${esc(item.executedAt || '-')}</td><td>${esc(item.executor || '-')}</td><td>${esc(item.checklist || '-')}</td><td>${esc(item.issue || '-')}</td><td>${esc(item.suggestion || '-')}</td><td>${esc(item.result || '-')}</td><td>${formatInspectionAttachment(item.attachment)}</td><td>${esc(item.nextDate || '-')}</td><td><div class="toolbar">${canMutateOwnedRecord(item, 'createdBy') ? `<button class="secondary" data-action="edit-inspection-execution" data-id="${item.id}" type="button">修改</button><button class="secondary" data-action="delete-inspection-execution" data-id="${item.id}" type="button">删除</button>` : '-'}</div></td></tr>`).join('') || '<tr><td colspan="10">暂无记录</td></tr>';
+      const renderChecklistCell = item => {
+        const items = Array.isArray(item.checklistItems) ? item.checklistItems : [];
+        if (!items.length) return esc(item.checklist || '-');
+        const abnormal = items.filter(entry => entry.result === '异常').length;
+        return `<div>${esc(`${items.length} 项检查`)}${abnormal ? ` · <span style="color:#dc2626;">异常 ${abnormal}</span>` : ''}</div><div class="muted" style="font-size:11px;">${esc(items.map(entry => `${entry.name}:${entry.result}`).join('；'))}</div>`;
+      };
+      const renderRecheckCell = item => {
+        if (item.result !== '异常') return '-';
+        if (item.recheckStatus === '已复查') return `<span style="color:#059669;">已复查</span><div class="muted" style="font-size:11px;">${esc(item.recheckResult || '')}</div>`;
+        return '<span style="color:#d97706;font-weight:600;">待复查</span>';
+      };
+      document.getElementById('inspectionExecutionTable').innerHTML = inspectionExecutionRows.map(item => `<tr><td>${esc(state.inspectionPlans.find(plan => plan.id === item.planId)?.title || '-')}</td><td>${esc(item.executedAt || '-')}</td><td>${esc(item.executor || '-')}</td><td>${renderChecklistCell(item)}</td><td>${esc(item.issue || '-')}</td><td>${esc(item.suggestion || '-')}</td><td>${esc(item.result || '-')}</td><td>${renderRecheckCell(item)}</td><td>${formatInspectionAttachment(item.attachment)}</td><td>${esc(item.nextDate || '-')}</td><td><div class="toolbar">${item.result === '异常' && item.recheckStatus !== '已复查' && canMutateOwnedRecord(item, 'createdBy') ? `<button class="secondary" data-action="recheck-inspection-execution" data-id="${attrEsc(item.id)}" type="button">复查</button>` : ''}${canMutateOwnedRecord(item, 'createdBy') ? `<button class="secondary" data-action="edit-inspection-execution" data-id="${item.id}" type="button">修改</button><button class="secondary" data-action="delete-inspection-execution" data-id="${item.id}" type="button">删除</button>` : ''}</div></td></tr>`).join('') || '<tr><td colspan="11">暂无记录</td></tr>';
       document.getElementById('inspectionExecutionPageInfo').textContent = `第 ${state.inspectionExecutionPage} / ${inspectionExecutionTotalPages} 页`;
       document.getElementById('inspectionExecutionPrevBtn').disabled = state.inspectionExecutionPage <= 1;
       document.getElementById('inspectionExecutionNextBtn').disabled = state.inspectionExecutionPage >= inspectionExecutionTotalPages;
@@ -9054,6 +9421,7 @@
       document.getElementById('edInspPlanNextDate').value = item.nextDate || '';
       fillInspectionPlanOwnerSelect('edInspPlanOwner', projectId);
       document.getElementById('edInspPlanOwner').value = item.owner || '';
+      document.getElementById('edInspPlanChecklistTemplate').value = (item.checklistTemplate || []).map(entry => entry.name).join('\n');
       document.getElementById('inspectionPlanEditMessage').textContent = '';
       openModal('inspectionPlanEditModal');
     }
@@ -9420,6 +9788,7 @@
       document.getElementById('edInspExecExecutedAt').value = item.executedAt || '';
       document.getElementById('edInspExecResult').value = item.result || '正常';
       document.getElementById('edInspExecChecklist').value = item.checklist || '';
+      renderInspectionChecklistEditor(plan?.checklistTemplate || [], item.checklistItems || [], 'edInspExecChecklistTable');
       document.getElementById('edInspExecIssue').value = item.issue || '';
       document.getElementById('edInspExecSuggestion').value = item.suggestion || '';
       document.getElementById('edInspExecNextDate').value = item.nextDate || '';
@@ -9824,6 +10193,8 @@
       { key: 'sparePartMovements', path: '/api/spare-part-movements' },
       { key: 'changeRecords', path: '/api/change-records' },
       { key: 'incidents', path: '/api/incidents' },
+      { key: 'tickets', path: '/api/tickets' },
+      { key: 'dutyShifts', path: '/api/duty-shifts' },
       { key: 'approvals', path: '/api/approvals' },
       { key: 'aiInspectionTargets', path: '/api/ai-inspection/targets' },
       { key: 'aiInspectionTemplates', path: '/api/ai-inspection/templates' },
@@ -10000,6 +10371,8 @@
         state.inspectionPlanPage = 1;
         state.sparePartMovementPage = 1;
         state.incidentPage = 1;
+        state.ticketPage = 1;
+        state.dutyShiftPage = 1;
         state.aiInspectionTargetPage = 1;
         state.aiInspectionTemplatePage = 1;
         state.aiInspectionTaskPage = 1;
@@ -10025,6 +10398,7 @@
       renderKb();
       resetDocumentForm();
       renderDocuments();
+      renderTickets();
       renderAssetOps();
       renderAiInspection();
       toggleInspectionIssueFields();
@@ -10844,8 +11218,25 @@
       fillEditAssetSelect('edInspPlanAssetId', event.target.value);
       fillInspectionPlanOwnerSelect('edInspPlanOwner', event.target.value);
     });
+    document.getElementById('edInspExecPlanId').addEventListener('change', event => {
+      const plan = state.inspectionPlans.find(item => item.id === event.target.value);
+      renderInspectionChecklistEditor(plan?.checklistTemplate || [], [], 'edInspExecChecklistTable');
+    });
     document.getElementById('inspectionExecutionPlanId').addEventListener('change', event => {
       syncInspectionExecutionPlanFields(event.target.value);
+    });
+    // 逐项结果自动联动整单结果，避免勾了异常项却漏填异常说明。
+    ['inspectionChecklistTable', 'edInspExecChecklistTable'].forEach(tableId => {
+      document.getElementById(tableId)?.addEventListener('change', event => {
+        if (!event.target.matches('[data-check-result]')) return;
+        const hasAbnormal = readInspectionChecklistItems(tableId).some(item => item.result === '异常');
+        if (tableId === 'inspectionChecklistTable') {
+          document.getElementById('inspectionResult').value = hasAbnormal ? '异常' : '正常';
+          toggleInspectionIssueFields();
+        } else if (hasAbnormal) {
+          document.getElementById('edInspExecResult').value = '异常';
+        }
+      });
     });
     document.getElementById('spareProjectId').addEventListener('change', event => {
       fillSpareAssetSelect(event.target.value);
@@ -11072,6 +11463,12 @@
         state.incidentPage = 1;
         state.sparePartMovementPage = 1;
         renderAssetOps();
+        return;
+      }
+      if (area === 'tickets') {
+        state.ticketPage = 1;
+        state.dutyShiftPage = 1;
+        renderTickets();
         return;
       }
       if (area === 'aiInspection') {
@@ -11647,7 +12044,9 @@
         title: document.getElementById('edInspPlanTitle').value.trim(),
         cycle: document.getElementById('edInspPlanCycle').value,
         nextDate: document.getElementById('edInspPlanNextDate').value,
-        owner: document.getElementById('edInspPlanOwner').value.trim()
+        owner: document.getElementById('edInspPlanOwner').value.trim(),
+        checklistTemplate: document.getElementById('edInspPlanChecklistTemplate').value
+          .split('\n').map(line => line.trim()).filter(Boolean).map(name => ({ name }))
       };
       const msg = document.getElementById('inspectionPlanEditMessage');
       if (!data.title) { msg.textContent = '请输入计划名称'; msg.className = 'message error'; return; }
@@ -11674,13 +12073,14 @@
         executor: document.getElementById('edInspExecExecutor').value.trim(),
         result: document.getElementById('edInspExecResult').value,
         checklist: document.getElementById('edInspExecChecklist').value.trim(),
+        checklistItems: readInspectionChecklistItems('edInspExecChecklistTable'),
         issue: document.getElementById('edInspExecIssue').value.trim(),
         suggestion: document.getElementById('edInspExecSuggestion').value.trim(),
         nextDate: document.getElementById('edInspExecNextDate').value
       };
       const msg = document.getElementById('inspectionExecutionEditMessage');
       if (!data.executedAt) { msg.textContent = '请选择执行时间'; msg.className = 'message error'; return; }
-      if (!data.checklist) { msg.textContent = '请输入巡检项清单'; msg.className = 'message error'; return; }
+      if (!data.checklist && !data.checklistItems.length) { msg.textContent = '请输入巡检项清单'; msg.className = 'message error'; return; }
       try {
         await api(`/api/inspection-executions/${id}`, { method: 'PUT', body: JSON.stringify(data) });
         closeModal('inspectionExecutionEditModal');
@@ -12071,6 +12471,15 @@
         if (button.dataset.action === 'delete-inspection-execution') {
           await removeInspectionExecution(button.dataset.id);
         }
+        if (button.dataset.action === 'recheck-inspection-execution') {
+          const result = window.prompt('请输入复查结果', '');
+          if (result === null) return;
+          if (!result.trim()) { setMessage('inspectionExecutionMessage', '复查结果不能为空', 'error'); return; }
+          await api(`/api/inspection-executions/${button.dataset.id}/recheck`, { method: 'POST', body: JSON.stringify({ recheckResult: result.trim() }) });
+          setMessage('inspectionExecutionMessage', '复查已完成');
+          await reloadAfterSubmit();
+          openTabWithSubtab('assetOps', 'inspection');
+        }
       } catch (error) {
         setMessage('inspectionExecutionMessage', error.message, 'error');
       }
@@ -12105,6 +12514,182 @@
         setMessage('incidentMessage', error.message, 'error');
       }
     });
+
+    document.getElementById('ticketTable').addEventListener('click', async event => {
+      const button = event.target.closest('button[data-action]');
+      if (!button) return;
+      const ticketId = button.dataset.id;
+      const action = button.dataset.action;
+      try {
+        if (action === 'ticket-accept') {
+          await api(`/api/tickets/${ticketId}/actions`, { method: 'POST', body: JSON.stringify({ action: 'accept' }) });
+          setMessage('ticketMessage', '工单已接单');
+          await loadBaseData();
+          openTabWithSubtab('tickets', 'list');
+          return;
+        }
+        if (action === 'ticket-close') {
+          await api(`/api/tickets/${ticketId}/actions`, { method: 'POST', body: JSON.stringify({ action: 'close' }) });
+          setMessage('ticketMessage', '工单已关闭');
+          await loadBaseData();
+          openTabWithSubtab('tickets', 'list');
+          return;
+        }
+        if (action === 'ticket-transfer' || action === 'ticket-resolve' || action === 'ticket-confirm') {
+          openTicketActionModal(action, ticketId);
+          return;
+        }
+        if (action === 'edit-ticket') {
+          editTicket(ticketId);
+          return;
+        }
+        if (action === 'delete-ticket') {
+          if (!await showConfirm('确认删除该工单吗？')) return;
+          await api(`/api/tickets/${ticketId}`, { method: 'DELETE', body: '{}' });
+          setMessage('ticketMessage', '工单已删除');
+          await loadBaseData();
+          openTabWithSubtab('tickets', 'list');
+        }
+      } catch (error) {
+        setMessage('ticketMessage', error.message, 'error');
+      }
+    });
+
+    function openTicketActionModal(action, ticketId) {
+      const ticket = state.tickets.find(item => item.id === ticketId);
+      if (!ticket) return;
+      document.getElementById('edTicketActionId').value = ticketId;
+      document.getElementById('edTicketActionId').dataset.action = action;
+      document.getElementById('ticketActionTitle').textContent = action === 'ticket-transfer' ? '转派工单' : action === 'ticket-resolve' ? '工单回单' : '确认工单完成';
+      document.getElementById('ticketActionTransferField').classList.toggle('hidden', action !== 'ticket-transfer');
+      document.getElementById('ticketActionResolveField').classList.toggle('hidden', action !== 'ticket-resolve');
+      document.getElementById('ticketActionConfirmField').classList.toggle('hidden', action !== 'ticket-confirm');
+      if (action === 'ticket-transfer') {
+        const select = document.getElementById('edTicketTransferAssignee');
+        const users = getProjectApprovers(ticket.projectId);
+        select.innerHTML = users.map(item => `<option value="${attrEsc(item.id)}">${esc(item.name)}</option>`).join('');
+      }
+      document.getElementById('edTicketResolution').value = '';
+      document.getElementById('edTicketCustomerComment').value = '';
+      document.getElementById('ticketActionMessage').textContent = '';
+      openModal('ticketActionModal');
+    }
+
+    document.getElementById('ticketActionSaveBtn').addEventListener('click', async () => {
+      const action = document.getElementById('edTicketActionId').dataset.action;
+      const ticketId = document.getElementById('edTicketActionId').value;
+      const payload = { action: action === 'ticket-transfer' ? 'transfer' : action === 'ticket-resolve' ? 'resolve' : 'confirm' };
+      if (payload.action === 'transfer') payload.assigneeId = document.getElementById('edTicketTransferAssignee').value;
+      if (payload.action === 'resolve') payload.resolution = document.getElementById('edTicketResolution').value.trim();
+      if (payload.action === 'confirm') payload.comment = document.getElementById('edTicketCustomerComment').value.trim();
+      if (payload.action === 'transfer' && !payload.assigneeId) { setMessage('ticketActionMessage', '请选择转派处理人', 'error'); return; }
+      if (payload.action === 'resolve' && !payload.resolution) { setMessage('ticketActionMessage', '请填写处理结论', 'error'); return; }
+      try {
+        await api(`/api/tickets/${ticketId}/actions`, { method: 'POST', body: JSON.stringify(payload) });
+        closeModal('ticketActionModal');
+        showToast(payload.action === 'transfer' ? '工单已转派' : payload.action === 'resolve' ? '工单已回单' : '工单已确认');
+        await loadBaseData();
+        openTabWithSubtab('tickets', 'list');
+      } catch (error) {
+        setMessage('ticketActionMessage', error.message, 'error');
+      }
+    });
+
+    document.getElementById('ticketActionModal').addEventListener('click', function(e) { if (e.target === this) closeModal('ticketActionModal'); });
+
+    document.getElementById('dutyShiftTable').addEventListener('click', async event => {
+      const button = event.target.closest('button[data-action]');
+      if (!button) return;
+      const shiftId = button.dataset.id;
+      try {
+        if (button.dataset.action === 'duty-start') {
+          await api(`/api/duty-shifts/${shiftId}`, { method: 'PUT', body: JSON.stringify({ status: '值班中' }) });
+          setMessage('dutyShiftMessage', '已开始值班');
+          await loadBaseData();
+          openTabWithSubtab('tickets', 'duty');
+          return;
+        }
+        if (button.dataset.action === 'duty-handover') {
+          const shift = state.dutyShifts.find(item => item.id === shiftId);
+          document.getElementById('edDutyHandoverId').value = shiftId;
+          document.getElementById('edDutyHandoverContent').value = '';
+          document.getElementById('edDutyHandoverIssue').value = '';
+          const select = document.getElementById('edDutyReceivedBy');
+          const users = getProjectApprovers(shift?.projectId || '');
+          select.innerHTML = ['<option value="">未指定接班人</option>'].concat(users.map(item => `<option value="${attrEsc(item.id)}">${esc(item.name)}</option>`)).join('');
+          document.getElementById('dutyHandoverMessage').textContent = '';
+          openModal('dutyHandoverModal');
+          return;
+        }
+        if (button.dataset.action === 'edit-duty') {
+          const shift = state.dutyShifts.find(item => item.id === shiftId);
+          if (!shift) return;
+          const form = document.getElementById('dutyShiftForm');
+          form.elements.id.value = shift.id;
+          form.elements.projectId.value = shift.projectId || '';
+          form.elements.dutyDate.value = shift.dutyDate || '';
+          form.elements.shiftType.value = shift.shiftType || '白班';
+          form.elements.startTime.value = shift.startTime || '09:00';
+          form.elements.endTime.value = shift.endTime || '18:00';
+          fillDutyUserSelect(shift.projectId || '');
+          form.elements.primaryUserId.value = shift.primaryUserId || '';
+          form.elements.backupUserId.value = shift.backupUserId || '';
+          form.elements.title.value = shift.title || '';
+          document.getElementById('dutyShiftFormTitle').textContent = '编辑值班排班';
+          document.getElementById('dutyShiftSubmitBtn').textContent = '保存修改';
+          openTabWithSubtab('tickets', 'duty');
+          return;
+        }
+        if (button.dataset.action === 'delete-duty') {
+          if (!await showConfirm('确认删除该值班排班吗？')) return;
+          await api(`/api/duty-shifts/${shiftId}`, { method: 'DELETE', body: '{}' });
+          setMessage('dutyShiftMessage', '排班已删除');
+          await loadBaseData();
+          openTabWithSubtab('tickets', 'duty');
+        }
+      } catch (error) {
+        setMessage('dutyShiftMessage', error.message, 'error');
+      }
+    });
+
+    document.getElementById('dutyHandoverSaveBtn').addEventListener('click', async () => {
+      const shiftId = document.getElementById('edDutyHandoverId').value;
+      const handoverContent = document.getElementById('edDutyHandoverContent').value.trim();
+      if (!handoverContent) { setMessage('dutyHandoverMessage', '请填写交接内容', 'error'); return; }
+      try {
+        await api(`/api/duty-shifts/${shiftId}/handover`, {
+          method: 'POST',
+          body: JSON.stringify({
+            handoverContent,
+            handoverIssue: document.getElementById('edDutyHandoverIssue').value.trim(),
+            receivedBy: document.getElementById('edDutyReceivedBy').value
+          })
+        });
+        closeModal('dutyHandoverModal');
+        showToast('值班交接完成');
+        await loadBaseData();
+        openTabWithSubtab('tickets', 'duty');
+      } catch (error) {
+        setMessage('dutyHandoverMessage', error.message, 'error');
+      }
+    });
+
+    document.getElementById('dutyHandoverModal').addEventListener('click', function(e) { if (e.target === this) closeModal('dutyHandoverModal'); });
+
+    ['ticketSearch', 'ticketStatusFilter', 'ticketPriorityFilter', 'ticketSlaFilter'].forEach(id => {
+      const el = document.getElementById(id);
+      if (el) el.addEventListener('input', () => { state.ticketPage = 1; renderTickets(); });
+    });
+    document.getElementById('ticketPrevBtn').addEventListener('click', () => { state.ticketPage = Math.max(1, state.ticketPage - 1); renderTickets(); });
+    document.getElementById('ticketNextBtn').addEventListener('click', () => { state.ticketPage += 1; renderTickets(); });
+    document.getElementById('dutyShiftPrevBtn').addEventListener('click', () => { state.dutyShiftPage = Math.max(1, state.dutyShiftPage - 1); renderTickets(); });
+    document.getElementById('dutyShiftNextBtn').addEventListener('click', () => { state.dutyShiftPage += 1; renderTickets(); });
+
+    document.getElementById('ticketProjectId').addEventListener('change', event => {
+      fillTicketAssetSelect(event.target.value);
+      fillTicketAssigneeSelect(event.target.value);
+    });
+    document.getElementById('dutyProjectId').addEventListener('change', event => fillDutyUserSelect(event.target.value));
 
     document.getElementById('aiInspectionTargetTable').addEventListener('click', async event => {
       const button = event.target.closest('button[data-action]');
@@ -13258,6 +13843,11 @@
 
     document.getElementById('inspectionPlanForm').addEventListener('submit', event => withSubmitLock(event, async () => {
       const data = Object.fromEntries(new FormData(event.target).entries());
+      const templateText = String(data.checklistTemplateText || '').trim();
+      delete data.checklistTemplateText;
+      data.checklistTemplate = templateText
+        ? templateText.split('\n').map(line => line.trim()).filter(Boolean).map(name => ({ name }))
+        : [];
       const id = data.id;
       delete data.id;
       const method = id ? 'PUT' : 'POST';
@@ -13279,6 +13869,7 @@
       const file = formData.get('attachmentFile');
       const data = Object.fromEntries(formData.entries());
       delete data.attachmentFile;
+      data.checklistItems = readInspectionChecklistItems();
       try {
         data.attachment = file instanceof File && file.size > 0 ? await readInspectionAttachment(file) : '';
         const id = data.id;
@@ -13292,6 +13883,40 @@
         openTabWithSubtab('assetOps', 'inspection');
       } catch (error) {
         setMessage('inspectionExecutionMessage', error.message, 'error');
+      }
+    }));
+
+    document.getElementById('ticketForm').addEventListener('submit', event => withSubmitLock(event, async () => {
+      const data = Object.fromEntries(new FormData(event.target).entries());
+      const id = data.id;
+      delete data.id;
+      const method = id ? 'PUT' : 'POST';
+      const path = id ? `/api/tickets/${id}` : '/api/tickets';
+      try {
+        await api(path, { method, body: JSON.stringify(data) });
+        resetTicketForm();
+        setMessage('ticketMessage', id ? '工单修改成功' : '工单提交成功');
+        await reloadAfterSubmit();
+        openTabWithSubtab('tickets', 'list');
+      } catch (error) {
+        setMessage('ticketMessage', error.message, 'error');
+      }
+    }));
+
+    document.getElementById('dutyShiftForm').addEventListener('submit', event => withSubmitLock(event, async () => {
+      const data = Object.fromEntries(new FormData(event.target).entries());
+      const id = data.id;
+      delete data.id;
+      const method = id ? 'PUT' : 'POST';
+      const path = id ? `/api/duty-shifts/${id}` : '/api/duty-shifts';
+      try {
+        await api(path, { method, body: JSON.stringify(data) });
+        resetDutyShiftForm();
+        setMessage('dutyShiftMessage', id ? '排班修改成功' : '排班保存成功');
+        await reloadAfterSubmit();
+        openTabWithSubtab('tickets', 'duty');
+      } catch (error) {
+        setMessage('dutyShiftMessage', error.message, 'error');
       }
     }));
 

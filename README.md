@@ -109,16 +109,26 @@ docker compose --env-file .env.production -f docker-compose.prod.yml up -d --bui
 
 ## 版本
 
-当前版本：`1.0.24`
+当前版本：`1.1.0`
 
 ### 软件包下载
 
-最新版本：**[v1.0.24](https://github.com/hnhywjw/onsite-ops-system/releases/tag/v1.0.24)**
+最新版本：**[v1.1.0](https://github.com/hnhywjw/onsite-ops-system/releases/tag/v1.1.0)**
 
-- 完整安装包 `onsite-ops-system-v1.0.24-production.tar.gz`
-- 离线升级包 `onsite-ops-upgrade-v1.0.24.tar.gz`
+- 完整安装包 `onsite-ops-system-v1.1.0-production.tar.gz`
+- 离线升级包 `onsite-ops-upgrade-v1.1.0.tar.gz`
 - SHA256 校验文件
 - 部署说明见仓库 `PRODUCTION_DEPLOY.md`
+
+### v1.1.0 更新说明
+
+P0 运维闭环能力：
+- 新增工单中心，支持受理、转派、回单、关闭与客户确认，工单号按 `WO+日期+序号` 生成
+- 工单按优先级计算 SLA：紧急 2 小时、高 4 小时、中 8 小时、低 24 小时；75% 预警、超时升级提醒
+- 新增值班排班与交接记录，支持开始值班、填写交接内容与遗留问题、指定接班人
+- 巡检计划支持配置检查项模板，执行时逐项记录结果；异常项强制整单异常并自动生成整改工单
+- 巡检异常支持复查，复查结论自动回写并推进关联工单到待客户确认
+- 客户账号仅可查看本项目工单进度与处理结论，并在待客户确认时完成确认
 
 ### v1.0.24 更新说明
 

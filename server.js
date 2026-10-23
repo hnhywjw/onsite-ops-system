@@ -57,7 +57,7 @@ const dbConfig = {
   password: process.env.MYSQL_PASSWORD || 'onsite_ops_password',
   database: process.env.MYSQL_DATABASE || 'onsite_ops_system'
 };
-const dbCollectionKeys = ['users', 'projects', 'assets', 'assetRelations', 'topologyLayouts', 'logs', 'inspectionPlans', 'inspectionExecutions', 'spareParts', 'sparePartMovements', 'changeRecords', 'incidentRecords', 'approvals', 'notifications', 'auditLogs', 'upgradeLogs', 'knowledgeBase', 'documents', 'workReports', 'aiInspectionTargets', 'aiInspectionTemplates', 'aiInspectionTasks', 'aiInspectionResults', 'configBackupPlans', 'configBackupRecords', 'sessions', 'systemConfig', 'runtimeState'];
+const dbCollectionKeys = ['users', 'projects', 'assets', 'assetRelations', 'topologyLayouts', 'logs', 'inspectionPlans', 'inspectionExecutions', 'spareParts', 'sparePartMovements', 'changeRecords', 'incidentRecords', 'tickets', 'dutyShifts', 'approvals', 'notifications', 'auditLogs', 'upgradeLogs', 'knowledgeBase', 'documents', 'workReports', 'aiInspectionTargets', 'aiInspectionTemplates', 'aiInspectionTasks', 'aiInspectionResults', 'configBackupPlans', 'configBackupRecords', 'sessions', 'systemConfig', 'runtimeState'];
 const objectCollectionKeys = ['topologyLayouts', 'systemConfig', 'runtimeState'];
 const OBJECT_ROOT_ID = '__root__';
 
@@ -180,6 +180,13 @@ const allowedUserRoles = ['admin', 'engineer', 'viewer', 'auditor', 'customer'];
 const incidentStatusOptions = ['处理中', '已恢复', '已关闭'];
 const incidentSlaStatusOptions = ['正常', '预警', '超时'];
 const incidentSeverityOptions = ['低', '中', '高'];
+const ticketStatusOptions = ['待接单', '处理中', '待客户确认', '已完成', '已关闭'];
+const ticketPriorityOptions = ['低', '中', '高', '紧急'];
+const ticketCategoryOptions = ['故障', '巡检异常', '变更', '服务请求', '其他'];
+const ticketSlaHoursByPriority = { 紧急: 2, 高: 4, 中: 8, 低: 24 };
+// 达到 SLA 时限的 75% 先预警，超时后再升级为超时提醒，避免临期才发现。
+const ticketSlaWarningRatio = 0.75;
+const dutyShiftStatusOptions = ['待开始', '值班中', '已交接'];
 const notificationLevelOptions = ['info', 'warning', 'error'];
 const upgradeSigningKeyEnv = String(process.env.UPGRADE_SIGNING_KEY || '').trim();
 const allowedBackupCommands = (process.env.CONFIG_BACKUP_ALLOWED_COMMANDS || 'show running-config,show startup-config,display current-configuration,cat /etc/os-release')
@@ -973,6 +980,8 @@ function seed() {
     sparePartMovements: [],
     changeRecords: [],
     incidentRecords: [],
+    tickets: [],
+    dutyShifts: [],
     approvals: [],
     notifications: [],
     auditLogs: [],
@@ -3499,6 +3508,7 @@ function normalizeDb(raw = {}) {
       owner: item.owner || '',
       status: item.status || '待执行',
       description: item.description || '',
+      checklistTemplate: normalizeInspectionChecklistTemplate(item.checklistTemplate),
       createdBy: item.createdBy || '',
       createdAt: item.createdAt || now()
     })),
@@ -3510,9 +3520,15 @@ function normalizeDb(raw = {}) {
       executedAt: item.executedAt || '',
       executor: item.executor || '',
       checklist: item.checklist || '',
+      checklistItems: normalizeInspectionChecklistItems(item.checklistItems),
       result: item.result || '正常',
       issue: item.issue || '',
       suggestion: item.suggestion || '',
+      ticketId: item.ticketId || '',
+      recheckStatus: ['待复查', '已复查'].includes(item.recheckStatus) ? item.recheckStatus : '',
+      recheckAt: item.recheckAt || '',
+      recheckBy: item.recheckBy || '',
+      recheckResult: item.recheckResult || '',
       attachment: normalizeInspectionAttachment(item.attachment),
       nextDate: item.nextDate || '',
       createdBy: resolveInspectionExecutionCreatedBy(item),
@@ -3573,6 +3589,54 @@ function normalizeDb(raw = {}) {
       resolution: item.resolution || '',
       createdBy: item.createdBy || '',
       createdAt: item.createdAt || now()
+    })),
+    tickets: (raw.tickets || []).map(item => ({
+      id: item.id || id('ticket'),
+      ticketNo: String(item.ticketNo || '').trim(),
+      projectId: item.projectId || '',
+      assetId: item.assetId || '',
+      title: item.title || '',
+      description: item.description || '',
+      category: ticketCategoryOptions.includes(item.category) ? item.category : '其他',
+      priority: ticketPriorityOptions.includes(item.priority) ? item.priority : '中',
+      status: ticketStatusOptions.includes(item.status) ? item.status : '待接单',
+      assigneeId: item.assigneeId || '',
+      assigneeName: item.assigneeName || '',
+      dispatcherId: item.dispatcherId || '',
+      sourceType: item.sourceType || '',
+      sourceId: item.sourceId || '',
+      slaHours: Number(item.slaHours || ticketSlaHoursByPriority[item.priority] || ticketSlaHoursByPriority['中']),
+      slaDeadline: item.slaDeadline || '',
+      slaStatus: incidentSlaStatusOptions.includes(item.slaStatus) ? item.slaStatus : '正常',
+      acceptedAt: item.acceptedAt || '',
+      respondedAt: item.respondedAt || '',
+      closedAt: item.closedAt || '',
+      resolution: item.resolution || '',
+      customerConfirmedAt: item.customerConfirmedAt || '',
+      customerComment: item.customerComment || '',
+      createdBy: item.createdBy || '',
+      createdAt: item.createdAt || now(),
+      updatedAt: item.updatedAt || item.createdAt || now()
+    })),
+    dutyShifts: (raw.dutyShifts || []).map(item => ({
+      id: item.id || id('dutyShift'),
+      projectId: item.projectId || '',
+      title: item.title || '',
+      dutyDate: String(item.dutyDate || '').slice(0, 10),
+      startTime: String(item.startTime || '').slice(0, 5),
+      endTime: String(item.endTime || '').slice(0, 5),
+      shiftType: item.shiftType || '白班',
+      primaryUserId: item.primaryUserId || '',
+      backupUserId: item.backupUserId || '',
+      status: dutyShiftStatusOptions.includes(item.status) ? item.status : '待开始',
+      handoverContent: item.handoverContent || '',
+      handoverIssue: item.handoverIssue || '',
+      handoverAt: item.handoverAt || '',
+      handoverBy: item.handoverBy || '',
+      receivedBy: item.receivedBy || '',
+      createdBy: item.createdBy || '',
+      createdAt: item.createdAt || now(),
+      updatedAt: item.updatedAt || item.createdAt || now()
     })),
     approvals: (raw.approvals || []).map(item => ({
       id: item.id || id('approval'),
@@ -3836,6 +3900,37 @@ function normalizeInspectionAttachment(attachment) {
   };
 }
 
+// 检查项模板是一组可复用的巡检条目，执行时展开为逐项结果。
+function normalizeInspectionChecklistTemplate(template) {
+  if (!Array.isArray(template)) return [];
+  return template
+    .map(item => {
+      if (typeof item === 'string') return { id: id('checkItem'), name: item.trim(), required: true };
+      if (!item || typeof item !== 'object') return null;
+      const name = String(item.name || '').trim();
+      if (!name) return null;
+      return { id: item.id || id('checkItem'), name: name.slice(0, 200), required: item.required !== false };
+    })
+    .filter(Boolean);
+}
+
+function normalizeInspectionChecklistItems(items) {
+  if (!Array.isArray(items)) return [];
+  return items
+    .map(item => {
+      if (!item || typeof item !== 'object') return null;
+      const name = String(item.name || '').trim();
+      if (!name) return null;
+      return {
+        id: item.id || id('checkItem'),
+        name: name.slice(0, 200),
+        result: ['正常', '异常', '未检查'].includes(item.result) ? item.result : '未检查',
+        remark: String(item.remark || '').slice(0, 500)
+      };
+    })
+    .filter(Boolean);
+}
+
 function formatQuotaSize(bytes) {
   const value = Number(bytes) || 0;
   if (value >= 1024 * 1024 * 1024) return `${Number((value / (1024 * 1024 * 1024)).toFixed(1))}GB`;
@@ -4011,6 +4106,18 @@ function sanitizeImportedData(db) {
   coerceEnum(db.incidentRecords, 'severity', incidentSeverityOptions, '中');
   coerceEnum(db.incidentRecords, 'status', incidentStatusOptions, '处理中');
   coerceEnum(db.incidentRecords, 'slaStatus', incidentSlaStatusOptions, '正常');
+
+  clearRef(db.tickets, ['projectId'], projectIds);
+  clearRef(db.tickets, ['assetId'], assetIds);
+  clearRef(db.tickets, ['assigneeId', 'dispatcherId', 'createdBy'], userIds);
+  coerceEnum(db.tickets, 'priority', ticketPriorityOptions, '中');
+  coerceEnum(db.tickets, 'status', ticketStatusOptions, '待接单');
+  coerceEnum(db.tickets, 'category', ticketCategoryOptions, '其他');
+  coerceEnum(db.tickets, 'slaStatus', incidentSlaStatusOptions, '正常');
+
+  clearRef(db.dutyShifts, ['projectId'], projectIds);
+  clearRef(db.dutyShifts, ['primaryUserId', 'backupUserId', 'handoverBy', 'receivedBy', 'createdBy'], userIds);
+  coerceEnum(db.dutyShifts, 'status', dutyShiftStatusOptions, '待开始');
 
   clearRef(db.approvals, ['projectId'], projectIds);
   clearRef(db.approvals, ['requestedBy', 'approvedBy', 'approverId', 'customerId'], userIds);
@@ -6815,6 +6922,40 @@ function parseNotifyBeforeDays(value) {
   return 30;
 }
 
+// 工单 SLA 在后台周期内推进：状态变化写入库，提醒按「工单 + 阈值」去重，
+// 避免每个调度周期重复推送同一条超时通知。
+function refreshTicketSlaStates(db) {
+  let changed = false;
+  const nowMsValue = Date.now();
+
+  for (const ticket of db.tickets || []) {
+    const nextSlaStatus = resolveTicketSlaStatus(ticket, nowMsValue);
+    if (ticket.slaStatus !== nextSlaStatus) {
+      ticket.slaStatus = nextSlaStatus;
+      changed = true;
+    }
+    if (nextSlaStatus === '正常') continue;
+    const notifyKey = nextSlaStatus === '超时' ? 'sla-timeout' : 'sla-warning';
+    const exists = (db.notifications || []).some(item => item.sourceType === 'ticket'
+      && item.sourceId === ticket.id
+      && item.category === notifyKey);
+    if (exists) continue;
+    createNotification(
+      db,
+      ticket.projectId,
+      nextSlaStatus === '超时' ? '工单已超时' : '工单即将超时',
+      `${ticket.ticketNo} ${ticket.title} ${nextSlaStatus === '超时' ? '已超过' : '即将到达'} SLA 时限（${ticket.slaDeadline || '-'}）`,
+      nextSlaStatus === '超时' ? 'error' : 'warning',
+      notifyKey,
+      'ticket',
+      ticket.id
+    );
+    changed = true;
+  }
+
+  return changed;
+}
+
 function checkExpiryNotifications(db) {
   let changed = false;
   const now = Date.now();
@@ -6887,7 +7028,10 @@ function checkExpiryNotifications(db) {
     }
   }
 
-  return checkWorkReportReminderNotifications(db) || changed;
+  // 三个刷新各自可能独立产生变更，必须逐个执行；用逻辑或串联会因短路漏掉后续提醒。
+  if (refreshTicketSlaStates(db)) changed = true;
+  if (checkWorkReportReminderNotifications(db)) changed = true;
+  return changed;
 }
 
 function requireExistingProject(projectId, db) {
@@ -6962,6 +7106,80 @@ function canManageInspectionRecord(user, item) {
   // 无创建者的存量记录仅管理员可改删，避免同项目工程师横向越权。
   if (!item.createdBy) return false;
   return item.createdBy === user.id;
+}
+
+// 工单号按「日期 + 当日序号」生成，删除历史工单不会回收序号，避免编号重复。
+function nextTicketNo(db, date = new Date()) {
+  const dateKey = formatDateKey(date).replace(/-/g, '');
+  const prefix = `WO${dateKey}`;
+  let maxSeq = 0;
+  for (const item of db.tickets || []) {
+    const ticketNo = String(item.ticketNo || '');
+    if (!ticketNo.startsWith(prefix)) continue;
+    const seq = parseInt(ticketNo.slice(prefix.length), 10);
+    if (Number.isFinite(seq) && seq > maxSeq) maxSeq = seq;
+  }
+  return `${prefix}${String(maxSeq + 1).padStart(4, '0')}`;
+}
+
+function ticketSlaHours(priority) {
+  return ticketSlaHoursByPriority[priority] || ticketSlaHoursByPriority['中'];
+}
+
+// SLA 截止时间按创建时间加时限计算，创建后修改优先级时同步刷新。
+function computeTicketSlaDeadline(createdAtIso, priority) {
+  const createdMs = Date.parse(String(createdAtIso || ''));
+  const baseMs = Number.isFinite(createdMs) ? createdMs : Date.now();
+  return new Date(baseMs + ticketSlaHours(priority) * 60 * 60 * 1000).toISOString();
+}
+
+function resolveTicketSlaStatus(ticket, atMs = Date.now()) {
+  if (!ticket) return '正常';
+  if (['已完成', '已关闭'].includes(ticket.status)) return '正常';
+  const deadlineMs = Date.parse(String(ticket.slaDeadline || ''));
+  if (!Number.isFinite(deadlineMs)) return '正常';
+  const createdAtMs = Date.parse(String(ticket.createdAt || ''));
+  const startMs = Number.isFinite(createdAtMs) ? createdAtMs : deadlineMs - ticketSlaHours(ticket.priority) * 60 * 60 * 1000;
+  const totalMs = Math.max(1, deadlineMs - startMs);
+  if (atMs >= deadlineMs) return '超时';
+  if (atMs >= startMs + totalMs * ticketSlaWarningRatio) return '预警';
+  return '正常';
+}
+
+// 客户可查看本项目的工单进度，但处理过程与内部备注仅运维可见。
+function sanitizeTicketForViewer(ticket, viewer) {
+  if (!ticket || !viewer || viewer.role !== 'customer') return ticket;
+  return {
+    id: ticket.id,
+    ticketNo: ticket.ticketNo,
+    projectId: ticket.projectId,
+    title: ticket.title,
+    category: ticket.category,
+    priority: ticket.priority,
+    status: ticket.status,
+    assigneeName: ticket.assigneeName,
+    slaStatus: ticket.slaStatus,
+    slaDeadline: ticket.slaDeadline,
+    resolution: ticket.resolution,
+    customerConfirmedAt: ticket.customerConfirmedAt,
+    customerComment: ticket.customerComment,
+    createdAt: ticket.createdAt,
+    updatedAt: ticket.updatedAt
+  };
+}
+
+// 工单处理人默认是同项目工程师；管理员可跨项目指派。
+function canOperateTicket(user, ticket) {
+  if (!user || !ticket) return false;
+  if (user.role === 'admin') return true;
+  if (user.role !== 'engineer') return false;
+  return Boolean(user.projectId) && ticket.projectId === user.projectId;
+}
+
+function canDeleteTicket(user, ticket) {
+  if (!user || !ticket) return false;
+  if (user.role === 'admin') return true;
+  return ticket.createdBy === user.id;
 }
 
 // 项目内可见即可操作（仅用于以已有巡检对象为模板新建计划等非执行类动作）。
@@ -10014,7 +10232,7 @@ const requestHandler = async (req, res) => {
       const projectId = pathname.split('/')[3];
       // 通知属于过程性提醒，不构成业务关联；随项目删除级联清理，避免历史通知长期阻断项目删除。
       db.notifications = (db.notifications || []).filter(item => item.projectId !== projectId);
-      const projectRelationCollections = ['users','assets','logs','workReports','knowledgeBase','documents','inspectionPlans','inspectionExecutions','spareParts','sparePartMovements','changeRecords','incidentRecords','approvals','notifications','aiInspectionTargets','aiInspectionTemplates','aiInspectionTasks','aiInspectionResults','configBackupPlans','configBackupRecords'];
+      const projectRelationCollections = ['users','assets','logs','workReports','knowledgeBase','documents','inspectionPlans','inspectionExecutions','spareParts','sparePartMovements','changeRecords','incidentRecords','tickets','dutyShifts','approvals','notifications','aiInspectionTargets','aiInspectionTemplates','aiInspectionTasks','aiInspectionResults','configBackupPlans','configBackupRecords'];
       const force = String(reqUrl.searchParams.get('force') || '') === '1';
       if (force) {
         // 管理员强制删除：先级联清理该项目下的全部业务数据与人员，再删除项目，便于清理历史残留项目。
@@ -11730,7 +11948,19 @@ const requestHandler = async (req, res) => {
       if (!['daily', 'weekly', 'monthly', 'quarterly'].includes(planCycle)) return json(res, 400, { message: '无效的巡检周期' });
       const planStatus = String(body.status || '待执行');
       if (!['待执行', '执行中', '已完成', '已执行', '异常待处理', '已停用'].includes(planStatus)) return json(res, 400, { message: '无效的巡检计划状态' });
-      const plan = { id: id('inspection'), projectId, assetId: body.assetId || '', title: planTitle, cycle: planCycle, nextDate: body.nextDate || '', owner: body.owner || user.name, status: planStatus, createdBy: user.id, createdAt: now() };
+      const plan = {
+        id: id('inspection'),
+        projectId,
+        assetId: body.assetId || '',
+        title: planTitle,
+        cycle: planCycle,
+        nextDate: body.nextDate || '',
+        owner: body.owner || user.name,
+        status: planStatus,
+        checklistTemplate: normalizeInspectionChecklistTemplate(body.checklistTemplate),
+        createdBy: user.id,
+        createdAt: now()
+      };
       db.inspectionPlans.push(plan);
       appendAuditLog(db, user, 'create', 'inspectionPlan', plan.id, `创建巡检计划 ${plan.title}`, projectId);
       await writeDb(db);
@@ -11750,6 +11980,7 @@ const requestHandler = async (req, res) => {
       if (body.nextDate !== undefined) target.nextDate = body.nextDate;
       if (body.owner !== undefined) target.owner = body.owner;
       if (body.description !== undefined) target.description = body.description;
+      if (body.checklistTemplate !== undefined) target.checklistTemplate = normalizeInspectionChecklistTemplate(body.checklistTemplate);
       const newProjectId = (user.role === 'admin' && body.projectId !== undefined) ? body.projectId : target.projectId;
       if (body.assetId !== undefined) {
         const asset = requireExistingAsset(body.assetId, db);
@@ -11837,6 +12068,10 @@ const requestHandler = async (req, res) => {
         label: '巡检附件'
       });
       if (attachmentQuotaError) return json(res, 413, { message: attachmentQuotaError });
+      const checklistItems = normalizeInspectionChecklistItems(body.checklistItems);
+      const hasAbnormalItem = checklistItems.some(item => item.result === '异常');
+      // 逐项结果优先于手工选择：只要存在异常项，整单必须记为异常，避免误判为正常后漏掉整改。
+      const executionResult = hasAbnormalItem ? '异常' : (body.result || '正常');
       const execution = {
         id: id('inspectionExec'),
         planId: plan.id,
@@ -11845,9 +12080,15 @@ const requestHandler = async (req, res) => {
         executedAt,
         executor: body.executor || user.name,
         checklist: body.checklist || '',
-        result: body.result || '正常',
+        checklistItems,
+        result: executionResult,
         issue: body.issue || '',
         suggestion: body.suggestion || '',
+        ticketId: '',
+        recheckStatus: '',
+        recheckAt: '',
+        recheckBy: '',
+        recheckResult: '',
         attachment,
         nextDate,
         createdBy: user.id,
@@ -11855,11 +12096,52 @@ const requestHandler = async (req, res) => {
       };
       db.inspectionExecutions = db.inspectionExecutions || [];
       db.inspectionExecutions.push(execution);
+      if (execution.result === '异常') {
+        const abnormalNames = checklistItems.filter(item => item.result === '异常').map(item => item.name);
+        const createdAt = now();
+        const ticket = {
+          id: id('ticket'),
+          ticketNo: nextTicketNo(db),
+          projectId: plan.projectId,
+          assetId: plan.assetId || '',
+          title: `${plan.title || '巡检'} 巡检异常`,
+          description: [
+            abnormalNames.length ? `异常检查项：${abnormalNames.join('、')}` : '',
+            execution.issue ? `异常说明：${execution.issue}` : '',
+            execution.suggestion ? `整改建议：${execution.suggestion}` : ''
+          ].filter(Boolean).join('\n') || '巡检发现异常，请跟进处理',
+          category: '巡检异常',
+          priority: '中',
+          status: '待接单',
+          assigneeId: '',
+          assigneeName: '',
+          dispatcherId: user.id,
+          sourceType: 'inspectionExecution',
+          sourceId: execution.id,
+          slaHours: ticketSlaHours('中'),
+          slaDeadline: computeTicketSlaDeadline(createdAt, '中'),
+          slaStatus: '正常',
+          acceptedAt: '',
+          respondedAt: '',
+          closedAt: '',
+          resolution: '',
+          customerConfirmedAt: '',
+          customerComment: '',
+          createdBy: user.id,
+          createdAt,
+          updatedAt: createdAt
+        };
+        db.tickets = db.tickets || [];
+        db.tickets.push(ticket);
+        execution.ticketId = ticket.id;
+        execution.recheckStatus = '待复查';
+      }
       // 统一按该计划下最新一条执行记录派生状态，避免补录历史记录时覆盖当前状态。
       refreshInspectionPlanFromExecutions(db, plan.id);
       appendAuditLog(db, user, 'execute', 'inspectionPlan', plan.id, `执行巡检 ${plan.title}，结果 ${execution.result}`, plan.projectId);
       if (execution.result === '异常') {
         createNotification(db, plan.projectId, '巡检异常提醒', `${plan.title} 巡检发现异常`, 'warning', 'inspection', 'inspectionPlan', plan.id);
+        createNotification(db, plan.projectId, '巡检异常已转工单', `${execution.ticketId ? '已自动生成整改工单' : '请及时跟进整改'}：${plan.title}`, 'warning', 'ticket-created', 'ticket', execution.ticketId || plan.id);
       }
       await writeDb(db);
       return json(res, 201, execution);
@@ -11878,6 +12160,10 @@ const requestHandler = async (req, res) => {
       if (body.executor !== undefined) target.executor = body.executor;
       if (body.result !== undefined) target.result = body.result;
       if (body.checklist !== undefined) target.checklist = body.checklist;
+      if (body.checklistItems !== undefined) {
+        target.checklistItems = normalizeInspectionChecklistItems(body.checklistItems);
+        if (target.checklistItems.some(item => item.result === '异常')) target.result = '异常';
+      }
       if (body.issue !== undefined) target.issue = body.issue;
       if (body.suggestion !== undefined) target.suggestion = body.suggestion;
       if (body.nextDate !== undefined) target.nextDate = body.nextDate;
@@ -11921,6 +12207,37 @@ const requestHandler = async (req, res) => {
       appendAuditLog(db, user, 'delete', 'inspectionExecution', executionId, `删除巡检执行记录 ${target.executedAt || target.id}`, target.projectId || plan?.projectId || '');
       await writeDb(db);
       return json(res, 200, { ok: true });
+    }
+
+    if (req.method === 'POST' && /^\/api\/inspection-executions\/[^/]+\/recheck$/.test(pathname)) {
+      const user = requireEditor(req, res, db);
+      if (!user) return;
+      const executionId = pathname.split('/')[3];
+      const target = (db.inspectionExecutions || []).find(item => item.id === executionId);
+      if (!target) return json(res, 404, { message: '巡检执行记录不存在' });
+      if (!canManageInspectionRecord(user, target)) return json(res, 403, { message: '无权复查该巡检执行记录' });
+      if (target.result !== '异常') return json(res, 400, { message: '仅异常记录需要复查' });
+      if (target.recheckStatus === '已复查') return json(res, 400, { message: '该异常已完成复查' });
+      const body = await readBody(req);
+      const recheckResult = String(body.recheckResult || '').trim();
+      if (!recheckResult) return json(res, 400, { message: '请填写复查结果' });
+      target.recheckStatus = '已复查';
+      target.recheckAt = now();
+      target.recheckBy = user.id;
+      target.recheckResult = recheckResult.slice(0, 2000);
+      // 复查完成后同步推进关联工单，避免工单仍需人工去关联记录里查找复查结论。
+      const linkedTicket = (db.tickets || []).find(item => item.id === target.ticketId);
+      if (linkedTicket && ['待接单', '处理中'].includes(linkedTicket.status)) {
+        linkedTicket.status = '待客户确认';
+        linkedTicket.resolution = `${linkedTicket.resolution || '巡检异常已整改'}\n复查结果：${target.recheckResult}`;
+        linkedTicket.respondedAt = target.recheckAt;
+        linkedTicket.updatedAt = target.recheckAt;
+        linkedTicket.slaStatus = resolveTicketSlaStatus(linkedTicket);
+      }
+      appendAuditLog(db, user, 'recheck', 'inspectionExecution', executionId, `复查巡检异常：${target.recheckResult}`, target.projectId);
+      createNotification(db, target.projectId, '巡检异常已复查', `${target.recheckResult}`, 'info', 'inspection-recheck', 'inspectionExecution', target.id);
+      await writeDb(db);
+      return json(res, 200, target);
     }
 
     if (req.method === 'GET' && pathname === '/api/spare-parts') {
@@ -12443,6 +12760,380 @@ const requestHandler = async (req, res) => {
       db.incidentRecords.splice(index, 1);
       removeNotificationsBySource(db, 'incident', incidentId);
       appendAuditLog(db, user, 'delete', 'incident', incidentId, `删除故障记录 ${target.title}`, target.projectId);
+      await writeDb(db);
+      return json(res, 200, { ok: true });
+    }
+
+    if (req.method === 'GET' && pathname === '/api/tickets') {
+      const user = requireAuth(req, res, db);
+      if (!user) return;
+      const query = Object.fromEntries(reqUrl.searchParams);
+      let list = filterByRecordScope(db.tickets || [], user, query, item => item.assigneeId || item.createdBy || '');
+      if (query.status) list = list.filter(item => item.status === query.status);
+      if (query.priority) list = list.filter(item => item.priority === query.priority);
+      if (query.slaStatus) list = list.filter(item => item.slaStatus === query.slaStatus);
+      if (query.q) {
+        const keyword = String(query.q).toLowerCase();
+        list = list.filter(item => [item.ticketNo, item.title, item.description, item.assigneeName]
+          .some(value => String(value || '').toLowerCase().includes(keyword)));
+      }
+      const sorted = parseSortQuery(query, list, 'createdAt');
+      return json(res, 200, paginateResult(sorted.map(item => sanitizeTicketForViewer(item, user)), query, user));
+    }
+
+    if (req.method === 'POST' && pathname === '/api/tickets') {
+      const user = requireEditor(req, res, db);
+      if (!user) return;
+      const body = await readBody(req);
+      const projectId = user.role === 'admin' ? String(body.projectId || '') : user.projectId;
+      if (!requireExistingProject(projectId, db)) return json(res, 400, { message: '关联项目不存在' });
+      const title = String(body.title || '').trim();
+      if (!title) return json(res, 400, { message: '工单标题不能为空' });
+      if (title.length > 120) return json(res, 400, { message: '工单标题不能超过 120 个字符' });
+      if (body.category !== undefined && !ticketCategoryOptions.includes(String(body.category))) {
+        return json(res, 400, { message: '无效的工单分类' });
+      }
+      if (body.priority !== undefined && !ticketPriorityOptions.includes(String(body.priority))) {
+        return json(res, 400, { message: '无效的优先级' });
+      }
+      if (body.assetId) {
+        const asset = requireExistingAsset(body.assetId, db);
+        if (!asset || asset.projectId !== projectId) return json(res, 400, { message: '关联资产不存在或不属于当前项目' });
+      }
+      const assignee = body.assigneeId ? requireExistingUser(body.assigneeId, db) : null;
+      if (body.assigneeId) {
+        if (!assignee) return json(res, 400, { message: '指派的处理人不存在' });
+        if (user.role !== 'admin' && assignee.projectId !== projectId) {
+          return json(res, 400, { message: '处理人不属于当前项目' });
+        }
+      }
+      const priority = body.priority || '中';
+      const createdAt = now();
+      const item = {
+        id: id('ticket'),
+        ticketNo: nextTicketNo(db),
+        projectId,
+        assetId: body.assetId || '',
+        title,
+        description: String(body.description || '').slice(0, 4000),
+        category: body.category || '服务请求',
+        priority,
+        status: '待接单',
+        assigneeId: assignee?.id || '',
+        assigneeName: assignee?.name || '',
+        dispatcherId: user.id,
+        sourceType: body.sourceType || '',
+        sourceId: body.sourceId || '',
+        slaHours: ticketSlaHours(priority),
+        slaDeadline: computeTicketSlaDeadline(createdAt, priority),
+        slaStatus: '正常',
+        acceptedAt: '',
+        respondedAt: '',
+        closedAt: '',
+        resolution: '',
+        customerConfirmedAt: '',
+        customerComment: '',
+        createdBy: user.id,
+        createdAt,
+        updatedAt: createdAt
+      };
+      db.tickets = db.tickets || [];
+      db.tickets.push(item);
+      appendAuditLog(db, user, 'create', 'ticket', item.id, `创建工单 ${item.ticketNo} ${item.title}`, projectId);
+      createNotification(db, projectId, '新工单待接单', `${item.ticketNo} ${item.title}（${item.priority}）已派发`, 'info', 'ticket-created', 'ticket', item.id);
+      await writeDb(db);
+      return json(res, 201, item);
+    }
+
+    if (req.method === 'PUT' && pathname.startsWith('/api/tickets/')) {
+      const user = requireEditor(req, res, db);
+      if (!user) return;
+      const ticketId = pathname.split('/')[3];
+      const target = (db.tickets || []).find(item => item.id === ticketId);
+      if (!target) return json(res, 404, { message: '工单不存在' });
+      if (!canOperateTicket(user, target)) return json(res, 403, { message: '无权修改该工单' });
+      if (['已完成', '已关闭'].includes(target.status)) return json(res, 400, { message: '已完成或已关闭的工单不可修改' });
+      const body = await readBody(req);
+      if (body.priority !== undefined && !ticketPriorityOptions.includes(String(body.priority))) {
+        return json(res, 400, { message: '无效的优先级' });
+      }
+      if (body.category !== undefined && !ticketCategoryOptions.includes(String(body.category))) {
+        return json(res, 400, { message: '无效的工单分类' });
+      }
+      if (body.title !== undefined) {
+        const nextTitle = String(body.title || '').trim();
+        if (!nextTitle) return json(res, 400, { message: '工单标题不能为空' });
+        target.title = nextTitle.slice(0, 120);
+      }
+      if (body.description !== undefined) target.description = String(body.description || '').slice(0, 4000);
+      if (body.category !== undefined) target.category = body.category;
+      if (body.priority !== undefined && body.priority !== target.priority) {
+        target.priority = body.priority;
+        target.slaHours = ticketSlaHours(body.priority);
+        target.slaDeadline = computeTicketSlaDeadline(target.createdAt, body.priority);
+        target.slaStatus = resolveTicketSlaStatus(target);
+      }
+      if (body.assetId !== undefined) {
+        if (body.assetId) {
+          const asset = requireExistingAsset(body.assetId, db);
+          if (!asset || asset.projectId !== target.projectId) return json(res, 400, { message: '关联资产不存在或不属于当前项目' });
+        }
+        target.assetId = body.assetId;
+      }
+      if (body.assigneeId !== undefined) {
+        const assignee = body.assigneeId ? requireExistingUser(body.assigneeId, db) : null;
+        if (body.assigneeId && !assignee) return json(res, 400, { message: '指派的处理人不存在' });
+        if (assignee && user.role !== 'admin' && assignee.projectId !== target.projectId) {
+          return json(res, 400, { message: '处理人不属于当前项目' });
+        }
+        target.assigneeId = assignee?.id || '';
+        target.assigneeName = assignee?.name || '';
+      }
+      target.updatedAt = now();
+      appendAuditLog(db, user, 'update', 'ticket', ticketId, `修改工单 ${target.ticketNo}`, target.projectId);
+      await writeDb(db);
+      return json(res, 200, target);
+    }
+
+    if (req.method === 'POST' && /^\/api\/tickets\/[^/]+\/actions$/.test(pathname)) {
+      const user = requireAuth(req, res, db);
+      if (!user) return;
+      const ticketId = pathname.split('/')[3];
+      const target = (db.tickets || []).find(item => item.id === ticketId);
+      if (!target) return json(res, 404, { message: '工单不存在' });
+      const body = await readBody(req);
+      const action = String(body.action || '');
+      const isCustomer = user.role === 'customer';
+      if (!isCustomer && !canOperateTicket(user, target)) return json(res, 403, { message: '无权操作该工单' });
+      if (isCustomer && (target.projectId !== user.projectId || action !== 'confirm')) {
+        return json(res, 403, { message: '仅可确认本项目的待确认工单' });
+      }
+      const previousStatus = target.status;
+
+      if (action === 'accept') {
+        if (target.status !== '待接单') return json(res, 400, { message: '仅待接单工单可接单' });
+        target.status = '处理中';
+        target.acceptedAt = now();
+        if (!target.assigneeId) {
+          target.assigneeId = user.id;
+          target.assigneeName = user.name || user.username || '';
+        }
+      } else if (action === 'transfer') {
+        if (['已完成', '已关闭'].includes(target.status)) return json(res, 400, { message: '已完成或已关闭的工单不可转派' });
+        const assignee = requireExistingUser(String(body.assigneeId || ''), db);
+        if (!assignee) return json(res, 400, { message: '请选择有效的转派处理人' });
+        if (user.role !== 'admin' && assignee.projectId !== target.projectId) {
+          return json(res, 400, { message: '处理人不属于当前项目' });
+        }
+        target.assigneeId = assignee.id;
+        target.assigneeName = assignee.name || assignee.username || '';
+        if (target.status === '处理中') target.status = '待接单';
+        createNotification(db, target.projectId, '工单转派', `${target.ticketNo} ${target.title} 已转派给 ${target.assigneeName}`, 'info', 'ticket-transfer', 'ticket', target.id);
+      } else if (action === 'resolve') {
+        if (target.status !== '处理中') return json(res, 400, { message: '仅处理中的工单可回单' });
+        const resolution = String(body.resolution || '').trim();
+        if (!resolution) return json(res, 400, { message: '请填写处理结论' });
+        target.resolution = resolution.slice(0, 4000);
+        target.status = '待客户确认';
+        target.respondedAt = now();
+        createNotification(db, target.projectId, '工单待确认', `${target.ticketNo} ${target.title} 已处理完成，等待客户确认`, 'info', 'ticket-resolve', 'ticket', target.id);
+      } else if (action === 'close') {
+        if (target.status !== '待客户确认') return json(res, 400, { message: '仅待客户确认的工单可关闭' });
+        target.status = '已完成';
+        target.closedAt = now();
+      } else if (action === 'confirm') {
+        if (user.role !== 'customer') return json(res, 403, { message: '仅客户可确认工单' });
+        if (target.status !== '待客户确认') return json(res, 400, { message: '仅待客户确认的工单可确认' });
+        target.customerConfirmedAt = now();
+        target.customerComment = String(body.comment || '').slice(0, 1000);
+        target.status = '已完成';
+        target.closedAt = target.closedAt || now();
+      } else {
+        return json(res, 400, { message: '无效的工单操作' });
+      }
+
+      target.updatedAt = now();
+      target.slaStatus = resolveTicketSlaStatus(target);
+      appendAuditLog(db, user, action === 'confirm' ? 'confirm' : action, 'ticket', ticketId, `工单 ${target.ticketNo} 状态 ${previousStatus} -> ${target.status}`, target.projectId);
+      await writeDb(db);
+      return json(res, 200, target);
+    }
+
+    if (req.method === 'DELETE' && pathname.startsWith('/api/tickets/')) {
+      const user = requireEditor(req, res, db);
+      if (!user) return;
+      const ticketId = pathname.split('/')[3];
+      const index = (db.tickets || []).findIndex(item => item.id === ticketId);
+      if (index === -1) return json(res, 404, { message: '工单不存在' });
+      const target = db.tickets[index];
+      if (!canDeleteTicket(user, target)) return json(res, 403, { message: '仅支持删除自己创建的工单' });
+      db.tickets.splice(index, 1);
+      removeNotificationsBySource(db, 'ticket', ticketId);
+      appendAuditLog(db, user, 'delete', 'ticket', ticketId, `删除工单 ${target.ticketNo}`, target.projectId);
+      await writeDb(db);
+      return json(res, 200, { ok: true });
+    }
+
+    if (req.method === 'GET' && pathname === '/api/duty-shifts') {
+      // 值班交接含内部遗留问题，仅运维与管理角色可见。
+      const user = requireEditor(req, res, db);
+      if (!user) return;
+      const query = Object.fromEntries(reqUrl.searchParams);
+      let list = filterByProjectScope(db.dutyShifts || [], user, item => item.projectId);
+      if (query.status) list = list.filter(item => item.status === query.status);
+      if (query.dutyDate) list = list.filter(item => item.dutyDate === query.dutyDate);
+      const sorted = parseSortQuery(query, list, 'dutyDate');
+      return json(res, 200, paginateResult(sorted, query, user));
+    }
+
+    if (req.method === 'POST' && pathname === '/api/duty-shifts') {
+      const user = requireEditor(req, res, db);
+      if (!user) return;
+      const body = await readBody(req);
+      const projectId = user.role === 'admin' ? String(body.projectId || '') : user.projectId;
+      if (!requireExistingProject(projectId, db)) return json(res, 400, { message: '关联项目不存在' });
+      const dutyDate = String(body.dutyDate || '').slice(0, 10);
+      if (!parseDateOnly(dutyDate)) return json(res, 400, { message: '请选择有效的值班日期' });
+      const startTime = String(body.startTime || '').slice(0, 5);
+      const endTime = String(body.endTime || '').slice(0, 5);
+      if (!/^\d{2}:\d{2}$/.test(startTime) || !/^\d{2}:\d{2}$/.test(endTime) || startTime >= endTime) {
+        return json(res, 400, { message: '请填写有效的值班开始与结束时间' });
+      }
+      const primaryUser = requireExistingUser(String(body.primaryUserId || ''), db);
+      if (!primaryUser) return json(res, 400, { message: '请选择值班人' });
+      if (user.role !== 'admin' && primaryUser.projectId !== projectId) {
+        return json(res, 400, { message: '值班人不属于当前项目' });
+      }
+      if (body.backupUserId) {
+        const backupUser = requireExistingUser(String(body.backupUserId), db);
+        if (!backupUser) return json(res, 400, { message: '备班人不存在' });
+        if (user.role !== 'admin' && backupUser.projectId !== projectId) {
+          return json(res, 400, { message: '备班人不属于当前项目' });
+        }
+      }
+      const duplicate = (db.dutyShifts || []).some(item => item.projectId === projectId
+        && item.dutyDate === dutyDate
+        && item.primaryUserId === primaryUser.id
+        && item.startTime === startTime
+        && item.endTime === endTime);
+      if (duplicate) return json(res, 409, { message: '同一值班人在该时段已有排班' });
+      const createdAt = now();
+      const item = {
+        id: id('dutyShift'),
+        projectId,
+        title: String(body.title || '').trim().slice(0, 120) || `${dutyDate} 值班`,
+        dutyDate,
+        startTime,
+        endTime,
+        shiftType: body.shiftType || '白班',
+        primaryUserId: primaryUser.id,
+        backupUserId: body.backupUserId || '',
+        status: '待开始',
+        handoverContent: '',
+        handoverIssue: '',
+        handoverAt: '',
+        handoverBy: '',
+        receivedBy: '',
+        createdBy: user.id,
+        createdAt,
+        updatedAt: createdAt
+      };
+      db.dutyShifts = db.dutyShifts || [];
+      db.dutyShifts.push(item);
+      appendAuditLog(db, user, 'create', 'dutyShift', item.id, `新增值班排班 ${item.title}`, projectId);
+      await writeDb(db);
+      return json(res, 201, item);
+    }
+
+    if (req.method === 'PUT' && pathname.startsWith('/api/duty-shifts/')) {
+      const user = requireEditor(req, res, db);
+      if (!user) return;
+      const shiftId = pathname.split('/')[3];
+      const target = (db.dutyShifts || []).find(item => item.id === shiftId);
+      if (!target) return json(res, 404, { message: '值班排班不存在' });
+      if (!canOperateTicket(user, target)) return json(res, 403, { message: '无权修改该值班排班' });
+      if (target.status === '已交接') return json(res, 400, { message: '已交接的排班不可修改' });
+      const body = await readBody(req);
+      if (body.title !== undefined) target.title = String(body.title || '').trim().slice(0, 120) || target.title;
+      if (body.dutyDate !== undefined) {
+        const dutyDate = String(body.dutyDate || '').slice(0, 10);
+        if (!parseDateOnly(dutyDate)) return json(res, 400, { message: '请选择有效的值班日期' });
+        target.dutyDate = dutyDate;
+      }
+      if (body.startTime !== undefined) target.startTime = String(body.startTime || '').slice(0, 5);
+      if (body.endTime !== undefined) target.endTime = String(body.endTime || '').slice(0, 5);
+      if (!/^\d{2}:\d{2}$/.test(target.startTime) || !/^\d{2}:\d{2}$/.test(target.endTime) || target.startTime >= target.endTime) {
+        return json(res, 400, { message: '请填写有效的值班开始与结束时间' });
+      }
+      if (body.shiftType !== undefined) target.shiftType = String(body.shiftType || '白班');
+      if (body.primaryUserId !== undefined) {
+        const primaryUser = requireExistingUser(String(body.primaryUserId || ''), db);
+        if (!primaryUser) return json(res, 400, { message: '请选择值班人' });
+        if (user.role !== 'admin' && primaryUser.projectId !== target.projectId) {
+          return json(res, 400, { message: '值班人不属于当前项目' });
+        }
+        target.primaryUserId = primaryUser.id;
+      }
+      if (body.backupUserId !== undefined) {
+        if (body.backupUserId) {
+          const backupUser = requireExistingUser(String(body.backupUserId), db);
+          if (!backupUser) return json(res, 400, { message: '备班人不存在' });
+          if (user.role !== 'admin' && backupUser.projectId !== target.projectId) {
+            return json(res, 400, { message: '备班人不属于当前项目' });
+          }
+        }
+        target.backupUserId = body.backupUserId || '';
+      }
+      if (body.status !== undefined) {
+        if (!dutyShiftStatusOptions.includes(String(body.status))) return json(res, 400, { message: '无效的值班状态' });
+        target.status = body.status;
+      }
+      target.updatedAt = now();
+      appendAuditLog(db, user, 'update', 'dutyShift', shiftId, `修改值班排班 ${target.title}`, target.projectId);
+      await writeDb(db);
+      return json(res, 200, target);
+    }
+
+    if (req.method === 'POST' && /^\/api\/duty-shifts\/[^/]+\/handover$/.test(pathname)) {
+      const user = requireEditor(req, res, db);
+      if (!user) return;
+      const shiftId = pathname.split('/')[3];
+      const target = (db.dutyShifts || []).find(item => item.id === shiftId);
+      if (!target) return json(res, 404, { message: '值班排班不存在' });
+      if (!canOperateTicket(user, target)) return json(res, 403, { message: '无权交接该值班排班' });
+      if (target.status === '已交接') return json(res, 400, { message: '该排班已交接' });
+      const body = await readBody(req);
+      const handoverContent = String(body.handoverContent || '').trim();
+      if (!handoverContent) return json(res, 400, { message: '请填写交接内容' });
+      const receivedBy = body.receivedBy ? requireExistingUser(String(body.receivedBy), db) : null;
+      if (body.receivedBy && !receivedBy) return json(res, 400, { message: '接班人不存在' });
+      if (receivedBy && user.role !== 'admin' && receivedBy.projectId !== target.projectId) {
+        return json(res, 400, { message: '接班人不属于当前项目' });
+      }
+      target.handoverContent = handoverContent.slice(0, 4000);
+      target.handoverIssue = String(body.handoverIssue || '').slice(0, 4000);
+      target.handoverAt = now();
+      target.handoverBy = user.id;
+      target.receivedBy = receivedBy?.id || '';
+      target.status = '已交接';
+      target.updatedAt = target.handoverAt;
+      appendAuditLog(db, user, 'handover', 'dutyShift', shiftId, `交接值班 ${target.title}`, target.projectId);
+      createNotification(db, target.projectId, '值班交接完成', `${target.title} 已完成交接`, 'info', 'duty-handover', 'dutyShift', target.id);
+      await writeDb(db);
+      return json(res, 200, target);
+    }
+
+    if (req.method === 'DELETE' && pathname.startsWith('/api/duty-shifts/')) {
+      const user = requireEditor(req, res, db);
+      if (!user) return;
+      const shiftId = pathname.split('/')[3];
+      const index = (db.dutyShifts || []).findIndex(item => item.id === shiftId);
+      if (index === -1) return json(res, 404, { message: '值班排班不存在' });
+      const target = db.dutyShifts[index];
+      if (!canOperateTicket(user, target)) return json(res, 403, { message: '无权删除该值班排班' });
+      db.dutyShifts.splice(index, 1);
+      removeNotificationsBySource(db, 'dutyShift', shiftId);
+      appendAuditLog(db, user, 'delete', 'dutyShift', shiftId, `删除值班排班 ${target.title}`, target.projectId);
       await writeDb(db);
       return json(res, 200, { ok: true });
     }

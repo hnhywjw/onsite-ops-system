@@ -3050,6 +3050,86 @@ async function main() {
   const scopeExecutionsMine = await request(`/api/inspection-executions?all=1&scope=mine&projectId=${encodeURIComponent(scopeProjectId)}`, { headers: { cookie: scopeCookieA } });
   assert(scopeExecutionsMine.status === 200 && (scopeExecutionsMine.data.data || []).length === 1 && scopeExecutionsMine.data.data[0].id === scopeExecutionA.data.id, 'scope=mine 应只返回本人巡检执行');
 
+  // 工单闭环：接单 -> 回单 -> 客户确认，客户视图不应暴露内部处理字段
+  const scopeTicket = await request('/api/tickets', {
+    method: 'POST', headers: { cookie: scopeCookieA, 'Content-Type': 'application/json' },
+    body: JSON.stringify({ projectId: scopeProjectId, assetId: scopeAsset.data.id, title: '视图范围工单', description: '内部处理说明', category: '故障', priority: '高', assigneeId: scopeEngineerB.id })
+  });
+  assert(scopeTicket.status === 201 && /^WO\d{8}\d{4}$/.test(scopeTicket.data.ticketNo || ''), `创建工单失败: ${scopeTicket.status} ${JSON.stringify(scopeTicket.data)}`);
+  assert(scopeTicket.data.status === '待接单' && scopeTicket.data.slaStatus === '正常', '新工单应处于待接单且 SLA 正常');
+  const scopeTicketAccept = await request(`/api/tickets/${scopeTicket.data.id}/actions`, {
+    method: 'POST', headers: { cookie: scopeCookieB, 'Content-Type': 'application/json' },
+    body: JSON.stringify({ action: 'accept' })
+  });
+  assert(scopeTicketAccept.status === 200 && scopeTicketAccept.data.status === '处理中' && scopeTicketAccept.data.acceptedAt, '工程师应能接单');
+  const scopeTicketResolve = await request(`/api/tickets/${scopeTicket.data.id}/actions`, {
+    method: 'POST', headers: { cookie: scopeCookieB, 'Content-Type': 'application/json' },
+    body: JSON.stringify({ action: 'resolve', resolution: '已更换故障磁盘' })
+  });
+  assert(scopeTicketResolve.status === 200 && scopeTicketResolve.data.status === '待客户确认', '处理人应能回单');
+  const scopeTicketsCustomer = await request(`/api/tickets?all=1&projectId=${encodeURIComponent(scopeProjectId)}`, { headers: { cookie: scopeCustomerCookie } });
+  const scopeTicketForCustomer = (scopeTicketsCustomer.data.data || []).find(item => item.id === scopeTicket.data.id);
+  assert(scopeTicketForCustomer && scopeTicketForCustomer.description === undefined, '客户视图不应包含工单处理描述');
+  const scopeTicketConfirmByEngineer = await request(`/api/tickets/${scopeTicket.data.id}/actions`, {
+    method: 'POST', headers: { cookie: scopeCookieA, 'Content-Type': 'application/json' },
+    body: JSON.stringify({ action: 'confirm' })
+  });
+  assert(scopeTicketConfirmByEngineer.status === 403, '工程师不应能代客户确认工单');
+  const scopeTicketConfirm = await request(`/api/tickets/${scopeTicket.data.id}/actions`, {
+    method: 'POST', headers: { cookie: scopeCustomerCookie, 'Content-Type': 'application/json' },
+    body: JSON.stringify({ action: 'confirm', comment: '确认完成' })
+  });
+  assert(scopeTicketConfirm.status === 200 && scopeTicketConfirm.data.status === '已完成' && scopeTicketConfirm.data.customerConfirmedAt, '客户应能确认工单完成');
+
+  // 值班交接：开始值班 -> 交接给备班人
+  const scopeShift = await request('/api/duty-shifts', {
+    method: 'POST', headers: { cookie: scopeCookieA, 'Content-Type': 'application/json' },
+    body: JSON.stringify({ projectId: scopeProjectId, dutyDate: '2099-12-30', startTime: '09:00', endTime: '18:00', shiftType: '白班', primaryUserId: scopeEngineerA.id, backupUserId: scopeEngineerB.id })
+  });
+  assert(scopeShift.status === 201 && scopeShift.data.status === '待开始', `创建值班排班失败: ${scopeShift.status} ${JSON.stringify(scopeShift.data)}`);
+  const scopeShiftDuplicate = await request('/api/duty-shifts', {
+    method: 'POST', headers: { cookie: scopeCookieA, 'Content-Type': 'application/json' },
+    body: JSON.stringify({ projectId: scopeProjectId, dutyDate: '2099-12-30', startTime: '09:00', endTime: '18:00', primaryUserId: scopeEngineerA.id })
+  });
+  assert(scopeShiftDuplicate.status === 409, '同一值班人同一时段不应重复排班');
+  const scopeShiftStart = await request(`/api/duty-shifts/${scopeShift.data.id}`, {
+    method: 'PUT', headers: { cookie: scopeCookieA, 'Content-Type': 'application/json' },
+    body: JSON.stringify({ status: '值班中' })
+  });
+  assert(scopeShiftStart.status === 200 && scopeShiftStart.data.status === '值班中', '应能开始值班');
+  const scopeShiftHandover = await request(`/api/duty-shifts/${scopeShift.data.id}/handover`, {
+    method: 'POST', headers: { cookie: scopeCookieA, 'Content-Type': 'application/json' },
+    body: JSON.stringify({ handoverContent: '夜间无异常', handoverIssue: 'UPS 电池待更换', receivedBy: scopeEngineerB.id })
+  });
+  assert(scopeShiftHandover.status === 200 && scopeShiftHandover.data.status === '已交接' && scopeShiftHandover.data.receivedBy === scopeEngineerB.id, '值班交接应记录接班人并置为已交接');
+
+  // 巡检异常：逐项异常强制整单异常、自动生成工单，复查后推进关联工单
+  const scopeChecklistPlan = await request('/api/inspection-plans', {
+    method: 'POST', headers: { cookie: scopeCookieA, 'Content-Type': 'application/json' },
+    body: JSON.stringify({ projectId: scopeProjectId, assetId: scopeAsset.data.id, title: '视图范围检查项巡检', cycle: 'monthly', nextDate: '2099-12-31', checklistTemplate: [{ name: '设备指示灯' }, { name: '备份任务' }] })
+  });
+  assert(scopeChecklistPlan.status === 201 && (scopeChecklistPlan.data.checklistTemplate || []).length === 2, '巡检计划应保存检查项模板');
+  const scopeAbnormalExecution = await request('/api/inspection-executions', {
+    method: 'POST', headers: { cookie: scopeCookieA, 'Content-Type': 'application/json' },
+    body: JSON.stringify({
+      planId: scopeChecklistPlan.data.id,
+      executedAt: '2026-06-20T09:00',
+      result: '正常',
+      checklist: '设备指示灯、备份任务',
+      checklistItems: [{ name: '设备指示灯', result: '正常', remark: '' }, { name: '备份任务', result: '异常', remark: '昨日备份失败' }]
+    })
+  });
+  assert(scopeAbnormalExecution.status === 201 && scopeAbnormalExecution.data.result === '异常', '存在异常检查项时整单应强制为异常');
+  assert(scopeAbnormalExecution.data.ticketId && scopeAbnormalExecution.data.recheckStatus === '待复查', '巡检异常应自动生成工单并置为待复查');
+  const scopeRecheck = await request(`/api/inspection-executions/${scopeAbnormalExecution.data.id}/recheck`, {
+    method: 'POST', headers: { cookie: scopeCookieA, 'Content-Type': 'application/json' },
+    body: JSON.stringify({ recheckResult: '已重新执行备份并校验成功' })
+  });
+  assert(scopeRecheck.status === 200 && scopeRecheck.data.recheckStatus === '已复查', '异常巡检记录应能复查');
+  const scopeLinkedTickets = await request(`/api/tickets?all=1&projectId=${encodeURIComponent(scopeProjectId)}`, { headers: { cookie: scopeCookieA } });
+  const scopeLinkedTicket = (scopeLinkedTickets.data.data || []).find(item => item.id === scopeAbnormalExecution.data.ticketId);
+  assert(scopeLinkedTicket && scopeLinkedTicket.status === '待客户确认' && String(scopeLinkedTicket.resolution || '').includes('已重新执行备份并校验成功'), '复查结果应推进关联工单并记录结论');
+
   const scopeIncidentA = await request('/api/incidents', {
     method: 'POST', headers: { cookie: scopeCookieA, 'Content-Type': 'application/json' },
     body: JSON.stringify({ projectId: scopeProjectId, assetId: scopeAsset.data.id, title: '视图范围故障A', faultType: '硬件故障', severity: '低', status: '处理中', occurredAt: '2099-01-01T10:00' })
