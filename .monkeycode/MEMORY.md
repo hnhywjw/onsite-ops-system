@@ -140,11 +140,7 @@ Agent 在任务执行过程中发现的条目应遵循以下格式：
   - 推送：`git push origin HEAD:main`，再 `git push origin v<ver>`。
   - 创建 Release：`gh release create v<ver> --repo hnhywjw/onsite-ops-system --title "..." --notes-file <notes.md> <production.tar.gz> <upgrade.tar.gz> <sha256>`。
   - Release Notes 必须含更新内容、交付物与 SHA256、环境要求、Docker Compose 安装、反向代理示例、手动部署、升级部署（含签名要求）与验收清单；用 `gh release edit v<ver> --notes-file <notes.md>` 更新。文档中引用的包文件名版本号必须与当前发布版本一致。
-
-[全量开发包与私有仓库]
-- Date: 2026-09-30
-- Context: Agent 按要求导出可再次导入开发平台的全量包并上传 GitHub
-- Category: 运维部署/工作流协作
-- Instructions:
   - 全量开发包含源码、`.git`、`.monkeycode`、`node_modules`、MySQL 导出、`data/db.json` 与密钥；排除 `data/backups`、`data/archive`、`public/downloads`、历史 `onsite-ops-*.tar.gz`/`.sha256`。
   - 因含数据库导出与密钥，只上传到**私有仓库** `hnhywjw/onsite-ops-system-devbox`，不得上传公开仓库；空仓库需先推 README 初始化 `main`，否则 `gh release create` 报 422。
+  - 全量包命名 `onsite-ops-system-full-v<ver>.tar.gz`，根目录 `onsite-ops-full-v<ver>/`，含 `database/onsite_ops_system-dump.sql`；用 `mysqldump ... --single-transaction --skip-lock-tables` 导出（`--routines --events` 会被 onsite_ops 账号拒绝）。
+  - Release 资产为全量包与 `.sha256`，标题 `全量开发包 v<ver>`；`IMPORT_README.md` 需同时写入包内与 Release 说明，包内版本号与当前版本一致。
