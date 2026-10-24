@@ -64,6 +64,7 @@ Agent 在任务执行过程中发现的条目应遵循以下格式：
   - `npm run regression` 中途失败会残留测试用户/项目/资产并连锁失败；可调用 `POST /api/system/backups/{filename}/restore` 恢复到本轮最早的 `backup-*.json`（需管理员密码与 `X-CSRF-Token`，文件名 `encodeURIComponent`）。
   - 忘记密码限流（`FP_MAX_ATTEMPTS=5`，锁 30 分钟）是内存态，连续回归会触发 429 假失败，重启 `npm start` 清零；重启后立即回归偶发 `fetch failed`，等 `/api/health` 200 后重跑。
   - `regression.js`/`e2e.js` 创建的测试项目与「AI 周期巡检回归任务」不自动清理会累积；项目筛选取登录时 `pageSize=100` 列表，库内项目接近 100 时新项目落到页外导致偶发失败。
+  - 回归中断还会残留 `monitorEnabled:true` 的测试资产（`布局Ping-*`、`布局SNMP-*` 等），每轮采集都会拖慢调度直至 `/api/monitor/run` 持续 409；`cleanupRegressionArtifacts()` 现在按名称前缀在每轮开始时清理项目与监控资产。
   - `npm run e2e` 偶发 30s 超时/竞态重跑即过；AI 巡检探测处 `{ timeout: 90000 }` 被误传为第二参数。若 `data/db.json` 膨胀到数十 MB（万级通知与巡检结果），浏览器主线程会阻塞并稳定卡在导航点击，此时用独立目录复制源码后加 `MYSQL_PORT=1 ALLOW_FILE_DB_FALLBACK=true PORT=3100` 启动文件库实例，再以 `BASE_URL=http://127.0.0.1:3100` 跑 e2e 即可区分数据膨胀与代码回归。
   - 工作汇报用例按合成日期（`2099-11-*`）创建日志，清理必须按「事件+日期+用户」精确匹配，否则同名日期工时翻倍。
 
