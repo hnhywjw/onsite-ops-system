@@ -184,3 +184,6 @@
 
 # Generated upgrade manifest
 /manifest.json
+
+# Release checksum assets
+/*.sha256
