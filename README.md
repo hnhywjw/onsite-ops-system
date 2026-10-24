@@ -109,16 +109,22 @@ docker compose --env-file .env.production -f docker-compose.prod.yml up -d --bui
 
 ## 版本
 
-当前版本：`1.1.0`
+当前版本：`1.1.1`
 
 ### 软件包下载
 
-最新版本：**[v1.1.0](https://github.com/hnhywjw/onsite-ops-system/releases/tag/v1.1.0)**
+最新版本：**[v1.1.1](https://github.com/hnhywjw/onsite-ops-system/releases/tag/v1.1.1)**
 
-- 完整安装包 `onsite-ops-system-v1.1.0-production.tar.gz`
-- 离线升级包 `onsite-ops-upgrade-v1.1.0.tar.gz`
+- 完整安装包 `onsite-ops-system-v1.1.1-production.tar.gz`
+- 离线升级包 `onsite-ops-upgrade-v1.1.1.tar.gz`
 - SHA256 校验文件
 - 部署说明见仓库 `PRODUCTION_DEPLOY.md`
+
+### v1.1.1 更新说明
+
+安全修复：
+- LDAP 账号绑定或关闭动态令牌时，改为回源 LDAP 校验域账号密码，不再跳过密码复核
+- 密码复核失败沿用 5 次锁定 15 分钟的限制，LDAP 未配置或校验异常一律拒绝
 
 ### v1.1.0 更新说明
 

@@ -2550,9 +2550,21 @@ function readPendingTotpSecret(user) {
   }
 }
 
-// LDAP 账号的本地密码是系统随机生成的占位值，无法用于二次确认，改为只依赖动态码。
-function verifyTwoFactorPassword(user, password) {
-  if (String(user?.username || '').startsWith('ldap_')) return true;
+// LDAP 账号的本地密码是系统随机生成的占位值，二次确认必须回到 LDAP 服务器校验域账号密码。
+async function verifyTwoFactorPassword(user, password) {
+  const username = String(user?.username || '');
+  if (username.startsWith('ldap_')) {
+    const ldapUsername = username.slice('ldap_'.length);
+    const { ldapUrl, ldapBaseDn, ldapBindDn, ldapBindPassword } = getLdapConfig();
+    if (!ldapUrl || !ldapUsername || !password) return false;
+    try {
+      const result = await ldapAuthenticate(ldapUrl, ldapBaseDn, ldapBindDn, ldapBindPassword, ldapUsername, String(password));
+      return Boolean(result);
+    } catch (error) {
+      console.warn('LDAP 二次确认失败:', error.message);
+      return false;
+    }
+  }
   return verifyPassword(String(password || ''), user?.passwordHash);
 }
 
@@ -9652,7 +9664,7 @@ const requestHandler = async (req, res) => {
       if (setupReauthLock.locked) {
         return json(res, 429, { message: '密码尝试次数过多，请稍后重试' }, rateLimitResponseHeaders(setupReauthLock.retryAfterMs));
       }
-      if (!verifyTwoFactorPassword(user, body.password)) {
+      if (!(await verifyTwoFactorPassword(user, body.password))) {
         recordPasswordReauthFailure(user);
         return json(res, 401, { message: '当前密码错误' });
       }
@@ -9713,7 +9725,7 @@ const requestHandler = async (req, res) => {
       if (disableReauthLock.locked) {
         return json(res, 429, { message: '密码尝试次数过多，请稍后重试' }, rateLimitResponseHeaders(disableReauthLock.retryAfterMs));
       }
-      if (!verifyTwoFactorPassword(user, body.password)) {
+      if (!(await verifyTwoFactorPassword(user, body.password))) {
         recordPasswordReauthFailure(user);
         return json(res, 401, { message: '当前密码错误' });
       }

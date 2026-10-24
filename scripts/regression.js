@@ -301,6 +301,12 @@ function sha256(value) {
   return crypto.createHash('sha256').update(value).digest('hex');
 }
 
+function scryptHash(value) {
+  const salt = crypto.randomBytes(16).toString('hex');
+  const derived = crypto.scryptSync(String(value), salt, 64);
+  return `$scrypt$${salt}$${derived.toString('hex')}`;
+}
+
 function createTarGz(entries) {
   const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), 'onsite-upgrade-'));
   const archivePath = path.join(tempDir, 'upgrade.tar.gz');
@@ -780,6 +786,21 @@ async function main() {
     twoFactorSecret: 'regression-totp-secret-cipher',
     twoFactorRecoveryCodeHashes: ['regression-recovery-hash-1', 'regression-recovery-hash-2']
   });
+  // LDAP 账号的本地口令只是占位值，绑定动态令牌时必须回到 LDAP 校验域口令。
+  // 未配置 LDAP 时任何口令都应被拒绝，避免退化成「无需复核即可绑定」。
+  const ldapRegressionUsername = `ldap_regression_${Date.now()}`;
+  const ldapRegressionPassword = 'LdapVerify1!';
+  const ldapRegressionUserId = `user_ldap_${Date.now()}`;
+  snapshot.users.push({
+    id: ldapRegressionUserId,
+    username: ldapRegressionUsername,
+    passwordHash: scryptHash(ldapRegressionPassword),
+    role: 'viewer',
+    name: 'LDAP 复核回归账号',
+    projectId,
+    status: 'active',
+    createdAt: '2026-01-01T00:00:00.000Z'
+  });
 
   const importDenied = await request('/api/system/import', {
     method: 'POST',
@@ -807,6 +828,19 @@ async function main() {
   assert(twoFactorUserAfterImport.twoFactorEnabledAt === '2026-01-02T03:04:05.000Z', '导入后动态令牌启用时间丢失');
   assert(!Object.prototype.hasOwnProperty.call(twoFactorUserAfterImport, 'twoFactorSecret'), '人员列表不应返回动态令牌密钥');
   assert(!Object.prototype.hasOwnProperty.call(twoFactorUserAfterImport, 'twoFactorRecoveryCodeHashes'), '人员列表不应返回恢复码哈希');
+
+  const ldapLogin = await login(ldapRegressionUsername, ldapRegressionPassword);
+  assert(ldapLogin.status === 200 && ldapLogin.cookie, 'LDAP 回归账号本地登录失败');
+  const ldapSetup = await request('/api/account/2fa/setup', {
+    method: 'POST',
+    headers: { cookie: ldapLogin.cookie, 'Content-Type': 'application/json' },
+    body: JSON.stringify({ password: ldapRegressionPassword })
+  });
+  assert(ldapSetup.status === 401, `LDAP 账号绑定动态令牌应校验域口令，实际返回 ${ldapSetup.status}`);
+  const ldapPendingStatus = await request('/api/account/2fa', { headers: { cookie: ldapLogin.cookie } });
+  assert(ldapPendingStatus.status === 200 && ldapPendingStatus.data.pending === false, 'LDAP 复核失败后不应留下待绑定密钥');
+  await request('/api/logout', { method: 'POST', headers: { cookie: ldapLogin.cookie, 'Content-Type': 'application/json' }, body: '{}' });
+  await request(`/api/users/${ldapRegressionUserId}`, { method: 'DELETE', headers: { cookie } });
 
   const engineer = await login(engineerAccount.username, 'Engineer123!');
   assert(engineer.status === 200, '工程师登录失败');

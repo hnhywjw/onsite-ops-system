@@ -38,6 +38,9 @@
   - 账号密码登录。
 - `POST /api/auth/ldap`
   - LDAP 登录，已接验证码和限流。
+- `POST /api/account/2fa/setup`、`POST /api/account/2fa/disable`
+  - 绑定与关闭动态令牌前需复核当前密码，失败按账号锁定。
+  - LDAP 账号（`ldap_` 前缀）的本地口令为随机占位值，复核时回源 LDAP 校验域账号密码；LDAP 未配置或校验不通过一律拒绝。
 - `GET /api/auth/oidc/login`
   - OIDC 登录入口。
 - `GET /api/auth/oidc/callback`
@@ -59,6 +62,8 @@
 - `POST /api/assets/import`
 - `GET|POST|PUT|DELETE /api/logs`
 - `GET|POST|PUT|DELETE /api/kb`
+  - `GET /api/kb` 列表对客户账号只返回标题、分类、标签、项目与创建信息，正文、问题描述、解决方案不下发。
+  - `GET /api/kb/:id` 详情对项目内所有角色（含客户）返回完整内容；这是产品既定取舍，客户可通过详情查阅知识条目。
 - `GET|POST|PUT|DELETE /api/documents`
 
 ### 运维作业

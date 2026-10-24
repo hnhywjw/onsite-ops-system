@@ -3770,7 +3770,7 @@
       <div id="twoFactorStatus" class="muted" style="font-size:13px; margin-bottom:12px;">加载中...</div>
       <div id="twoFactorDisabledPanel" class="hidden">
         <p class="muted" style="font-size:13px; margin:0 0 10px;">启用后，登录时除密码和图形验证码外，还需要输入身份验证器中的 6 位动态码。</p>
-        <label>当前密码<input id="twoFactorPassword" type="password" autocomplete="current-password" /></label>
+        <label>当前密码（LDAP 账号填写域账号密码）<input id="twoFactorPassword" type="password" autocomplete="current-password" /></label>
         <div id="twoFactorSetupMessage" class="message"></div>
         <div class="modal-actions">
           <button type="button" class="secondary" id="twoFactorCloseBtn">关闭</button>
@@ -3803,7 +3803,7 @@
       <div id="twoFactorEnabledPanel" class="hidden">
         <p class="muted" id="twoFactorEnabledInfo" style="font-size:13px; margin:0 0 10px;"></p>
         <label>动态码<input id="twoFactorOpCode" autocomplete="one-time-code" maxlength="32" /></label>
-        <label>当前密码<input id="twoFactorOpPassword" type="password" autocomplete="current-password" /></label>
+        <label>当前密码（LDAP 账号填写域账号密码）<input id="twoFactorOpPassword" type="password" autocomplete="current-password" /></label>
         <div id="twoFactorOpMessage" class="message"></div>
         <div class="modal-actions" style="flex-wrap:wrap;">
           <button type="button" class="secondary" id="twoFactorCloseEnabledBtn">关闭</button>
@@ -11070,7 +11070,7 @@
         statusText.textContent = `动态令牌：已启用${status.enforced ? '（管理员要求）' : ''}${status.enabledAt ? `（${status.enabledAt}）` : ''}，剩余恢复码 ${status.recoveryCodesRemaining} 个`;
         document.getElementById('twoFactorEnabledInfo').textContent = status.enforced
           ? '管理员已要求该账号启用动态令牌，当前无法自行关闭；如需更换手机，可先用动态码重新生成恢复码，或联系管理员重置后重新绑定。'
-          : '关闭动态令牌或重新生成恢复码都需要当前动态码；关闭时本地账号还需要当前密码。';
+          : '关闭动态令牌或重新生成恢复码都需要当前动态码；关闭时还需要当前密码，LDAP 账号填写域账号密码。';
         showTwoFactorPanel('twoFactorEnabledPanel');
       } else {
         statusText.textContent = status.enforced ? '动态令牌：未启用（管理员要求必须启用）' : '动态令牌：未启用';
