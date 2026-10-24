@@ -370,7 +370,7 @@ function createTarGz(entries) {
   }
 }
 
-const regressionTestProjectPrefixes = ['提醒回归项目-', '时区提醒项目-', '布局隔离项目-', '视图范围回归项目-', '多项目回归项目-'];
+const regressionTestProjectPrefixes = ['提醒回归项目-', '时区提醒项目-', '布局隔离项目-', '视图范围回归项目-', '多项目回归项目-', 'P2回归项目-'];
 // 监控类测试资产会参与每轮采集，失败中断后必须能自动清除，否则会拖慢后续回归。
 const regressionTestAssetPrefixes = [
   '布局Ping-', '布局SNMP-', '布局他项-', '布局冲突', '布局排序', '布局未分配-', '布局非法U-', '布局缺起始U-',
@@ -2015,10 +2015,17 @@ async function main() {
     assert(!(approvalsAfterVoid.data.data || []).some(item => item.id === voidableApproval.data.id), '作废后审批不应再出现在列表中');
     const delVoidCustomer = await request(`/api/users/${voidCustomer.data.id}`, { method: 'DELETE', headers: { cookie } });
     assert(delVoidCustomer.status === 200, '清理作废审批客户失败');
-    if (change && change.data.approvalId) {
-      const voidLinkedChange = await request(`/api/approvals/${change.data.approvalId}`, { method: 'DELETE', headers: { cookie } });
-      assert(voidLinkedChange.status === 400, '变更流程审批应阻止单独作废');
-    }
+    // 管理员删除变更流程审批会级联清理变更记录，用独立数据验证，避免影响后续客户脱敏用例。
+    const cascadeChange = await request('/api/change-records', {
+      method: 'POST', headers: { cookie, 'Content-Type': 'application/json' },
+      body: JSON.stringify({ projectId, assetId, approverId: changeApproverId, customerId, title: '级联删除变更', content: '级联删除', riskLevel: '低' })
+    });
+    assert(cascadeChange.status === 201 && cascadeChange.data.approvalId, '创建级联删除变更失败');
+    const voidLinkedChange = await request(`/api/approvals/${cascadeChange.data.approvalId}`, { method: 'DELETE', headers: { cookie } });
+    assert(voidLinkedChange.status === 200 && voidLinkedChange.data.cascadedChangeId === cascadeChange.data.id,
+      '管理员删除变更流程审批应级联清理变更记录');
+    const changesAfterCascade = await request('/api/change-records?all=1', { headers: { cookie } });
+    assert(!(changesAfterCascade.data.data || []).some(item => item.id === cascadeChange.data.id), '级联删除后变更记录不应残留');
   }
 
   const incident = await request('/api/incidents', {
@@ -3695,6 +3702,255 @@ async function main() {
   assert(scopeResultsB.status === 200 && (scopeResultsB.data.data || []).length === 0, '无巡检结果的人员 scope=mine 应为空');
   const scopeResultsProject = await request(`/api/ai-inspection/results?all=1&scope=project&projectId=${encodeURIComponent(scopeProjectId)}`, { headers: { cookie: scopeCookieB } });
   assert(scopeResultsProject.status === 200 && (scopeResultsProject.data.data || []).length >= 1, 'scope=project 应返回同项目巡检结果');
+
+  // P2：合同结算、供应商采购、备件盘点、知识库审核、全局搜索、审计导出与服务报告。
+  const p2Suffix = `${Date.now()}${Math.floor(Math.random() * 1000)}`;
+  const p2Keyword = `P2检索${p2Suffix}`;
+  const p2Project = await request('/api/projects', {
+    method: 'POST', headers: { cookie, 'Content-Type': 'application/json' },
+    body: JSON.stringify({ name: `P2回归项目-${p2Suffix}`, customerName: 'P2客户' })
+  });
+  assert(p2Project.status === 201, `创建 P2 回归项目失败: ${p2Project.status} ${JSON.stringify(p2Project.data)}`);
+  const p2ProjectId = p2Project.data.id;
+  const createP2User = async (role, label) => {
+    const result = await request('/api/users', {
+      method: 'POST', headers: { cookie, 'Content-Type': 'application/json' },
+      body: JSON.stringify({ name: `P2${label}`, username: `p2_${label}_${p2Suffix}`, password: 'P2regress1!', role, projectId: p2ProjectId })
+    });
+    assert(result.status === 201, `创建 P2 ${label} 失败: ${result.status} ${JSON.stringify(result.data)}`);
+    return result.data;
+  };
+  const p2Engineer = await createP2User('engineer', 'engineer');
+  const p2Customer = await createP2User('customer', 'customer');
+  const p2EngineerLogin = await login(p2Engineer.username, 'P2regress1!');
+  const p2CustomerLogin = await login(p2Customer.username, 'P2regress1!');
+  assert(p2EngineerLogin.status === 200 && p2CustomerLogin.status === 200, 'P2 测试账号登录失败');
+  const p2EngineerCookie = p2EngineerLogin.cookie;
+  const p2CustomerCookie = p2CustomerLogin.cookie;
+
+  const p2Contract = await request('/api/contracts', {
+    method: 'POST', headers: { cookie, 'Content-Type': 'application/json' },
+    body: JSON.stringify({ projectId: p2ProjectId, name: `${p2Keyword}服务合同`, amount: 100000, taxRate: 6, settlementCycle: 'monthly', status: 'active' })
+  });
+  assert(p2Contract.status === 201 && p2Contract.data.amount === 100000, `创建合同失败: ${p2Contract.status} ${JSON.stringify(p2Contract.data)}`);
+  const p2ContractId = p2Contract.data.id;
+  const p2Settlement = await request('/api/contract-settlements', {
+    method: 'POST', headers: { cookie, 'Content-Type': 'application/json' },
+    body: JSON.stringify({ contractId: p2ContractId, periodKey: '2026-10', title: '首期结算', invoiceAmount: 60000, receivedAmount: 40000, costAmount: 15000, status: 'received' })
+  });
+  assert(p2Settlement.status === 201 && p2Settlement.data.projectId === p2ProjectId, '创建合同结算失败');
+  const p2ContractSummary = await request(`/api/contracts/summary?projectId=${encodeURIComponent(p2ProjectId)}`, { headers: { cookie } });
+  assert(p2ContractSummary.status === 200 && p2ContractSummary.data.grossProfit === 25000 && p2ContractSummary.data.grossMargin === 62.5,
+    `合同汇总毛利不正确: ${JSON.stringify(p2ContractSummary.data)}`);
+  const p2ContractList = await request(`/api/contracts?all=1&projectId=${encodeURIComponent(p2ProjectId)}`, { headers: { cookie } });
+  const p2ContractRow = (p2ContractList.data.data || []).find(item => item.id === p2ContractId);
+  assert(p2ContractRow && p2ContractRow.invoiceAmount === 60000 && p2ContractRow.receivedAmount === 40000 && p2ContractRow.grossProfit === 25000,
+    '合同列表应附带结算汇总');
+  const p2CustomerContracts = await request('/api/contracts', { headers: { cookie: p2CustomerCookie } });
+  assert(p2CustomerContracts.status === 403, '客户不应查看合同');
+  const p2EngineerContract = await request('/api/contracts', {
+    method: 'POST', headers: { cookie: p2EngineerCookie, 'Content-Type': 'application/json' },
+    body: JSON.stringify({ name: `${p2Keyword}工程师合同`, amount: 5000 })
+  });
+  assert(p2EngineerContract.status === 201 && p2EngineerContract.data.projectId === p2ProjectId, '工程师创建合同时应自动归属本人项目');
+  const p2ContractUpdated = await request(`/api/contracts/${p2ContractId}`, {
+    method: 'PUT', headers: { cookie, 'Content-Type': 'application/json' },
+    body: JSON.stringify({ amount: 120000, status: 'completed' })
+  });
+  assert(p2ContractUpdated.status === 200 && p2ContractUpdated.data.amount === 120000 && p2ContractUpdated.data.status === 'completed', '更新合同失败');
+  const p2NegativeContract = await request('/api/contracts', {
+    method: 'POST', headers: { cookie, 'Content-Type': 'application/json' },
+    body: JSON.stringify({ projectId: p2ProjectId, name: '负数合同', amount: -1 })
+  });
+  assert(p2NegativeContract.status === 400, '合同金额为负数时应拒绝');
+  const p2EngineerSettlement = await request('/api/contract-settlements', {
+    method: 'POST', headers: { cookie: p2EngineerCookie, 'Content-Type': 'application/json' },
+    body: JSON.stringify({ contractId: p2ContractId, invoiceAmount: 5000, receivedAmount: 5000, costAmount: 1000 })
+  });
+  assert(p2EngineerSettlement.status === 201, '同项目工程师应能登记结算');
+  const p2SettlementDeleted = await request(`/api/contract-settlements/${p2EngineerSettlement.data.id}`, {
+    method: 'DELETE', headers: { cookie: p2EngineerCookie, 'Content-Type': 'application/json' }, body: '{}'
+  });
+  assert(p2SettlementDeleted.status === 200, '删除合同结算失败');
+  const p2SettlementFiltered = await request(`/api/contract-settlements?all=1&projectId=${encodeURIComponent(p2ProjectId)}`, { headers: { cookie } });
+  assert(p2SettlementFiltered.status === 200 && (p2SettlementFiltered.data.data || []).length === 1, '删除后结算列表数量不正确');
+
+  const p2Vendor = await request('/api/spare-part-vendors', {
+    method: 'POST', headers: { cookie, 'Content-Type': 'application/json' },
+    body: JSON.stringify({ projectId: p2ProjectId, name: `${p2Keyword}供应商`, contactName: '张三', contactPhone: '13800000000' })
+  });
+  assert(p2Vendor.status === 201 && p2Vendor.data.projectId === p2ProjectId, '创建供应商失败');
+  const p2VendorId = p2Vendor.data.id;
+  const p2Spare = await request('/api/spare-parts', {
+    method: 'POST', headers: { cookie, 'Content-Type': 'application/json' },
+    body: JSON.stringify({ projectId: p2ProjectId, name: `${p2Keyword}硬盘`, model: 'SSD-1T', quantity: 1, safeStock: 1 })
+  });
+  assert(p2Spare.status === 201, '创建 P2 备件失败');
+  const p2SpareId = p2Spare.data.id;
+  const p2Purchase = await request('/api/spare-part-purchases', {
+    method: 'POST', headers: { cookie: p2EngineerCookie, 'Content-Type': 'application/json' },
+    body: JSON.stringify({ sparePartId: p2SpareId, vendorId: p2VendorId, quantity: 3, unitPrice: 500 })
+  });
+  assert(p2Purchase.status === 201 && p2Purchase.data.totalAmount === 1500 && p2Purchase.data.status === 'pending', '创建采购申请失败');
+  const p2PurchaseId = p2Purchase.data.id;
+  const p2VendorDeleteBlocked = await request(`/api/spare-part-vendors/${p2VendorId}`, {
+    method: 'DELETE', headers: { cookie, 'Content-Type': 'application/json' }, body: '{}'
+  });
+  assert(p2VendorDeleteBlocked.status === 409, '存在未取消采购申请时供应商应不可删除');
+  const p2ApproveByEngineer = await request(`/api/spare-part-purchases/${p2PurchaseId}/approve`, {
+    method: 'POST', headers: { cookie: p2EngineerCookie, 'Content-Type': 'application/json' }, body: '{}'
+  });
+  assert(p2ApproveByEngineer.status === 403, '仅管理员可审批采购申请');
+  const p2Approved = await request(`/api/spare-part-purchases/${p2PurchaseId}/approve`, {
+    method: 'POST', headers: { cookie, 'Content-Type': 'application/json' }, body: JSON.stringify({ note: '同意采购' })
+  });
+  assert(p2Approved.status === 200 && p2Approved.data.status === 'approved' && p2Approved.data.approverName, '审批采购申请失败');
+  const p2Received = await request(`/api/spare-part-purchases/${p2PurchaseId}/receive`, {
+    method: 'POST', headers: { cookie, 'Content-Type': 'application/json' }, body: '{}'
+  });
+  assert(p2Received.status === 200 && p2Received.data.status === 'received', '采购收货失败');
+  const p2SpareAfterReceive = await request(`/api/spare-parts?all=1&projectId=${encodeURIComponent(p2ProjectId)}`, { headers: { cookie } });
+  const p2SpareRow = (p2SpareAfterReceive.data.data || []).find(item => item.id === p2SpareId);
+  assert(p2SpareRow && p2SpareRow.quantity === 4, `采购收货应自动入库，当前库存 ${p2SpareRow?.quantity}`);
+  const p2ReceiveAgain = await request(`/api/spare-part-purchases/${p2PurchaseId}/receive`, {
+    method: 'POST', headers: { cookie, 'Content-Type': 'application/json' }, body: '{}'
+  });
+  assert(p2ReceiveAgain.status === 400, '已收货的采购申请不应重复收货');
+  const p2CancelReceived = await request(`/api/spare-part-purchases/${p2PurchaseId}/cancel`, {
+    method: 'POST', headers: { cookie, 'Content-Type': 'application/json' }, body: '{}'
+  });
+  assert(p2CancelReceived.status === 400, '已入库的采购申请不应取消');
+  const p2PurchaseToCancel = await request('/api/spare-part-purchases', {
+    method: 'POST', headers: { cookie, 'Content-Type': 'application/json' },
+    body: JSON.stringify({ sparePartId: p2SpareId, vendorId: p2VendorId, quantity: 1, unitPrice: 500 })
+  });
+  const p2Cancelled = await request(`/api/spare-part-purchases/${p2PurchaseToCancel.data.id}/cancel`, {
+    method: 'POST', headers: { cookie, 'Content-Type': 'application/json' }, body: '{}'
+  });
+  assert(p2Cancelled.status === 200 && p2Cancelled.data.status === 'cancelled', '取消未入库采购申请失败');
+
+  const p2Inventory = await request('/api/spare-part-inventory-tasks', {
+    method: 'POST', headers: { cookie: p2EngineerCookie, 'Content-Type': 'application/json' },
+    body: JSON.stringify({ projectId: p2ProjectId, name: `${p2Keyword}盘点` })
+  });
+  assert(p2Inventory.status === 201 && p2Inventory.data.status === 'pending' && (p2Inventory.data.items || []).length === 1, '创建盘点任务失败');
+  const p2InventoryId = p2Inventory.data.id;
+  const p2InventoryItem = p2Inventory.data.items[0];
+  const p2CompleteTooEarly = await request(`/api/spare-part-inventory-tasks/${p2InventoryId}/complete`, {
+    method: 'POST', headers: { cookie: p2EngineerCookie, 'Content-Type': 'application/json' }, body: '{}'
+  });
+  assert(p2CompleteTooEarly.status === 400, '存在未盘点项时不应允许完成盘点');
+  const p2Recorded = await request(`/api/spare-part-inventory-tasks/${p2InventoryId}/record`, {
+    method: 'POST', headers: { cookie: p2EngineerCookie, 'Content-Type': 'application/json' },
+    body: JSON.stringify({ sparePartId: p2InventoryItem.sparePartId, actualQuantity: 6, note: '实盘多出 2 块' })
+  });
+  assert(p2Recorded.status === 200 && p2Recorded.data.status === 'running' && p2Recorded.data.items[0].result === 'mismatch', '登记盘点结果失败');
+  const p2InventoryCompleted = await request(`/api/spare-part-inventory-tasks/${p2InventoryId}/complete`, {
+    method: 'POST', headers: { cookie: p2EngineerCookie, 'Content-Type': 'application/json' }, body: '{}'
+  });
+  assert(p2InventoryCompleted.status === 200 && p2InventoryCompleted.data.status === 'completed', '完成盘点失败');
+  const p2SpareAfterInventory = await request(`/api/spare-parts?all=1&projectId=${encodeURIComponent(p2ProjectId)}`, { headers: { cookie } });
+  const p2SpareAfterInventoryRow = (p2SpareAfterInventory.data.data || []).find(item => item.id === p2SpareId);
+  assert(p2SpareAfterInventoryRow && p2SpareAfterInventoryRow.quantity === 6, `盘点完成后应按实盘回写库存，当前 ${p2SpareAfterInventoryRow?.quantity}`);
+  const p2InventoryMovements = await request(`/api/spare-part-movements?all=1&projectId=${encodeURIComponent(p2ProjectId)}`, { headers: { cookie } });
+  assert((p2InventoryMovements.data.data || []).some(item => item.type === 'adjust' && item.quantity === 2), '盘点差异应写入 adjust 流水');
+  const p2RecordAfterComplete = await request(`/api/spare-part-inventory-tasks/${p2InventoryId}/record`, {
+    method: 'POST', headers: { cookie: p2EngineerCookie, 'Content-Type': 'application/json' },
+    body: JSON.stringify({ sparePartId: p2InventoryItem.sparePartId, actualQuantity: 1 })
+  });
+  assert(p2RecordAfterComplete.status === 400, '已完成盘点不应继续登记');
+  const p2VendorDeleted = await request(`/api/spare-part-vendors/${p2VendorId}`, {
+    method: 'DELETE', headers: { cookie, 'Content-Type': 'application/json' }, body: '{}'
+  });
+  assert(p2VendorDeleted.status === 409, '已收货的采购申请仍应阻止供应商删除');
+
+  const p2Kb = await request('/api/kb', {
+    method: 'POST', headers: { cookie: p2EngineerCookie, 'Content-Type': 'application/json' },
+    body: JSON.stringify({ title: `${p2Keyword}知识`, keywords: p2Keyword, problem: '初始问题', solution: '初始方案', status: 'published' })
+  });
+  assert(p2Kb.status === 201 && p2Kb.data.version === 1 && p2Kb.data.status === 'published', '创建知识条目失败');
+  const p2KbId = p2Kb.data.id;
+  const p2KbUpdated = await request(`/api/kb/${p2KbId}`, {
+    method: 'PUT', headers: { cookie: p2EngineerCookie, 'Content-Type': 'application/json' },
+    body: JSON.stringify({ solution: '更新后的方案' })
+  });
+  assert(p2KbUpdated.status === 200 && p2KbUpdated.data.version === 2 && p2KbUpdated.data.status === 'pending', '内容变更应递增版本并回到待审核');
+  const p2KbRevisions = await request(`/api/kb/${p2KbId}/revisions`, { headers: { cookie } });
+  assert(p2KbRevisions.status === 200 && (p2KbRevisions.data.data || []).length >= 2 && p2KbRevisions.data.currentVersion === 2, '知识库版本历史不正确');
+  const p2KbReviewDenied = await request(`/api/kb/${p2KbId}/review`, {
+    method: 'POST', headers: { cookie: p2EngineerCookie, 'Content-Type': 'application/json' },
+    body: JSON.stringify({ decision: 'publish' })
+  });
+  assert(p2KbReviewDenied.status === 403, '仅管理员可审核知识条目');
+  const p2KbPublished = await request(`/api/kb/${p2KbId}/review`, {
+    method: 'POST', headers: { cookie, 'Content-Type': 'application/json' },
+    body: JSON.stringify({ decision: 'publish', note: '审核通过' })
+  });
+  assert(p2KbPublished.status === 200 && p2KbPublished.data.status === 'published' && p2KbPublished.data.reviewNote === '审核通过', '发布知识条目失败');
+  const p2KbReviewAgain = await request(`/api/kb/${p2KbId}/review`, {
+    method: 'POST', headers: { cookie, 'Content-Type': 'application/json' },
+    body: JSON.stringify({ decision: 'publish' })
+  });
+  assert(p2KbReviewAgain.status === 400, '非待审核条目不应重复审核');
+  const p2KbDraft = await request('/api/kb', {
+    method: 'POST', headers: { cookie, 'Content-Type': 'application/json' },
+    body: JSON.stringify({ projectId: p2ProjectId, title: `${p2Keyword}草稿`, keywords: p2Keyword, status: 'draft' })
+  });
+  assert(p2KbDraft.status === 201 && p2KbDraft.data.status === 'draft', '创建知识草稿失败');
+  const p2CustomerKbList = await request('/api/kb?all=1', { headers: { cookie: p2CustomerCookie } });
+  assert(p2CustomerKbList.status === 200 && (p2CustomerKbList.data.data || []).every(item => item.id !== p2KbDraft.data.id), '客户不应看到知识草稿');
+  const p2CustomerKbDetail = await request(`/api/kb/${p2KbDraft.data.id}`, { headers: { cookie: p2CustomerCookie } });
+  assert(p2CustomerKbDetail.status === 403, '客户不应读取知识草稿详情');
+  const p2KbRejected = await request(`/api/kb/${p2KbDraft.data.id}`, {
+    method: 'PUT', headers: { cookie, 'Content-Type': 'application/json' },
+    body: JSON.stringify({ solution: '待审核内容', status: 'pending' })
+  });
+  assert(p2KbRejected.status === 200 && p2KbRejected.data.status === 'pending', '提交知识审核失败');
+  const p2KbRejectDecision = await request(`/api/kb/${p2KbDraft.data.id}/review`, {
+    method: 'POST', headers: { cookie, 'Content-Type': 'application/json' },
+    body: JSON.stringify({ decision: 'reject', note: '描述不足' })
+  });
+  assert(p2KbRejectDecision.status === 200 && p2KbRejectDecision.data.status === 'rejected', '驳回答辩知识条目失败');
+
+  const p2Search = await request(`/api/search?keyword=${encodeURIComponent(p2Keyword)}&types=contracts,spareParts,projects`, { headers: { cookie } });
+  assert(p2Search.status === 200 && p2Search.data.counts?.contracts >= 1 && p2Search.data.counts?.spareParts >= 1, '全局搜索未命中合同与备件');
+  assert((p2Search.data.data || []).every(item => ['contracts', 'spareParts', 'projects'].includes(item.type)), '全局搜索应按 types 过滤');
+  const p2CustomerSearch = await request(`/api/search?keyword=${encodeURIComponent(p2Keyword)}&types=contracts,spareParts`, { headers: { cookie: p2CustomerCookie } });
+  assert(p2CustomerSearch.status === 200 && p2CustomerSearch.data.total === 0, '客户搜索不应返回合同与备件');
+  const p2ShortSearch = await request('/api/search?keyword=a', { headers: { cookie } });
+  assert(p2ShortSearch.status === 400, '全局搜索关键字过短应拒绝');
+
+  const p2AuditCsv = await request(`/api/audit-logs/export?format=csv&projectId=${encodeURIComponent(p2ProjectId)}`, { headers: { cookie } });
+  assert(p2AuditCsv.status === 200 && String(p2AuditCsv.headers['content-type'] || '').includes('text/csv'), '审计日志 CSV 导出失败');
+  assert(typeof p2AuditCsv.data === 'string' && p2AuditCsv.data.includes('操作人') && p2AuditCsv.data.includes(p2Keyword), '审计日志 CSV 内容不正确');
+  const p2AuditJson = await request(`/api/audit-logs/export?format=json&projectId=${encodeURIComponent(p2ProjectId)}`, { headers: { cookie } });
+  assert(p2AuditJson.status === 200 && Array.isArray(p2AuditJson.data.data) && p2AuditJson.data.total === p2AuditJson.data.data.length, '审计日志 JSON 导出失败');
+  assert(p2AuditJson.data.data.every(item => item.projectId === p2ProjectId), '审计导出应按项目过滤');
+
+  const p2ServiceReport = await request(`/api/reports/service/${encodeURIComponent(p2ProjectId)}?period=month`, { headers: { cookie } });
+  assert(p2ServiceReport.status === 200 && String(p2ServiceReport.headers['content-type'] || '').includes('text/html'), '服务报告生成失败');
+  assert(typeof p2ServiceReport.data === 'string' && p2ServiceReport.data.includes('服务报告') && p2ServiceReport.data.includes('P2客户'), '服务报告内容不完整');
+
+  const p2Log = await request('/api/logs', {
+    method: 'POST', headers: { cookie: p2EngineerCookie, 'Content-Type': 'application/json' },
+    body: JSON.stringify({
+      projectId: p2ProjectId, date: formatDateKey(new Date()), ticketType: '事务工作',
+      event: 'P2客户日志可见性', process: '内部处理过程', result: '已完成', conclusion: '完成', durationHours: 1
+    })
+  });
+  assert(p2Log.status === 201, '创建 P2 日志失败');
+  const p2CustomerLogsHidden = await request('/api/logs?all=1', { headers: { cookie: p2CustomerCookie } });
+  assert(p2CustomerLogsHidden.status === 200 && (p2CustomerLogsHidden.data.data || []).length === 0, '未开启开关时客户不应看到服务日志');
+  const p2ProjectVisible = await request(`/api/projects/${p2ProjectId}`, {
+    method: 'PUT', headers: { cookie, 'Content-Type': 'application/json' },
+    body: JSON.stringify({ name: p2Project.data.name, customerName: 'P2客户', customerLogVisible: true })
+  });
+  assert(p2ProjectVisible.status === 200 && p2ProjectVisible.data.customerLogVisible === true, '开启客户日志可见性失败');
+  const p2CustomerLogsVisible = await request('/api/logs?all=1', { headers: { cookie: p2CustomerCookie } });
+  assert(p2CustomerLogsVisible.status === 200 && (p2CustomerLogsVisible.data.data || []).length === 1, '开启开关后客户应看到本项目服务日志');
+  const p2CustomerLogRow = p2CustomerLogsVisible.data.data[0];
+  assert(p2CustomerLogRow.event === 'P2客户日志可见性' && p2CustomerLogRow.userId === undefined && p2CustomerLogRow.attachments === undefined,
+    '客户日志不应下发内部字段');
 
   await cleanupRegressionArtifacts(cookie);
 

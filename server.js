@@ -64,7 +64,7 @@ const dbConfig = {
   password: process.env.MYSQL_PASSWORD || 'onsite_ops_password',
   database: process.env.MYSQL_DATABASE || 'onsite_ops_system'
 };
-const dbCollectionKeys = ['users', 'projects', 'assets', 'assetRelations', 'assetLifecycles', 'assetCheckouts', 'assetInventoryTasks', 'topologyLayouts', 'logs', 'inspectionPlans', 'inspectionExecutions', 'spareParts', 'sparePartMovements', 'changeRecords', 'incidentRecords', 'tickets', 'dutyShifts', 'approvals', 'notifications', 'notificationChannels', 'monitorAlerts', 'monitorMaintenanceWindows', 'auditLogs', 'upgradeLogs', 'knowledgeBase', 'documents', 'workReports', 'aiInspectionTargets', 'aiInspectionTemplates', 'aiInspectionTasks', 'aiInspectionResults', 'configBackupPlans', 'configBackupRecords', 'sessions', 'systemConfig', 'runtimeState'];
+const dbCollectionKeys = ['users', 'projects', 'contracts', 'contractSettlements', 'assets', 'assetRelations', 'assetLifecycles', 'assetCheckouts', 'assetInventoryTasks', 'topologyLayouts', 'logs', 'inspectionPlans', 'inspectionExecutions', 'spareParts', 'sparePartMovements', 'sparePartVendors', 'sparePartPurchases', 'sparePartInventoryTasks', 'changeRecords', 'incidentRecords', 'tickets', 'dutyShifts', 'approvals', 'notifications', 'notificationChannels', 'monitorAlerts', 'monitorMaintenanceWindows', 'auditLogs', 'upgradeLogs', 'knowledgeBase', 'kbRevisions', 'documents', 'workReports', 'aiInspectionTargets', 'aiInspectionTemplates', 'aiInspectionTasks', 'aiInspectionResults', 'configBackupPlans', 'configBackupRecords', 'sessions', 'systemConfig', 'runtimeState'];
 const objectCollectionKeys = ['topologyLayouts', 'systemConfig', 'runtimeState'];
 const OBJECT_ROOT_ID = '__root__';
 
@@ -2439,6 +2439,52 @@ function getNotificationReadAtForUser(item, userId) {
   return map[userId] || '';
 }
 
+// 知识库每次内容变更都留一份不可变快照，用于版本对比与回滚展示。
+function snapshotKbRevision(db, item, action, user, note = '') {
+  db.kbRevisions = db.kbRevisions || [];
+  const revision = {
+    id: id('kbRev'),
+    kbId: item.id,
+    projectId: item.projectId || '',
+    version: Math.max(1, Number(item.version || 1)),
+    action,
+    title: item.title || '',
+    keywords: item.keywords || '',
+    problem: item.problem || '',
+    solution: item.solution || '',
+    content: item.content || '',
+    category: item.category || '',
+    tags: Array.isArray(item.tags) ? item.tags.slice() : (item.tags || ''),
+    note: String(note || '').slice(0, 500),
+    operatorId: user ? user.id : '',
+    operatorName: user ? (user.name || user.username || '') : '',
+    createdAt: now()
+  };
+  db.kbRevisions.push(revision);
+  return revision;
+}
+
+// 合同维度汇总：签约额、已开票、已回款、成本与毛利均按结算明细累计。
+function summarizeContract(contract, settlements) {
+  const rows = (settlements || []).filter(item => item.contractId === contract.id);
+  const invoiceAmount = rows.reduce((sum, item) => sum + normalizeMoney(item.invoiceAmount), 0);
+  const receivedAmount = rows.reduce((sum, item) => sum + normalizeMoney(item.receivedAmount), 0);
+  const costAmount = rows.reduce((sum, item) => sum + normalizeMoney(item.costAmount), 0);
+  const contractAmount = normalizeMoney(contract.amount);
+  const grossProfit = normalizeMoney(receivedAmount - costAmount);
+  return {
+    contractAmount,
+    invoiceAmount: normalizeMoney(invoiceAmount),
+    receivedAmount: normalizeMoney(receivedAmount),
+    costAmount: normalizeMoney(costAmount),
+    grossProfit,
+    grossMargin: receivedAmount > 0 ? Math.round((grossProfit / receivedAmount) * 1000) / 10 : 0,
+    uninvoicedAmount: normalizeMoney(contractAmount - invoiceAmount),
+    unreceivedAmount: normalizeMoney(invoiceAmount - receivedAmount),
+    settlementCount: rows.length
+  };
+}
+
 // 通知的已读/隐藏状态是按用户 id 存储的映射，归一化时只保留合法的字符串键值。
 function sanitizeNotificationUserStampMap(map) {
   if (!map || typeof map !== 'object' || Array.isArray(map)) return {};
@@ -3584,8 +3630,48 @@ function normalizeDb(raw = {}) {
     projectEndDate: project.projectEndDate || '',
     notifyBefore: project.notifyBefore || '',
     paymentMethod: project.paymentMethod || '',
+    // 客户查看服务过程日志由项目级开关控制，默认关闭。
+    customerLogVisible: project.customerLogVisible === true,
     description: project.description || '',
     createdAt: project.createdAt || now()
+  }));
+  // 合同金额与结算记录分开存放：合同承载签约与开票口径，结算承载分期回款与成本。
+  const contracts = (raw.contracts || []).map(item => ({
+    id: item.id || id('contract'),
+    projectId: item.projectId || '',
+    contractNo: item.contractNo || '',
+    name: item.name || '',
+    partyA: item.partyA || '',
+    partyB: item.partyB || '',
+    amount: normalizeMoney(item.amount),
+    taxRate: normalizeMoney(item.taxRate),
+    settlementCycle: ['monthly', 'quarterly', 'milestone', 'once'].includes(item.settlementCycle) ? item.settlementCycle : 'monthly',
+    signDate: item.signDate || '',
+    startDate: item.startDate || '',
+    endDate: item.endDate || '',
+    status: ['draft', 'active', 'completed', 'terminated'].includes(item.status) ? item.status : 'active',
+    notes: item.notes || '',
+    createdBy: item.createdBy || '',
+    createdAt: item.createdAt || now(),
+    updatedAt: item.updatedAt || item.createdAt || now()
+  }));
+  const contractSettlements = (raw.contractSettlements || []).map(item => ({
+    id: item.id || id('settlement'),
+    contractId: item.contractId || '',
+    projectId: item.projectId || '',
+    periodKey: item.periodKey || '',
+    title: item.title || '',
+    invoiceAmount: normalizeMoney(item.invoiceAmount),
+    receivedAmount: normalizeMoney(item.receivedAmount),
+    costAmount: normalizeMoney(item.costAmount),
+    invoiceNo: item.invoiceNo || '',
+    invoicedAt: item.invoicedAt || '',
+    receivedAt: item.receivedAt || '',
+    status: ['pending', 'invoiced', 'received'].includes(item.status) ? item.status : 'pending',
+    notes: item.notes || '',
+    createdBy: item.createdBy || '',
+    createdAt: item.createdAt || now(),
+    updatedAt: item.updatedAt || item.createdAt || now()
   }));
   const users = (raw.users || []).map(user => {
     const twoFactorSecret = typeof user.twoFactorSecret === 'string' ? user.twoFactorSecret : '';
@@ -3641,6 +3727,8 @@ function normalizeDb(raw = {}) {
   return {
     users,
     projects,
+    contracts,
+    contractSettlements,
     assets: (raw.assets || []).map(asset => ({
       id: asset.id || id('asset'),
       projectId: asset.projectId || '',
@@ -3816,6 +3904,64 @@ function normalizeDb(raw = {}) {
       reason: item.reason || '',
       operatorId: item.operatorId || '',
       operatorName: item.operatorName || '',
+      createdAt: item.createdAt || now()
+    })),
+    // 供应商为项目级主数据，采购申请引用供应商与备件，盘点任务冻结当时的账面数量用于差异核对。
+    sparePartVendors: (raw.sparePartVendors || []).map(item => ({
+      id: item.id || id('spareVendor'),
+      projectId: item.projectId || '',
+      name: item.name || '',
+      contactName: item.contactName || '',
+      contactPhone: item.contactPhone || '',
+      email: item.email || '',
+      address: item.address || '',
+      status: ['active', 'inactive'].includes(item.status) ? item.status : 'active',
+      notes: item.notes || '',
+      createdAt: item.createdAt || now()
+    })),
+    sparePartPurchases: (raw.sparePartPurchases || []).map(item => ({
+      id: item.id || id('sparePurchase'),
+      purchaseNo: item.purchaseNo || '',
+      projectId: item.projectId || '',
+      sparePartId: item.sparePartId || '',
+      vendorId: item.vendorId || '',
+      quantity: Math.max(0, Number(item.quantity || 0)),
+      unitPrice: normalizeMoney(item.unitPrice),
+      totalAmount: normalizeMoney(item.totalAmount),
+      requestedAt: item.requestedAt || item.createdAt || now(),
+      expectedAt: item.expectedAt || '',
+      receivedAt: item.receivedAt || '',
+      status: ['pending', 'approved', 'received', 'cancelled'].includes(item.status) ? item.status : 'pending',
+      applicantId: item.applicantId || '',
+      applicantName: item.applicantName || '',
+      approverId: item.approverId || '',
+      approverName: item.approverName || '',
+      approvalNote: item.approvalNote || '',
+      notes: item.notes || '',
+      createdBy: item.createdBy || '',
+      createdAt: item.createdAt || now(),
+      updatedAt: item.updatedAt || item.createdAt || now()
+    })),
+    sparePartInventoryTasks: (raw.sparePartInventoryTasks || []).map(item => ({
+      id: item.id || id('spareInv'),
+      projectId: item.projectId || '',
+      name: item.name || '',
+      status: ['pending', 'running', 'completed'].includes(item.status) ? item.status : 'pending',
+      createdBy: item.createdBy || '',
+      createdByName: item.createdByName || '',
+      completedAt: item.completedAt || '',
+      items: Array.isArray(item.items) ? item.items.map(entry => ({
+        sparePartId: entry.sparePartId || '',
+        name: entry.name || '',
+        expectedQuantity: Number(entry.expectedQuantity || 0),
+        actualQuantity: entry.actualQuantity === undefined || entry.actualQuantity === null || entry.actualQuantity === ''
+          ? null
+          : Number(entry.actualQuantity),
+        difference: Number(entry.difference || 0),
+        result: ['match', 'mismatch', 'unchecked'].includes(entry.result) ? entry.result : 'unchecked',
+        note: entry.note || '',
+        checkedAt: entry.checkedAt || ''
+      })) : [],
       createdAt: item.createdAt || now()
     })),
     changeRecords: (raw.changeRecords || []).map(item => ({
@@ -4022,8 +4168,33 @@ function normalizeDb(raw = {}) {
       category: item.category || '',
       // tags 既可能来自接口的字符串，也可能来自历史数据/导入的数组，归一化时原样保留，避免被强制清空。
       tags: Array.isArray(item.tags) ? item.tags : (item.tags || ''),
+      // 审核状态与版本号：draft 草稿、pending 待审核、published 已发布、rejected 已驳回。
+      status: ['draft', 'pending', 'published', 'rejected'].includes(item.status) ? item.status : 'published',
+      version: Math.max(1, Number(item.version || 1)),
+      reviewNote: item.reviewNote || '',
+      reviewedBy: item.reviewedBy || '',
+      reviewedAt: item.reviewedAt || '',
+      publishedAt: item.publishedAt || item.createdAt || now(),
       createdBy: item.createdBy || '',
       projectId: item.projectId || userProjectMap.get(item.createdBy) || '',
+      createdAt: item.createdAt || now()
+    })),
+    kbRevisions: (raw.kbRevisions || []).map(item => ({
+      id: item.id || id('kbRev'),
+      kbId: item.kbId || '',
+      projectId: item.projectId || '',
+      version: Math.max(1, Number(item.version || 1)),
+      action: ['create', 'update', 'submit', 'publish', 'reject'].includes(item.action) ? item.action : 'update',
+      title: item.title || '',
+      keywords: item.keywords || '',
+      problem: item.problem || '',
+      solution: item.solution || '',
+      content: item.content || '',
+      category: item.category || '',
+      tags: Array.isArray(item.tags) ? item.tags : (item.tags || ''),
+      note: item.note || '',
+      operatorId: item.operatorId || '',
+      operatorName: item.operatorName || '',
       createdAt: item.createdAt || now()
     })),
     documents: (raw.documents || []).map(item => ({
@@ -4212,6 +4383,14 @@ function normalizeWorkMetricsSnapshot(snapshot = {}) {
     categoryCounts: Object.fromEntries(WORKLOAD_CATEGORY_ORDER.map(key => [key, Number(categoryCounts[key] || 0)])),
     categoryHours: Object.fromEntries(WORKLOAD_CATEGORY_ORDER.map(key => [key, Number(Number(categoryHours[key] || 0).toFixed(2))]))
   };
+}
+
+// 金额统一保留两位小数并容忍空值/字符串输入，避免浮点误差随汇总链路放大。
+function normalizeMoney(value) {
+  if (value === null || value === undefined || value === '') return 0;
+  const num = Number(value);
+  if (!Number.isFinite(num)) return 0;
+  return Math.round(num * 100) / 100;
 }
 
 function normalizeInspectionAttachment(attachment) {
@@ -4441,6 +4620,16 @@ function sanitizeImportedData(db) {
   coerceEnum(db.users, 'role', allowedUserRoles, 'engineer');
   coerceEnum(db.users, 'status', ['active', 'pending', 'disabled', 'rejected'], 'active');
 
+  const contractIds = new Set((db.contracts || []).map(item => item.id).filter(Boolean));
+  clearRef(db.contracts, ['projectId'], projectIds);
+  clearRef(db.contracts, ['createdBy'], userIds);
+  coerceEnum(db.contracts, 'status', ['draft', 'active', 'completed', 'terminated'], 'active');
+  coerceEnum(db.contracts, 'settlementCycle', ['monthly', 'quarterly', 'milestone', 'once'], 'monthly');
+  clearRef(db.contractSettlements, ['contractId'], contractIds);
+  clearRef(db.contractSettlements, ['projectId'], projectIds);
+  clearRef(db.contractSettlements, ['createdBy'], userIds);
+  coerceEnum(db.contractSettlements, 'status', ['pending', 'invoiced', 'received'], 'pending');
+
   clearRef(db.assets, ['projectId'], projectIds);
   coerceEnum(db.assets, 'type', ASSET_TYPE_OPTIONS, '其它');
   coerceEnum(db.assets, 'monitorType', ASSET_MONITOR_TYPES, 'ping');
@@ -4480,6 +4669,18 @@ function sanitizeImportedData(db) {
   clearRef(db.sparePartMovements, ['operatorId'], userIds);
   // 'adjust' 是盘点调整流水，响应组装与前端均按独立类型渲染，导入清洗时不能回落为 'outbound'，否则流水语义被篡改。
   coerceEnum(db.sparePartMovements, 'type', ['inbound', 'outbound', 'adjust'], 'outbound');
+  const vendorIds = new Set((db.sparePartVendors || []).map(item => item.id).filter(Boolean));
+  const purchaseIds = new Set((db.sparePartPurchases || []).map(item => item.id).filter(Boolean));
+  clearRef(db.sparePartVendors, ['projectId'], projectIds);
+  coerceEnum(db.sparePartVendors, 'status', ['active', 'inactive'], 'active');
+  clearRef(db.sparePartPurchases, ['projectId'], projectIds);
+  clearRef(db.sparePartPurchases, ['sparePartId'], sparePartIds);
+  clearRef(db.sparePartPurchases, ['vendorId'], vendorIds);
+  clearRef(db.sparePartPurchases, ['createdBy'], userIds);
+  coerceEnum(db.sparePartPurchases, 'status', ['pending', 'approved', 'received', 'cancelled'], 'pending');
+  clearRef(db.sparePartInventoryTasks, ['projectId'], projectIds);
+  clearRef(db.sparePartInventoryTasks, ['createdBy'], userIds);
+  coerceEnum(db.sparePartInventoryTasks, 'status', ['pending', 'running', 'completed'], 'pending');
 
   clearRef(db.changeRecords, ['projectId'], projectIds);
   clearRef(db.changeRecords, ['assetId'], assetIds);
@@ -6080,6 +6281,14 @@ function canViewProject(user, projectId) {
   if (!user) return false;
   if (user.role === 'admin') return true;
   return userHasProject(user, projectId);
+}
+
+// 客户日志可见性由项目开关决定，默认关闭；关闭的项目一律不下发服务过程日志。
+function customerVisibleLogProjects(db, user) {
+  if (!user) return [];
+  return (db.projects || [])
+    .filter(project => project.customerLogVisible === true && canViewProject(user, project.id))
+    .map(project => project.id);
 }
 
 function filterByProjectScope(list, user, getProjectId) {
@@ -7877,6 +8086,20 @@ function nextTicketNo(db, date = new Date()) {
   return `${prefix}${String(maxSeq + 1).padStart(4, '0')}`;
 }
 
+// 采购单号与工单号同样按「日期 + 当日序号」生成，避免删除历史后编号复用。
+function nextPurchaseNo(db, date = new Date()) {
+  const dateKey = formatDateKey(date).replace(/-/g, '');
+  const prefix = `PO${dateKey}`;
+  let maxSeq = 0;
+  for (const item of db.sparePartPurchases || []) {
+    const no = String(item.purchaseNo || '');
+    if (!no.startsWith(prefix)) continue;
+    const seq = Number(no.slice(prefix.length));
+    if (Number.isFinite(seq) && seq > maxSeq) maxSeq = seq;
+  }
+  return `${prefix}${String(maxSeq + 1).padStart(3, '0')}`;
+}
+
 function ticketSlaHours(priority) {
   return ticketSlaHoursByPriority[priority] || ticketSlaHoursByPriority['中'];
 }
@@ -8635,6 +8858,185 @@ function quoteCsvValue(value) {
   // 中和电子表格公式注入：以 = + - @ 或制表符/回车开头的值前置单引号
   if (/^[=+\-@\t\r]/.test(text)) text = `'${text}`;
   return `"${text.replace(/"/g, '""')}"`;
+}
+
+function buildAuditLogFilters(query = {}) {
+  return {
+    search: String(query.search || '').trim().toLowerCase(),
+    action: String(query.action || '').trim(),
+    targetType: String(query.targetType || '').trim(),
+    projectId: String(query.projectId || '').trim(),
+    startDate: String(query.startDate || '').trim(),
+    endDate: String(query.endDate || '').trim()
+  };
+}
+
+function matchesAuditLogFilters(item, filters) {
+  if (filters.action && item.action !== filters.action) return false;
+  if (filters.targetType && item.targetType !== filters.targetType) return false;
+  if (filters.projectId && item.projectId !== filters.projectId) return false;
+  const createdAt = String(item.createdAt || '');
+  if (filters.startDate && createdAt.slice(0, 10) < filters.startDate) return false;
+  if (filters.endDate && createdAt.slice(0, 10) > filters.endDate) return false;
+  if (filters.search) {
+    const hit = ['operatorName', 'action', 'targetType', 'targetId', 'detail']
+      .some(key => String(item[key] || '').toLowerCase().includes(filters.search));
+    if (!hit) return false;
+  }
+  return true;
+}
+
+function buildAuditLogCsv(entries) {
+  const lines = [
+    ['导出时间', new Date().toISOString()].map(quoteCsvValue).join(','),
+    ['时间', '操作人', '操作', '对象类型', '对象ID', '详情', '项目ID', 'IP', 'User-Agent'].join(',')
+  ];
+  entries.forEach(item => {
+    lines.push([
+      item.createdAt,
+      item.operatorName,
+      item.action,
+      item.targetType,
+      item.targetId,
+      item.detail,
+      item.projectId,
+      item.ip,
+      item.userAgent
+    ].map(quoteCsvValue).join(','));
+  });
+  return lines.join('\n');
+}
+
+const CONTRACT_STATUS_LABELS = { draft: '草稿', active: '执行中', completed: '已完成', terminated: '已终止' };
+
+const globalSearchTypeOptions = [
+  { key: 'assets', label: '资产' },
+  { key: 'logs', label: '服务日志' },
+  { key: 'tickets', label: '工单' },
+  { key: 'knowledge', label: '知识库' },
+  { key: 'documents', label: '资料' },
+  { key: 'contracts', label: '合同' },
+  { key: 'spareParts', label: '备件' },
+  { key: 'projects', label: '项目' }
+];
+
+function searchMatch(keyword, fields) {
+  return fields.some(field => String(field || '').toLowerCase().includes(keyword));
+}
+
+// 全局搜索统一在此聚合，各类型沿用与列表接口一致的可见范围，避免绕过权限。
+function buildGlobalSearchResults(db, user, keyword, selectedTypes, limitPerType) {
+  const lowered = String(keyword || '').trim().toLowerCase();
+  if (!lowered) return { data: [], counts: {}, total: 0 };
+  const projectNameOf = projectId => (db.projects || []).find(item => item.id === projectId)?.name || '';
+  const hits = [];
+  const counts = {};
+  const types = selectedTypes.length ? selectedTypes : globalSearchTypeOptions.map(item => item.key);
+
+  const push = (type, list) => {
+    counts[type] = list.length;
+    hits.push(...list.slice(0, limitPerType));
+  };
+
+  if (types.includes('assets')) {
+    const list = filterByProjectScope(db.assets || [], user, item => item.projectId)
+      .filter(item => searchMatch(lowered, [item.name, item.brand, item.model, item.serialNumber, item.installationLocation, item.owner]))
+      .map(item => ({
+        type: 'assets', id: item.id, title: item.name, subtitle: [item.type, item.brand, item.model, item.installationLocation].filter(Boolean).join(' / '),
+        projectId: item.projectId, projectName: projectNameOf(item.projectId), updatedAt: item.createdAt
+      }));
+    push('assets', list);
+  }
+
+  if (types.includes('logs')) {
+    let source = filterByProjectScope(db.logs || [], user, item => item.projectId);
+    if (user.role === 'customer') {
+      const visible = new Set(customerVisibleLogProjects(db, user));
+      source = source.filter(item => visible.has(item.projectId));
+    }
+    const list = source
+      .filter(item => searchMatch(lowered, [item.title, item.event, item.relatedTarget, item.process, item.result, item.conclusion]))
+      .map(item => ({
+        type: 'logs', id: item.id, title: item.title || item.event || '服务日志',
+        subtitle: [item.date, item.event, item.result].filter(Boolean).join(' / '),
+        projectId: item.projectId, projectName: projectNameOf(item.projectId), updatedAt: item.createdAt
+      }));
+    push('logs', list);
+  }
+
+  if (types.includes('tickets')) {
+    const list = filterByProjectScope(db.tickets || [], user, item => item.projectId)
+      .filter(item => searchMatch(lowered, [item.ticketNo, item.title, item.description, item.category, item.assigneeName]))
+      .map(item => ({
+        type: 'tickets', id: item.id, title: item.title,
+        subtitle: [item.ticketNo, item.status, item.priority].filter(Boolean).join(' / '),
+        projectId: item.projectId, projectName: projectNameOf(item.projectId), updatedAt: item.updatedAt || item.createdAt
+      }));
+    push('tickets', list);
+  }
+
+  if (types.includes('knowledge')) {
+    let source = filterByProjectScope(db.knowledgeBase || [], user, item => item.projectId);
+    if (user.role === 'customer') source = source.filter(item => item.status === 'published');
+    const list = source
+      .filter(item => searchMatch(lowered, user.role === 'customer'
+        ? [item.title, item.keywords, item.category, item.tags]
+        : [item.title, item.keywords, item.problem, item.solution]))
+      .map(item => ({
+        type: 'knowledge', id: item.id, title: item.title,
+        subtitle: [item.category, item.status].filter(Boolean).join(' / '),
+        projectId: item.projectId, projectName: projectNameOf(item.projectId), updatedAt: item.createdAt
+      }));
+    push('knowledge', list);
+  }
+
+  if (types.includes('documents')) {
+    const list = filterByProjectScope(db.documents || [], user, item => item.projectId)
+      .filter(item => searchMatch(lowered, [item.title, item.brand, item.model, item.serialNumber, item.managementIp, item.managementMethod]))
+      .map(item => ({
+        type: 'documents', id: item.id, title: item.title,
+        subtitle: [item.brand, item.model, item.managementIp].filter(Boolean).join(' / '),
+        projectId: item.projectId, projectName: projectNameOf(item.projectId), updatedAt: item.updatedAt || item.createdAt
+      }));
+    push('documents', list);
+  }
+
+  if (types.includes('contracts') && user.role !== 'customer') {
+    const list = filterByProjectScope(db.contracts || [], user, item => item.projectId)
+      .filter(item => searchMatch(lowered, [item.contractNo, item.name, item.partyA, item.partyB, item.notes]))
+      .map(item => ({
+        type: 'contracts', id: item.id, title: item.name,
+        subtitle: [item.contractNo, CONTRACT_STATUS_LABELS[item.status] || item.status].filter(Boolean).join(' / '),
+        projectId: item.projectId, projectName: projectNameOf(item.projectId), updatedAt: item.updatedAt || item.createdAt
+      }));
+    push('contracts', list);
+  }
+
+  if (types.includes('spareParts') && user.role !== 'customer') {
+    const list = filterByProjectScope(db.spareParts || [], user, item => item.projectId)
+      .filter(item => searchMatch(lowered, [item.name, item.model, item.brand, item.location, item.notes]))
+      .map(item => ({
+        type: 'spareParts', id: item.id, title: item.name,
+        subtitle: [item.brand, item.model, item.location].filter(Boolean).join(' / '),
+        projectId: item.projectId, projectName: projectNameOf(item.projectId), updatedAt: item.createdAt
+      }));
+    push('spareParts', list);
+  }
+
+  if (types.includes('projects')) {
+    const list = (db.projects || [])
+      .filter(item => canViewProject(user, item.id))
+      .filter(item => searchMatch(lowered, [item.name, item.customerName, item.description]))
+      .map(item => ({
+        type: 'projects', id: item.id, title: item.name, subtitle: item.customerName || '',
+        projectId: item.id, projectName: item.name, updatedAt: item.createdAt
+      }));
+    push('projects', list);
+  }
+
+  hits.sort((a, b) => String(b.updatedAt || '').localeCompare(String(a.updatedAt || '')));
+  const total = Object.values(counts).reduce((sum, value) => sum + value, 0);
+  return { data: hits, counts, total, availableTypes: globalSearchTypeOptions };
 }
 
 function listScopedWorkReports(db, user, filters = {}) {
@@ -9413,6 +9815,139 @@ function buildProjectPptxBuffer(db, projectId, period, viewer) {
   return report ? buildDetailedPptxBufferFromReport(report) : null;
 }
 
+function buildServiceReportHtml(db, projectId, filters, viewer) {
+  const project = (db.projects || []).find(item => item.id === projectId);
+  if (!project) return null;
+  const range = getDateRangeFromPeriod(filters.period, '', filters.startDate, filters.endDate)
+    || getDateRangeFromPeriod('month');
+  const inRange = value => {
+    const key = String(value || '').slice(0, 10);
+    return key && key >= range.rangeStart && key <= range.rangeEnd;
+  };
+  const isCustomer = viewer && viewer.role === 'customer';
+  const logs = (db.logs || [])
+    .filter(item => item.projectId === projectId && inRange(item.date || item.createdAt))
+    .sort((a, b) => String(a.date || '').localeCompare(String(b.date || '')));
+  const executions = (db.inspectionExecutions || [])
+    .filter(item => item.projectId === projectId && inRange(item.executedAt))
+    .sort((a, b) => String(a.executedAt || '').localeCompare(String(b.executedAt || '')));
+  const tickets = (db.tickets || [])
+    .filter(item => item.projectId === projectId && inRange(item.createdAt))
+    .sort((a, b) => String(b.createdAt || '').localeCompare(String(a.createdAt || '')));
+  const totalHours = Number(logs.reduce((sum, item) => sum + Number(item.durationHours || 0), 0).toFixed(2));
+  const rows = (items, colspan, mapper) => items.map(mapper).join('') || `<tr><td colspan="${colspan}">本周期无记录</td></tr>`;
+  const planTitle = planId => (db.inspectionPlans || []).find(item => item.id === planId)?.title || '-';
+  const logRows = rows(logs, 6, item => `<tr>
+    <td>${escapeHtml(item.date || '-')}</td>
+    <td>${escapeHtml(item.event || item.title || '-')}</td>
+    <td>${escapeHtml(item.relatedTarget || '-')}</td>
+    <td>${escapeHtml(item.process || '-')}</td>
+    <td>${escapeHtml(item.result || '-')}</td>
+    <td>${escapeHtml(item.durationHours || 0)}</td>
+  </tr>`);
+  const inspectionRows = rows(executions, isCustomer ? 5 : 6, item => `<tr>
+    <td>${escapeHtml(item.executedAt || '-')}</td>
+    <td>${escapeHtml(planTitle(item.planId))}</td>
+    <td>${escapeHtml(item.result || '-')}</td>
+    <td>${escapeHtml(item.issue || '-')}</td>
+    <td>${escapeHtml(item.suggestion || '-')}</td>
+    ${isCustomer ? '' : `<td>${escapeHtml(item.executor || '-')}</td>`}
+  </tr>`);
+  const ticketRows = rows(tickets, 5, item => `<tr>
+    <td>${escapeHtml(item.ticketNo || '-')}</td>
+    <td>${escapeHtml(item.title || '-')}</td>
+    <td>${escapeHtml(item.priority || '-')}</td>
+    <td>${escapeHtml(item.status || '-')}</td>
+    <td>${escapeHtml(item.closedAt || item.updatedAt || item.createdAt || '-')}</td>
+  </tr>`);
+  return `<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>${escapeHtml(project.name)} 服务报告</title>
+  <style>
+    * { box-sizing: border-box; }
+    body { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", "Microsoft YaHei", sans-serif; margin: 0; padding: 28px; color: #0f172a; background: #f1f5f9; }
+    .sheet { max-width: 1080px; margin: 0 auto; background: #fff; border-radius: 16px; padding: 32px 36px; box-shadow: 0 10px 40px rgba(15,23,42,.08); }
+    .head { display: flex; justify-content: space-between; gap: 24px; align-items: flex-start; border-bottom: 3px solid #2563eb; padding-bottom: 18px; }
+    .head h1 { margin: 0 0 8px; font-size: 26px; }
+    .head .meta { color: #64748b; font-size: 13px; line-height: 1.9; }
+    .brand { text-align: right; font-size: 13px; color: #64748b; }
+    .brand strong { display: block; font-size: 15px; color: #0f172a; margin-bottom: 4px; }
+    .stats { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 12px; margin: 22px 0; }
+    .stat { border: 1px solid #e2e8f0; border-radius: 12px; padding: 14px 16px; background: #f8fafc; }
+    .stat span { font-size: 12px; color: #64748b; }
+    .stat strong { display: block; margin-top: 6px; font-size: 22px; }
+    h2 { font-size: 17px; margin: 26px 0 10px; padding-left: 10px; border-left: 4px solid #2563eb; }
+    table { width: 100%; border-collapse: collapse; font-size: 12.5px; }
+    th, td { border: 1px solid #e2e8f0; padding: 8px 10px; text-align: left; vertical-align: top; }
+    th { background: #eff6ff; font-weight: 600; }
+    .sign { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 40px; margin-top: 36px; font-size: 13px; color: #475569; }
+    .sign div { border-top: 1px solid #cbd5e1; padding-top: 10px; }
+    .toolbar { position: fixed; top: 16px; right: 16px; display: flex; gap: 8px; }
+    .toolbar button { border: 0; border-radius: 8px; padding: 9px 16px; cursor: pointer; background: #2563eb; color: #fff; font-size: 13px; }
+    .toolbar button.ghost { background: #e2e8f0; color: #0f172a; }
+    @media print {
+      @page { size: A4 landscape; margin: 12mm; }
+      body { background: #fff; padding: 0; }
+      .sheet { box-shadow: none; border-radius: 0; padding: 0; max-width: none; }
+      .toolbar { display: none; }
+      table { font-size: 10.5px; }
+      tr, td, th { break-inside: avoid; page-break-inside: avoid; }
+    }
+  </style>
+</head>
+<body>
+  <div class="toolbar">
+    <button type="button" onclick="window.print()">打印 / 另存 PDF</button>
+    <button type="button" class="ghost" onclick="history.back()">返回</button>
+  </div>
+  <div class="sheet">
+    <div class="head">
+      <div>
+        <h1>${escapeHtml(project.name)} 驻场运维服务报告</h1>
+        <div class="meta">
+          客户名称：${escapeHtml(project.customerName || '-')}<br />
+          服务周期：${escapeHtml(project.projectStartDate || '-')} 至 ${escapeHtml(project.projectEndDate || '-')}<br />
+          报告区间：${escapeHtml(range.rangeStart)} 至 ${escapeHtml(range.rangeEnd)}
+        </div>
+      </div>
+      <div class="brand">
+        <strong>驻场运维管理系统</strong>
+        生成时间<br />${escapeHtml(now())}
+      </div>
+    </div>
+    <div class="stats">
+      <div class="stat"><span>服务记录</span><strong>${logs.length}</strong></div>
+      <div class="stat"><span>累计工时</span><strong>${totalHours}</strong></div>
+      <div class="stat"><span>巡检执行</span><strong>${executions.length}</strong></div>
+      <div class="stat"><span>工单数量</span><strong>${tickets.length}</strong></div>
+    </div>
+    <h2>服务过程记录</h2>
+    <table>
+      <thead><tr><th style="width:96px;">日期</th><th style="width:140px;">事件</th><th>对象/位置</th><th>处理过程</th><th style="width:88px;">结果</th><th style="width:64px;">工时</th></tr></thead>
+      <tbody>${logRows}</tbody>
+    </table>
+    <h2>巡检执行情况</h2>
+    <table>
+      <thead><tr><th style="width:150px;">执行时间</th><th>巡检计划</th><th style="width:76px;">结果</th><th>异常说明</th><th>整改建议</th>${isCustomer ? '' : '<th style="width:90px;">执行人</th>'}</tr></thead>
+      <tbody>${inspectionRows}</tbody>
+    </table>
+    <h2>工单处理情况</h2>
+    <table>
+      <thead><tr><th style="width:150px;">工单号</th><th>标题</th><th style="width:70px;">优先级</th><th style="width:90px;">状态</th><th style="width:160px;">更新时间</th></tr></thead>
+      <tbody>${ticketRows}</tbody>
+    </table>
+    <div class="sign">
+      <div>运维服务方确认：____________________</div>
+      <div>客户方确认：____________________</div>
+    </div>
+  </div>
+</body>
+</html>`;
+}
+
 function buildOperationalReportHtml(db, scope, targetId, period, viewer) {
   const report = buildOperationalReportData(db, scope, targetId, period, viewer);
   if (!report) return null;
@@ -9449,6 +9984,15 @@ function buildOperationalReportHtml(db, scope, targetId, period, viewer) {
     .section-name { font-size:20px; font-weight:700; color:#0f172a; }
     .tone-state .section-group { background:#ffedd5; color:#9a3412; }
     .tone-output .section-group { background:#dbeafe; color:#1d4ed8; }
+    /* 打印与另存 PDF：去掉背景色与阴影，避免分页时出现大面积色块并保证表格不被截断。 */
+    @media print {
+      @page { size: A4 landscape; margin: 12mm; }
+      body { margin: 0; background: #fff; }
+      .card { box-shadow: none; break-inside: avoid; page-break-inside: avoid; }
+      .summary-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+      table { font-size: 11px; }
+      tr, td, th { break-inside: avoid; page-break-inside: avoid; }
+    }
   </style>
 </head>
 <body>
@@ -10936,6 +11480,218 @@ const requestHandler = async (req, res) => {
       return json(res, 200, paginateResult(sorted, query, user));
     }
 
+    // 合同与费用：管理员与项目内工程师可读，写操作要求编辑器权限；客户不可见金额明细。
+    if (req.method === 'GET' && pathname === '/api/contracts') {
+      const user = requireAuth(req, res, db);
+      if (!user) return;
+      if (user.role === 'customer') return json(res, 403, { message: '无权查看合同信息' });
+      const query = Object.fromEntries(reqUrl.searchParams);
+      let list = filterByProjectScope(db.contracts || [], user, item => item.projectId);
+      if (query.projectId) list = list.filter(item => item.projectId === query.projectId);
+      if (query.status) list = list.filter(item => item.status === query.status);
+      const sorted = parseSortQuery(query, list.map(item => ({
+        ...item,
+        ...summarizeContract(item, db.contractSettlements || [])
+      })), 'createdAt');
+      return json(res, 200, paginateResult(sorted, query, user));
+    }
+
+    if (req.method === 'GET' && pathname === '/api/contracts/summary') {
+      const user = requireAuth(req, res, db);
+      if (!user) return;
+      if (user.role === 'customer') return json(res, 403, { message: '无权查看合同信息' });
+      const projectId = String(reqUrl.searchParams.get('projectId') || '').trim();
+      let contracts = filterByProjectScope(db.contracts || [], user, item => item.projectId);
+      if (projectId) contracts = contracts.filter(item => item.projectId === projectId);
+      const totals = contracts.reduce((acc, contract) => {
+        const summary = summarizeContract(contract, db.contractSettlements || []);
+        acc.contractAmount += summary.contractAmount;
+        acc.invoiceAmount += summary.invoiceAmount;
+        acc.receivedAmount += summary.receivedAmount;
+        acc.costAmount += summary.costAmount;
+        acc.grossProfit += summary.grossProfit;
+        return acc;
+      }, { contractAmount: 0, invoiceAmount: 0, receivedAmount: 0, costAmount: 0, grossProfit: 0 });
+      const grossMargin = totals.receivedAmount > 0
+        ? Math.round((totals.grossProfit / totals.receivedAmount) * 1000) / 10
+        : 0;
+      return json(res, 200, {
+        ...Object.fromEntries(Object.entries(totals).map(([key, value]) => [key, normalizeMoney(value)])),
+        grossMargin,
+        contractCount: contracts.length
+      });
+    }
+
+    if (req.method === 'POST' && pathname === '/api/contracts') {
+      const user = requireEditor(req, res, db);
+      if (!user) return;
+      const body = await readBody(req);
+      const name = String(body.name || '').trim();
+      if (!name) return json(res, 400, { message: '合同名称不能为空' });
+      const projectId = resolveWriteProjectId(user, body.projectId);
+      if (!requireExistingProject(projectId, db)) return json(res, 400, { message: '关联项目不存在' });
+      const amount = normalizeMoney(body.amount);
+      const taxRate = normalizeMoney(body.taxRate);
+      if (amount < 0 || taxRate < 0) return json(res, 400, { message: '合同金额与税率不能为负数' });
+      const contract = {
+        id: id('contract'),
+        projectId,
+        contractNo: String(body.contractNo || '').trim().slice(0, 64),
+        name: name.slice(0, 128),
+        partyA: String(body.partyA || '').slice(0, 128),
+        partyB: String(body.partyB || '').slice(0, 128),
+        amount,
+        taxRate,
+        settlementCycle: ['monthly', 'quarterly', 'milestone', 'once'].includes(body.settlementCycle) ? body.settlementCycle : 'monthly',
+        signDate: body.signDate || '',
+        startDate: body.startDate || '',
+        endDate: body.endDate || '',
+        status: ['draft', 'active', 'completed', 'terminated'].includes(body.status) ? body.status : 'active',
+        notes: String(body.notes || '').slice(0, 500),
+        createdBy: user.id,
+        createdAt: now(),
+        updatedAt: now()
+      };
+      db.contracts.push(contract);
+      appendAuditLog(db, user, 'create', 'contract', contract.id, `创建合同 ${contract.name}`, projectId);
+      await writeDb(db);
+      return json(res, 201, { ...contract, ...summarizeContract(contract, db.contractSettlements || []) });
+    }
+
+    if (req.method && ['PUT', 'DELETE'].includes(req.method) && pathname.match(/^\/api\/contracts\/[^/]+$/)) {
+      const user = requireEditor(req, res, db);
+      if (!user) return;
+      const contractId = pathname.split('/')[3];
+      const contract = (db.contracts || []).find(item => item.id === contractId);
+      if (!contract) return json(res, 404, { message: '合同不存在' });
+      if (!canViewProject(user, contract.projectId)) return json(res, 403, { message: '无权操作该合同' });
+      if (req.method === 'DELETE') {
+        db.contracts = (db.contracts || []).filter(item => item.id !== contractId);
+        db.contractSettlements = (db.contractSettlements || []).filter(item => item.contractId !== contractId);
+        appendAuditLog(db, user, 'delete', 'contract', contractId, `删除合同 ${contract.name}`, contract.projectId);
+        await writeDb(db);
+        return json(res, 200, { ok: true });
+      }
+      const body = await readBody(req);
+      if (body.name !== undefined) {
+        const name = String(body.name || '').trim();
+        if (!name) return json(res, 400, { message: '合同名称不能为空' });
+        contract.name = name.slice(0, 128);
+      }
+      if (body.amount !== undefined) {
+        const amount = normalizeMoney(body.amount);
+        if (amount < 0) return json(res, 400, { message: '合同金额不能为负数' });
+        contract.amount = amount;
+      }
+      if (body.taxRate !== undefined) {
+        const taxRate = normalizeMoney(body.taxRate);
+        if (taxRate < 0) return json(res, 400, { message: '税率不能为负数' });
+        contract.taxRate = taxRate;
+      }
+      if (body.contractNo !== undefined) contract.contractNo = String(body.contractNo || '').trim().slice(0, 64);
+      if (body.partyA !== undefined) contract.partyA = String(body.partyA || '').slice(0, 128);
+      if (body.partyB !== undefined) contract.partyB = String(body.partyB || '').slice(0, 128);
+      if (body.settlementCycle !== undefined) {
+        contract.settlementCycle = ['monthly', 'quarterly', 'milestone', 'once'].includes(body.settlementCycle) ? body.settlementCycle : contract.settlementCycle;
+      }
+      if (body.signDate !== undefined) contract.signDate = body.signDate || '';
+      if (body.startDate !== undefined) contract.startDate = body.startDate || '';
+      if (body.endDate !== undefined) contract.endDate = body.endDate || '';
+      if (body.status !== undefined) {
+        contract.status = ['draft', 'active', 'completed', 'terminated'].includes(body.status) ? body.status : contract.status;
+      }
+      if (body.notes !== undefined) contract.notes = String(body.notes || '').slice(0, 500);
+      contract.updatedAt = now();
+      appendAuditLog(db, user, 'update', 'contract', contract.id, `修改合同 ${contract.name}`, contract.projectId);
+      await writeDb(db);
+      return json(res, 200, { ...contract, ...summarizeContract(contract, db.contractSettlements || []) });
+    }
+
+    if (req.method === 'GET' && pathname === '/api/contract-settlements') {
+      const user = requireAuth(req, res, db);
+      if (!user) return;
+      if (user.role === 'customer') return json(res, 403, { message: '无权查看结算信息' });
+      const query = Object.fromEntries(reqUrl.searchParams);
+      let list = filterByProjectScope(db.contractSettlements || [], user, item => item.projectId);
+      if (query.contractId) list = list.filter(item => item.contractId === query.contractId);
+      if (query.projectId) list = list.filter(item => item.projectId === query.projectId);
+      if (query.status) list = list.filter(item => item.status === query.status);
+      const sorted = parseSortQuery(query, list, 'createdAt');
+      return json(res, 200, paginateResult(sorted, query, user));
+    }
+
+    if (req.method === 'POST' && pathname === '/api/contract-settlements') {
+      const user = requireEditor(req, res, db);
+      if (!user) return;
+      const body = await readBody(req);
+      const contract = (db.contracts || []).find(item => item.id === String(body.contractId || ''));
+      if (!contract) return json(res, 400, { message: '关联合同不存在' });
+      if (!canViewProject(user, contract.projectId)) return json(res, 403, { message: '无权操作该合同' });
+      const invoiceAmount = normalizeMoney(body.invoiceAmount);
+      const receivedAmount = normalizeMoney(body.receivedAmount);
+      const costAmount = normalizeMoney(body.costAmount);
+      if (invoiceAmount < 0 || receivedAmount < 0 || costAmount < 0) {
+        return json(res, 400, { message: '开票、回款与成本金额不能为负数' });
+      }
+      const settlement = {
+        id: id('settlement'),
+        contractId: contract.id,
+        projectId: contract.projectId,
+        periodKey: String(body.periodKey || '').slice(0, 32),
+        title: String(body.title || '').slice(0, 128),
+        invoiceAmount,
+        receivedAmount,
+        costAmount,
+        invoiceNo: String(body.invoiceNo || '').slice(0, 64),
+        invoicedAt: body.invoicedAt || '',
+        receivedAt: body.receivedAt || '',
+        status: ['pending', 'invoiced', 'received'].includes(body.status) ? body.status : 'pending',
+        notes: String(body.notes || '').slice(0, 500),
+        createdBy: user.id,
+        createdAt: now(),
+        updatedAt: now()
+      };
+      db.contractSettlements.push(settlement);
+      appendAuditLog(db, user, 'create', 'contractSettlement', settlement.id, `登记合同结算 ${contract.name}`, contract.projectId);
+      await writeDb(db);
+      return json(res, 201, settlement);
+    }
+
+    if (req.method && ['PUT', 'DELETE'].includes(req.method) && pathname.match(/^\/api\/contract-settlements\/[^/]+$/)) {
+      const user = requireEditor(req, res, db);
+      if (!user) return;
+      const settlementId = pathname.split('/')[3];
+      const settlement = (db.contractSettlements || []).find(item => item.id === settlementId);
+      if (!settlement) return json(res, 404, { message: '结算记录不存在' });
+      if (!canViewProject(user, settlement.projectId)) return json(res, 403, { message: '无权操作该结算记录' });
+      if (req.method === 'DELETE') {
+        db.contractSettlements = (db.contractSettlements || []).filter(item => item.id !== settlementId);
+        appendAuditLog(db, user, 'delete', 'contractSettlement', settlementId, '删除合同结算记录', settlement.projectId);
+        await writeDb(db);
+        return json(res, 200, { ok: true });
+      }
+      const body = await readBody(req);
+      for (const field of ['invoiceAmount', 'receivedAmount', 'costAmount']) {
+        if (body[field] === undefined) continue;
+        const value = normalizeMoney(body[field]);
+        if (value < 0) return json(res, 400, { message: '开票、回款与成本金额不能为负数' });
+        settlement[field] = value;
+      }
+      if (body.periodKey !== undefined) settlement.periodKey = String(body.periodKey || '').slice(0, 32);
+      if (body.title !== undefined) settlement.title = String(body.title || '').slice(0, 128);
+      if (body.invoiceNo !== undefined) settlement.invoiceNo = String(body.invoiceNo || '').slice(0, 64);
+      if (body.invoicedAt !== undefined) settlement.invoicedAt = body.invoicedAt || '';
+      if (body.receivedAt !== undefined) settlement.receivedAt = body.receivedAt || '';
+      if (body.status !== undefined) {
+        settlement.status = ['pending', 'invoiced', 'received'].includes(body.status) ? body.status : settlement.status;
+      }
+      if (body.notes !== undefined) settlement.notes = String(body.notes || '').slice(0, 500);
+      settlement.updatedAt = now();
+      appendAuditLog(db, user, 'update', 'contractSettlement', settlement.id, '修改合同结算记录', settlement.projectId);
+      await writeDb(db);
+      return json(res, 200, settlement);
+    }
+
     if (req.method === 'POST' && pathname === '/api/projects') {
       const user = requireAdmin(req, res, db);
       if (!user) return;
@@ -10952,6 +11708,7 @@ const requestHandler = async (req, res) => {
         projectEndDate: body.projectEndDate || '',
         notifyBefore: body.notifyBefore || '',
         paymentMethod: body.paymentMethod || '',
+        customerLogVisible: body.customerLogVisible === true,
         description: body.description || '',
         createdAt: now()
       };
@@ -10983,6 +11740,7 @@ const requestHandler = async (req, res) => {
       project.projectEndDate = body.projectEndDate || '';
       project.notifyBefore = body.notifyBefore || '';
       project.paymentMethod = body.paymentMethod || '';
+      project.customerLogVisible = body.customerLogVisible === true;
       project.description = body.description || '';
       appendAuditLog(db, user, 'update', 'project', project.id, `修改项目 ${project.name}`, project.id);
       await writeDb(db);
@@ -10996,7 +11754,7 @@ const requestHandler = async (req, res) => {
       // 通知属于过程性提醒，不构成业务关联；随项目删除级联清理，避免历史通知长期阻断项目删除。
       db.notifications = (db.notifications || []).filter(item => item.projectId !== projectId);
       // users 不参与按 projectId 过滤：多项目账号只解除该项目归属，账号本身保留。
-      const projectRelationCollections = ['assets','assetLifecycles','assetCheckouts','assetInventoryTasks','logs','workReports','knowledgeBase','documents','inspectionPlans','inspectionExecutions','spareParts','sparePartMovements','changeRecords','incidentRecords','tickets','dutyShifts','approvals','notifications','notificationChannels','monitorAlerts','monitorMaintenanceWindows','aiInspectionTargets','aiInspectionTemplates','aiInspectionTasks','aiInspectionResults','configBackupPlans','configBackupRecords'];
+      const projectRelationCollections = ['contracts','contractSettlements','assets','assetLifecycles','assetCheckouts','assetInventoryTasks','logs','workReports','knowledgeBase','kbRevisions','documents','inspectionPlans','inspectionExecutions','spareParts','sparePartMovements','sparePartVendors','sparePartPurchases','sparePartInventoryTasks','changeRecords','incidentRecords','tickets','dutyShifts','approvals','notifications','notificationChannels','monitorAlerts','monitorMaintenanceWindows','aiInspectionTargets','aiInspectionTemplates','aiInspectionTasks','aiInspectionResults','configBackupPlans','configBackupRecords'];
       const force = String(reqUrl.searchParams.get('force') || '') === '1';
       if (force) {
         // 管理员强制删除：先级联清理该项目下的全部业务数据与人员，再删除项目，便于清理历史残留项目。
@@ -11419,6 +12177,8 @@ const requestHandler = async (req, res) => {
       }
       // 删除人员前阻断所有引用该用户的数据，避免产生孤儿引用。
       const userRelationChecks = [
+        ['合同', (db.contracts || []), ['createdBy']],
+        ['合同结算', (db.contractSettlements || []), ['createdBy']],
         ['日志', (db.logs || []), ['userId']],
         ['知识库', (db.knowledgeBase || []), ['createdBy']],
         ['资产', (db.assets || []), ['createdBy']],
@@ -11435,6 +12195,8 @@ const requestHandler = async (req, res) => {
         ['故障记录', (db.incidentRecords || []), ['createdBy']],
         ['审批记录', (db.approvals || []), ['requestedBy', 'approvedBy', 'approverId', 'customerId']],
         ['备件流水', (db.sparePartMovements || []), ['operatorId']],
+        ['备件采购', (db.sparePartPurchases || []), ['applicantId', 'approverId', 'createdBy']],
+        ['备件盘点', (db.sparePartInventoryTasks || []), ['createdBy']],
         ['巡检对象', (db.aiInspectionTargets || []), ['createdBy']],
         ['巡检模板', (db.aiInspectionTemplates || []), ['createdBy']],
         ['巡检任务', (db.aiInspectionTasks || []), ['createdBy']],
@@ -12601,12 +13363,51 @@ const requestHandler = async (req, res) => {
       return json(res, 200, alert);
     }
 
+    if (req.method === 'GET' && pathname === '/api/search') {
+      const user = requireAuth(req, res, db);
+      if (!user) return;
+      const keyword = String(reqUrl.searchParams.get('keyword') || '').trim();
+      if (keyword.length < 2) return json(res, 400, { message: '请输入至少 2 个字符' });
+      const rawTypes = String(reqUrl.searchParams.get('types') || '').split(',').map(item => item.trim()).filter(Boolean);
+      const validTypes = rawTypes.filter(item => globalSearchTypeOptions.some(option => option.key === item));
+      const limitPerType = Math.min(20, Math.max(1, Number(reqUrl.searchParams.get('limit') || 5)));
+      const result = buildGlobalSearchResults(db, user, keyword, validTypes, limitPerType);
+      return json(res, 200, result);
+    }
+
     if (req.method === 'GET' && pathname === '/api/logs') {
       const user = requireAuth(req, res, db);
       if (!user) return;
       const query = Object.fromEntries(reqUrl.searchParams);
       if (user.role === 'customer') {
-        return json(res, 200, paginateResult([], query, user));
+        // 客户仅能查看已开启开关的项目，并且只下发服务过程与结果，内部备注与附件不外发。
+        if (!customerVisibleLogProjects(db, user).length) return json(res, 200, paginateResult([], query, user));
+        let customerLogs = customerVisibleLogProjects(db, user)
+          .flatMap(projectId => (db.logs || []).filter(item => item.projectId === projectId));
+        if (query.projectId) customerLogs = customerLogs.filter(item => item.projectId === query.projectId);
+        if (query.date) customerLogs = customerLogs.filter(item => item.date === query.date);
+        const keyword = String(query.keyword || '').trim().toLowerCase();
+        if (keyword) {
+          customerLogs = customerLogs.filter(item => [item.title, item.event, item.process, item.result, item.conclusion]
+            .some(field => String(field || '').toLowerCase().includes(keyword)));
+        }
+        const sorted = parseSortQuery(query, customerLogs, 'createdAt');
+        const presented = sorted.map(item => ({
+          id: item.id,
+          projectId: item.projectId,
+          date: item.date,
+          event: item.event,
+          title: item.title,
+          relatedTarget: item.relatedTarget,
+          ticketType: item.ticketType,
+          process: item.process,
+          result: item.result,
+          conclusion: item.conclusion,
+          durationHours: item.durationHours,
+          dispatcher: item.dispatcher,
+          createdAt: item.createdAt
+        }));
+        return json(res, 200, paginateResult(presented, query, user));
       }
       let list = filterByRecordScope(db.logs || [], user, query, item => item.userId || '');
       if (query.projectId) list = list.filter(item => item.projectId === query.projectId);
@@ -12723,6 +13524,10 @@ const requestHandler = async (req, res) => {
       let list = filterByProjectScope(db.knowledgeBase || [], user, item => item.projectId);
       if (reqUrl.searchParams.get('projectId')) list = list.filter(item => item.projectId === reqUrl.searchParams.get('projectId'));
       if (reqUrl.searchParams.get('userId')) list = list.filter(item => item.createdBy === reqUrl.searchParams.get('userId'));
+      const statusFilter = String(reqUrl.searchParams.get('status') || '').trim();
+      if (statusFilter) list = list.filter(item => item.status === statusFilter);
+      // 客户只看已发布条目，草稿与待审核内容不对客可见。
+      if (user.role === 'customer') list = list.filter(item => item.status === 'published');
       if (keyword) {
         list = list.filter(item => {
           const fields = user.role === 'customer'
@@ -12744,8 +13549,22 @@ const requestHandler = async (req, res) => {
           createdBy: item.createdBy,
           hasContent: Boolean(item.content || item.problem || item.solution)
         }))
-        : sorted;
+        : sorted.map(item => ({ ...item, revisionCount: (db.kbRevisions || []).filter(rev => rev.kbId === item.id).length }));
       return json(res, 200, paginateResult(presented, query, user));
+    }
+
+    if (req.method === 'GET' && pathname.match(/^\/api\/kb\/[^/]+\/revisions$/)) {
+      const user = requireAuth(req, res, db);
+      if (!user) return;
+      const kbId = pathname.split('/')[3];
+      const target = (db.knowledgeBase || []).find(item => item.id === kbId);
+      if (!target) return json(res, 404, { message: '知识条目不存在' });
+      if (!canViewProject(user, target.projectId)) return json(res, 403, { message: '无权访问该知识条目' });
+      if (user.role === 'customer' && target.status !== 'published') return json(res, 403, { message: '无权访问该知识条目' });
+      const revisions = (db.kbRevisions || [])
+        .filter(item => item.kbId === kbId)
+        .sort((a, b) => Number(b.version || 0) - Number(a.version || 0) || String(b.createdAt).localeCompare(String(a.createdAt)));
+      return json(res, 200, { data: revisions, total: revisions.length, currentVersion: target.version || 1 });
     }
 
     // 详情读取对项目内所有角色开放（含客户），列表接口只脱敏正文，详情接口按权限返回完整内容。
@@ -12756,6 +13575,7 @@ const requestHandler = async (req, res) => {
       const target = (db.knowledgeBase || []).find(item => item.id === kbId);
       if (!target) return json(res, 404, { message: '知识条目不存在' });
       if (!canViewProject(user, target.projectId)) return json(res, 403, { message: '无权访问该知识条目' });
+      if (user.role === 'customer' && target.status !== 'published') return json(res, 403, { message: '无权访问该知识条目' });
       return json(res, 200, target);
     }
 
@@ -12781,11 +13601,19 @@ const requestHandler = async (req, res) => {
         keywords: body.keywords || '',
         problem: body.problem || '',
         solution: body.solution || '',
+        // 默认直接发布以保持既有创建体验，草稿与待审核需显式提交。
+        status: ['draft', 'pending', 'published', 'rejected'].includes(body.status) ? body.status : 'published',
+        version: 1,
+        reviewNote: '',
+        reviewedBy: '',
+        reviewedAt: '',
+        publishedAt: now(),
         createdBy: user.id,
         projectId: kbProjectId,
         createdAt: now()
       };
       db.knowledgeBase.push(item);
+      snapshotKbRevision(db, item, 'create', user);
       appendAuditLog(db, user, 'create', 'kb', item.id, `创建知识条目 ${item.title}`, item.projectId);
       await writeDb(db);
       return json(res, 201, item);
@@ -12799,6 +13627,10 @@ const requestHandler = async (req, res) => {
       if (!target) return json(res, 404, { message: '知识条目不存在' });
       if (!canDeleteOwnedRecord(user, target, target.createdBy || '')) return json(res, 403, { message: '仅支持修改自己创建的知识条目' });
       const body = await readBody(req);
+      const beforeContent = {
+        title: target.title, keywords: target.keywords, problem: target.problem,
+        solution: target.solution, content: target.content, category: target.category, tags: target.tags
+      };
       if (body.title !== undefined) {
         const nextKbTitle = String(body.title || '').trim();
         if (!nextKbTitle) return json(res, 400, { message: '知识条目标题不能为空' });
@@ -12819,6 +13651,27 @@ const requestHandler = async (req, res) => {
         if (!requireExistingProject(body.projectId, db)) return json(res, 400, { message: '关联项目不存在' });
         target.projectId = body.projectId;
       }
+      // 内容变化才递增版本；仅调整审核状态时保留版本号，避免版本历史被状态切换污染。
+      const kbContentChanged = ['title', 'keywords', 'problem', 'solution', 'content', 'category']
+        .some(key => String(beforeContent[key] || '') !== String(target[key] || ''))
+        || JSON.stringify(beforeContent.tags || '') !== JSON.stringify(target.tags || '');
+      if (kbContentChanged) {
+        target.version = Math.max(1, Number(target.version || 1)) + 1;
+        // 内容变更一律回到待审核；管理员可保留草稿态，发布须走审核接口。
+        target.status = user.role === 'admin' && body.status === 'draft' ? 'draft' : 'pending';
+        target.reviewNote = '';
+        target.reviewedBy = '';
+        target.reviewedAt = '';
+        snapshotKbRevision(db, target, 'update', user);
+      } else if (['draft', 'pending', 'published', 'rejected'].includes(body.status) && body.status !== target.status) {
+        // 状态切换同样需要审核：只有管理员可以直接发布，其他角色最多提交到待审核。
+        if (body.status === 'published' && user.role !== 'admin') {
+          target.status = 'pending';
+        } else {
+          target.status = body.status;
+          if (body.status === 'published') target.publishedAt = now();
+        }
+      }
       appendAuditLog(db, user, 'update', 'kb', kbId, `修改知识条目 ${target.title}`, target.projectId);
       await writeDb(db);
       return json(res, 200, target);
@@ -12833,9 +13686,34 @@ const requestHandler = async (req, res) => {
       const target = db.knowledgeBase[index];
       if (!canDeleteOwnedRecord(user, target, target.createdBy || '')) return json(res, 403, { message: '仅支持删除自己创建的知识条目' });
       db.knowledgeBase.splice(index, 1);
+      db.kbRevisions = (db.kbRevisions || []).filter(item => item.kbId !== kbId);
       appendAuditLog(db, user, 'delete', 'kb', kbId, `删除知识条目 ${target.title}`, target.projectId);
       await writeDb(db);
       return json(res, 200, { ok: true });
+    }
+
+    // 知识库审核：仅管理员可发布或驳回，驳回意见回写条目并在版本历史留痕。
+    if (req.method === 'POST' && pathname.match(/^\/api\/kb\/[^/]+\/review$/)) {
+      const user = requireAdmin(req, res, db);
+      if (!user) return;
+      const kbId = pathname.split('/')[3];
+      const target = (db.knowledgeBase || []).find(item => item.id === kbId);
+      if (!target) return json(res, 404, { message: '知识条目不存在' });
+      if (target.status !== 'pending') return json(res, 400, { message: '仅待审核的条目可以审核' });
+      const body = await readBody(req);
+      const decision = String(body.decision || '').trim();
+      if (!['publish', 'reject'].includes(decision)) return json(res, 400, { message: '审核结论无效' });
+      const note = String(body.note || '').slice(0, 500);
+      target.status = decision === 'publish' ? 'published' : 'rejected';
+      target.reviewNote = note;
+      target.reviewedBy = user.id;
+      target.reviewedAt = now();
+      if (decision === 'publish') target.publishedAt = now();
+      snapshotKbRevision(db, target, decision === 'publish' ? 'publish' : 'reject', user, note);
+      appendAuditLog(db, user, decision === 'publish' ? 'approved' : 'returned', 'kb', target.id,
+        `${decision === 'publish' ? '发布' : '驳回'}知识条目 ${target.title}${note ? `：${note}` : ''}`, target.projectId);
+      await writeDb(db);
+      return json(res, 200, target);
     }
 
     if (req.method === 'GET' && pathname === '/api/documents') {
@@ -13757,6 +14635,284 @@ const requestHandler = async (req, res) => {
       });
       if (!outcome.item) return json(res, outcome.status, { message: outcome.message });
       return json(res, 200, { item: outcome.item, movement: outcome.movement });
+    }
+
+    if (req.method === 'GET' && pathname === '/api/spare-part-vendors') {
+      const user = requireAuth(req, res, db);
+      if (!user) return;
+      if (user.role === 'customer') return json(res, 403, { message: '无权查看供应商信息' });
+      const query = Object.fromEntries(reqUrl.searchParams);
+      let list = filterByProjectScope(db.sparePartVendors || [], user, item => item.projectId);
+      if (query.projectId) list = list.filter(item => item.projectId === query.projectId);
+      if (query.status) list = list.filter(item => item.status === query.status);
+      const sorted = parseSortQuery(query, list, 'createdAt');
+      return json(res, 200, paginateResult(sorted, query, user));
+    }
+
+    if (req.method === 'POST' && pathname === '/api/spare-part-vendors') {
+      const user = requireEditor(req, res, db);
+      if (!user) return;
+      const body = await readBody(req);
+      const name = String(body.name || '').trim();
+      if (!name) return json(res, 400, { message: '供应商名称不能为空' });
+      const projectId = resolveWriteProjectId(user, body.projectId);
+      if (!requireExistingProject(projectId, db)) return json(res, 400, { message: '关联项目不存在' });
+      const vendor = {
+        id: id('spareVendor'),
+        projectId,
+        name: name.slice(0, 128),
+        contactName: String(body.contactName || '').slice(0, 64),
+        contactPhone: String(body.contactPhone || '').slice(0, 32),
+        email: String(body.email || '').slice(0, 128),
+        address: String(body.address || '').slice(0, 256),
+        status: body.status === 'inactive' ? 'inactive' : 'active',
+        notes: String(body.notes || '').slice(0, 500),
+        createdAt: now()
+      };
+      db.sparePartVendors.push(vendor);
+      appendAuditLog(db, user, 'create', 'sparePartVendor', vendor.id, `创建供应商 ${vendor.name}`, projectId);
+      await writeDb(db);
+      return json(res, 201, vendor);
+    }
+
+    if (req.method && ['PUT', 'DELETE'].includes(req.method) && pathname.match(/^\/api\/spare-part-vendors\/[^/]+$/)) {
+      const user = requireEditor(req, res, db);
+      if (!user) return;
+      const vendorId = pathname.split('/')[3];
+      const vendor = (db.sparePartVendors || []).find(item => item.id === vendorId);
+      if (!vendor) return json(res, 404, { message: '供应商不存在' });
+      if (!canViewProject(user, vendor.projectId)) return json(res, 403, { message: '无权操作该供应商' });
+      if (req.method === 'DELETE') {
+        const referenced = (db.sparePartPurchases || []).some(item => item.vendorId === vendorId && item.status !== 'cancelled');
+        if (referenced) return json(res, 409, { message: '该供应商存在未取消的采购申请，无法删除' });
+        db.sparePartVendors = (db.sparePartVendors || []).filter(item => item.id !== vendorId);
+        appendAuditLog(db, user, 'delete', 'sparePartVendor', vendorId, `删除供应商 ${vendor.name}`, vendor.projectId);
+        await writeDb(db);
+        return json(res, 200, { ok: true });
+      }
+      const body = await readBody(req);
+      if (body.name !== undefined) {
+        const name = String(body.name || '').trim();
+        if (!name) return json(res, 400, { message: '供应商名称不能为空' });
+        vendor.name = name.slice(0, 128);
+      }
+      if (body.contactName !== undefined) vendor.contactName = String(body.contactName || '').slice(0, 64);
+      if (body.contactPhone !== undefined) vendor.contactPhone = String(body.contactPhone || '').slice(0, 32);
+      if (body.email !== undefined) vendor.email = String(body.email || '').slice(0, 128);
+      if (body.address !== undefined) vendor.address = String(body.address || '').slice(0, 256);
+      if (body.status !== undefined) vendor.status = body.status === 'inactive' ? 'inactive' : 'active';
+      if (body.notes !== undefined) vendor.notes = String(body.notes || '').slice(0, 500);
+      appendAuditLog(db, user, 'update', 'sparePartVendor', vendor.id, `修改供应商 ${vendor.name}`, vendor.projectId);
+      await writeDb(db);
+      return json(res, 200, vendor);
+    }
+
+    if (req.method === 'GET' && pathname === '/api/spare-part-purchases') {
+      const user = requireAuth(req, res, db);
+      if (!user) return;
+      if (user.role === 'customer') return json(res, 403, { message: '无权查看采购申请' });
+      const query = Object.fromEntries(reqUrl.searchParams);
+      let list = filterByProjectScope(db.sparePartPurchases || [], user, item => item.projectId);
+      if (query.projectId) list = list.filter(item => item.projectId === query.projectId);
+      if (query.status) list = list.filter(item => item.status === query.status);
+      if (query.sparePartId) list = list.filter(item => item.sparePartId === query.sparePartId);
+      const sorted = parseSortQuery(query, list, 'createdAt');
+      return json(res, 200, paginateResult(sorted, query, user));
+    }
+
+    if (req.method === 'POST' && pathname === '/api/spare-part-purchases') {
+      const user = requireEditor(req, res, db);
+      if (!user) return;
+      const body = await readBody(req);
+      const sparePart = (db.spareParts || []).find(item => item.id === String(body.sparePartId || ''));
+      if (!sparePart) return json(res, 400, { message: '关联备件不存在' });
+      if (!canViewProject(user, sparePart.projectId)) return json(res, 403, { message: '无权为该备件发起采购' });
+      const vendor = (db.sparePartVendors || []).find(item => item.id === String(body.vendorId || ''));
+      if (vendor && vendor.projectId !== sparePart.projectId) return json(res, 400, { message: '供应商不属于该备件项目' });
+      const quantity = Number(body.quantity || 0);
+      if (!Number.isFinite(quantity) || quantity <= 0) return json(res, 400, { message: '采购数量必须大于 0' });
+      const unitPrice = normalizeMoney(body.unitPrice);
+      if (unitPrice < 0) return json(res, 400, { message: '采购单价不能为负数' });
+      const purchase = {
+        id: id('sparePurchase'),
+        purchaseNo: nextPurchaseNo(db),
+        projectId: sparePart.projectId,
+        sparePartId: sparePart.id,
+        vendorId: vendor ? vendor.id : '',
+        quantity,
+        unitPrice,
+        totalAmount: normalizeMoney(quantity * unitPrice),
+        requestedAt: now(),
+        expectedAt: body.expectedAt || '',
+        receivedAt: '',
+        status: 'pending',
+        applicantId: user.id,
+        applicantName: user.name || user.username || '',
+        approverId: '',
+        approverName: '',
+        approvalNote: '',
+        notes: String(body.notes || '').slice(0, 500),
+        createdBy: user.id,
+        createdAt: now(),
+        updatedAt: now()
+      };
+      db.sparePartPurchases.push(purchase);
+      appendAuditLog(db, user, 'create', 'sparePartPurchase', purchase.id, `提交备件采购申请 ${sparePart.name} x${quantity}`, sparePart.projectId);
+      await writeDb(db);
+      return json(res, 201, purchase);
+    }
+
+    if (req.method === 'POST' && pathname.match(/^\/api\/spare-part-purchases\/[^/]+\/(approve|receive|cancel)$/)) {
+      const user = requireEditor(req, res, db);
+      if (!user) return;
+      const parts = pathname.split('/');
+      const purchaseId = parts[3];
+      const action = parts[4];
+      const purchase = (db.sparePartPurchases || []).find(item => item.id === purchaseId);
+      if (!purchase) return json(res, 404, { message: '采购申请不存在' });
+      if (!canViewProject(user, purchase.projectId)) return json(res, 403, { message: '无权处理该采购申请' });
+      const body = await readBody(req).catch(() => ({}));
+      if (action === 'approve') {
+        if (user.role !== 'admin') return json(res, 403, { message: '仅管理员可审批采购申请' });
+        if (purchase.status !== 'pending') return json(res, 400, { message: '仅待审批的申请可以审批' });
+        purchase.status = 'approved';
+        purchase.approverId = user.id;
+        purchase.approverName = user.name || user.username || '';
+        purchase.approvalNote = String(body.note || '').slice(0, 500);
+        appendAuditLog(db, user, 'approved', 'sparePartPurchase', purchase.id, `审批通过备件采购 ${purchase.purchaseNo}`, purchase.projectId);
+      } else if (action === 'receive') {
+        if (purchase.status !== 'approved') return json(res, 400, { message: '仅已审批的申请可以收货' });
+        const sparePart = (db.spareParts || []).find(item => item.id === purchase.sparePartId);
+        if (!sparePart) return json(res, 404, { message: '关联备件已删除，无法入库' });
+        sparePart.quantity = Number(sparePart.quantity || 0) + Number(purchase.quantity || 0);
+        db.sparePartMovements.push({
+          id: id('spareMove'),
+          sparePartId: sparePart.id,
+          projectId: sparePart.projectId,
+          assetId: sparePart.assetId || '',
+          type: 'inbound',
+          quantity: Number(purchase.quantity || 0),
+          reason: `采购入库 ${purchase.purchaseNo}`,
+          operatorId: user.id,
+          operatorName: user.name || user.username || '',
+          createdAt: now()
+        });
+        purchase.status = 'received';
+        purchase.receivedAt = now();
+        appendAuditLog(db, user, 'receive', 'sparePartPurchase', purchase.id, `备件采购到货入库 ${purchase.purchaseNo}`, purchase.projectId);
+      } else {
+        if (purchase.status === 'received') return json(res, 400, { message: '已入库的采购申请不能取消' });
+        purchase.status = 'cancelled';
+        appendAuditLog(db, user, 'cancel', 'sparePartPurchase', purchase.id, `取消备件采购 ${purchase.purchaseNo}`, purchase.projectId);
+      }
+      purchase.updatedAt = now();
+      await writeDb(db);
+      return json(res, 200, purchase);
+    }
+
+    if (req.method === 'GET' && pathname === '/api/spare-part-inventory-tasks') {
+      const user = requireAuth(req, res, db);
+      if (!user) return;
+      if (user.role === 'customer') return json(res, 403, { message: '无权查看备件盘点' });
+      const query = Object.fromEntries(reqUrl.searchParams);
+      let list = filterByProjectScope(db.sparePartInventoryTasks || [], user, item => item.projectId);
+      if (query.projectId) list = list.filter(item => item.projectId === query.projectId);
+      if (query.status) list = list.filter(item => item.status === query.status);
+      const sorted = parseSortQuery(query, list, 'createdAt');
+      return json(res, 200, paginateResult(sorted, query, user));
+    }
+
+    if (req.method === 'POST' && pathname === '/api/spare-part-inventory-tasks') {
+      const user = requireEditor(req, res, db);
+      if (!user) return;
+      const body = await readBody(req);
+      const projectId = resolveWriteProjectId(user, body.projectId);
+      if (!requireExistingProject(projectId, db)) return json(res, 400, { message: '关联项目不存在' });
+      const name = String(body.name || '').trim();
+      if (!name) return json(res, 400, { message: '盘点任务名称不能为空' });
+      const items = (db.spareParts || [])
+        .filter(item => item.projectId === projectId)
+        .map(item => ({
+          sparePartId: item.id,
+          name: item.name,
+          expectedQuantity: Number(item.quantity || 0),
+          actualQuantity: null,
+          difference: 0,
+          result: 'unchecked',
+          note: '',
+          checkedAt: ''
+        }));
+      if (!items.length) return json(res, 400, { message: '当前项目暂无备件可盘点' });
+      const task = {
+        id: id('spareInv'),
+        projectId,
+        name: name.slice(0, 128),
+        status: 'pending',
+        createdBy: user.id,
+        createdByName: user.name || user.username || '',
+        completedAt: '',
+        items,
+        createdAt: now()
+      };
+      db.sparePartInventoryTasks.push(task);
+      appendAuditLog(db, user, 'create', 'sparePartInventoryTask', task.id, `创建备件盘点任务 ${task.name}`, projectId);
+      await writeDb(db);
+      return json(res, 201, task);
+    }
+
+    if (req.method === 'POST' && pathname.match(/^\/api\/spare-part-inventory-tasks\/[^/]+\/(record|complete)$/)) {
+      const user = requireEditor(req, res, db);
+      if (!user) return;
+      const parts = pathname.split('/');
+      const taskId = parts[3];
+      const action = parts[4];
+      const task = (db.sparePartInventoryTasks || []).find(item => item.id === taskId);
+      if (!task) return json(res, 404, { message: '盘点任务不存在' });
+      if (!canViewProject(user, task.projectId)) return json(res, 403, { message: '无权操作该盘点任务' });
+      if (task.status === 'completed') return json(res, 400, { message: '盘点任务已完成' });
+      const body = await readBody(req);
+      if (action === 'record') {
+        const entry = task.items.find(item => item.sparePartId === String(body.sparePartId || ''));
+        if (!entry) return json(res, 404, { message: '盘点明细不存在' });
+        const actual = Number(body.actualQuantity);
+        if (!Number.isFinite(actual) || actual < 0) return json(res, 400, { message: '实盘数量必须为非负数' });
+        entry.actualQuantity = actual;
+        entry.difference = normalizeMoney(actual - entry.expectedQuantity);
+        entry.result = entry.difference === 0 ? 'match' : 'mismatch';
+        entry.note = String(body.note || '').slice(0, 500);
+        entry.checkedAt = now();
+        task.status = 'running';
+        appendAuditLog(db, user, 'update', 'sparePartInventoryTask', task.id, `登记备件盘点 ${entry.name} 实盘 ${actual}`, task.projectId);
+        await writeDb(db);
+        return json(res, 200, task);
+      }
+      // 完成盘点时按实盘数量回写库存，并为每条差异生成 adjust 流水，保证账实一致且可追溯。
+      const unchecked = task.items.filter(item => item.result === 'unchecked');
+      if (unchecked.length) return json(res, 400, { message: `仍有 ${unchecked.length} 项备件未盘点` });
+      for (const entry of task.items) {
+        const sparePart = (db.spareParts || []).find(item => item.id === entry.sparePartId);
+        if (!sparePart || entry.actualQuantity === null) continue;
+        if (sparePart.quantity === entry.actualQuantity) continue;
+        const delta = normalizeMoney(entry.actualQuantity - sparePart.quantity);
+        sparePart.quantity = entry.actualQuantity;
+        db.sparePartMovements.push({
+          id: id('spareMove'),
+          sparePartId: sparePart.id,
+          projectId: sparePart.projectId,
+          assetId: sparePart.assetId || '',
+          type: 'adjust',
+          quantity: delta,
+          reason: `盘点调整 ${task.name}`,
+          operatorId: user.id,
+          operatorName: user.name || user.username || '',
+          createdAt: now()
+        });
+      }
+      task.status = 'completed';
+      task.completedAt = now();
+      appendAuditLog(db, user, 'complete', 'sparePartInventoryTask', task.id, `完成备件盘点 ${task.name}`, task.projectId);
+      await writeDb(db);
+      return json(res, 200, task);
     }
 
     if (req.method === 'GET' && pathname === '/api/change-records') {
@@ -15457,6 +16613,42 @@ const requestHandler = async (req, res) => {
       return json(res, 200, { data: listAuditArchiveFiles() });
     }
 
+    // 审计日志导出复用在线查询的过滤口径，确保导出结果与页面所见一致。
+    if (req.method === 'GET' && pathname === '/api/audit-logs/export') {
+      const user = requireAuditReader(req, res, db);
+      if (!user) return;
+      const query = Object.fromEntries(reqUrl.searchParams);
+      let entries = user.role === 'admin'
+        ? (db.auditLogs || [])
+        : filterByProjectScope(db.auditLogs || [], user, item => item.projectId);
+      const filters = buildAuditLogFilters(query);
+      entries = entries.filter(item => matchesAuditLogFilters(item, filters));
+      if (!query.sortDirection) query.sortDirection = 'desc';
+      const sorted = parseSortQuery(query, entries, 'createdAt');
+      const format = String(query.format || 'csv').toLowerCase();
+      appendAuditLog(db, user, 'export', 'auditLog', 'audit-log-export', `导出审计日志（${sorted.length} 条）`,
+        userProjectIds(user).length === 1 ? userProjectIds(user)[0] : '');
+      await writeDb(db);
+      if (format === 'json') {
+        res.writeHead(200, buildSecurityHeaders({
+          'Content-Type': 'application/json; charset=utf-8',
+          'Content-Disposition': `attachment; filename="audit-logs-${formatDateKey(new Date())}.json"`
+        }));
+        return res.end(JSON.stringify({
+          exportedAt: now(),
+          exportedBy: user.username,
+          filters,
+          total: sorted.length,
+          data: sorted
+        }, null, 2));
+      }
+      res.writeHead(200, buildSecurityHeaders({
+        'Content-Type': 'text/csv; charset=utf-8',
+        'Content-Disposition': `attachment; filename="audit-logs-${formatDateKey(new Date())}.csv"`
+      }));
+      return res.end(buildAuditLogCsv(sorted));
+    }
+
     if (req.method === 'GET' && pathname === '/api/audit-logs/archive/entries') {
       const user = requireAuditReader(req, res, db);
       if (!user) return;
@@ -16248,6 +17440,21 @@ const requestHandler = async (req, res) => {
       if (!canViewProject(user, projectId)) return json(res, 403, { message: '无权查看其他项目报表' });
       const period = reqUrl.searchParams.get('period') || 'month';
       const content = buildOperationalReportHtml(db, 'project', projectId, period, user);
+      if (!content) return json(res, 404, { message: '项目不存在' });
+      res.writeHead(200, buildSecurityHeaders({ 'Content-Type': 'text/html; charset=utf-8' }));
+      return res.end(content);
+    }
+
+    // 服务报告打印页：面向客户交付，只呈现服务过程与结果，打印样式已内置可直接另存 PDF。
+    if (req.method === 'GET' && pathname.match(/^\/api\/reports\/service\/[^/]+$/)) {
+      const user = requireAuth(req, res, db);
+      if (!user) return;
+      const projectId = pathname.split('/')[4];
+      if (!canViewProject(user, projectId)) return json(res, 403, { message: '无权查看该项目服务报告' });
+      const period = String(reqUrl.searchParams.get('period') || 'month');
+      const startDate = String(reqUrl.searchParams.get('startDate') || '');
+      const endDate = String(reqUrl.searchParams.get('endDate') || '');
+      const content = buildServiceReportHtml(db, projectId, { period, startDate, endDate }, user);
       if (!content) return json(res, 404, { message: '项目不存在' });
       res.writeHead(200, buildSecurityHeaders({ 'Content-Type': 'text/html; charset=utf-8' }));
       return res.end(content);

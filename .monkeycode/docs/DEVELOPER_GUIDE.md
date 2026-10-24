@@ -71,6 +71,17 @@ BASE_URL="http://127.0.0.1:3000" npm run e2e
 - 修改 `public/sw.js` 时递增 `CACHE_NAME` 版本号，否则旧壳缓存不会失效。
 - 离线草稿键格式为 `onsiteOpsDraft:${type}:${userId}`，草稿只恢复不自动提交。
 
+## v1.3.0 开发约定
+
+- 新增集合必须同时加入 `dbCollectionKeys`、`normalizeDb()` 返回对象与 `sanitizeImportedData()` 的关联清理，否则读写会丢失该集合。
+- 合同金额统一走 `normalizeMoney()`，毛利只在 `summarizeContract()` 中计算，列表与汇总不要各自实现口径。
+- 采购状态变更必须经 `/approve` 与 `/receive` 接口，收货入库与流水写入放在同一事务性写库流程内。
+- 盘点任务的 `items` 是创建时快照，登记与完成都基于快照计算差异，不要把实时库存当作账面数量。
+- 知识库内容变更用 `snapshotKbRevision()` 记录版本；只有内容字段变化才递增版本，状态切换不污染版本历史。
+- 全局搜索结果必须复用列表的可见范围判断，新增可搜索类型时同步更新 `SEARCH_TYPE_TABS` 与前端结果渲染。
+- 审计导出与页面列表共用过滤函数，新增字段时同步更新 CSV 表头与公式注入中和逻辑。
+- E2E 中表单提交后先调用 `waitForSubmitIdle()`，等提交按钮解锁再切换标签页，避免被提交处理函数的后续刷新覆盖导航。
+
 ## 回归注意事项
 
 - `regression` 与 `e2e` 必须顺序执行，二者并发会争用监控采集锁与会话表。

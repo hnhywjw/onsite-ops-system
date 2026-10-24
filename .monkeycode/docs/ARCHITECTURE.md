@@ -92,6 +92,18 @@
 - 日志取证附件：图片压缩到长边 1600 后以 dataURL 内联，烧录时间/地点/记录人水印，受单张 3MB、6 张、用户 100MB、项目 1GB 四层配额约束。
 - PWA：`public/sw.js` 采用壳缓存加网络优先导航，跳过 `/api/`、`/ws`、`/downloads/`；离线草稿按用户隔离写入 localStorage，仅恢复不自动重放。
 
+## v1.3.0 新增架构点
+
+- 合同与结算分表：`contracts` 存合同主数据，`contractSettlements` 存分期结算；列表与汇总共用 `summarizeContract()`，毛利口径为「已回款 - 成本」。
+- 采购状态机：`sparePartPurchases` 由 `pending` 经 `/approve` 进入 `approved`，`/receive` 同步增加 `spareParts.quantity` 并写 `inbound` 流水，取消仅限尚未入库的申请。
+- 供应商约束：删除供应商前检查未取消采购申请，存在关联时返回 409，避免历史采购失去供应商引用。
+- 盘点快照：`sparePartInventoryTasks.items` 在创建时冻结账面数量，登记实盘后计算差异，`/complete` 按实盘回写库存并写 `adjust` 流水后转为只读。
+- 知识库版本：内容字段变化才递增 `version` 并回到 `pending`，状态字段变化不产生新版本；`kbRevisions` 记录每次内容快照，发布统一走 `/review`。
+- 全局搜索：`buildGlobalSearchResults()` 复用各列表的可见范围判断，客户角色不参与合同与备件检索，关键字少于 2 个字符直接拒绝。
+- 审计导出：`/api/audit-logs/export` 复用列表过滤条件，CSV 走 `quoteCsvValue()` 中和公式注入；JSON 返回 `exportedAt`、`exportedBy`、`filters`、`total`、`data`。
+- 服务报告：`GET /api/reports/service/:projectId` 由 `buildServiceReportHtml()` 生成可打印 HTML，按项目与周期聚合日志、工单、巡检与资产数据。
+- 客户日志可见性：项目级 `customerLogVisible` 开关默认关闭，开启后客户只能读取服务日志中的安全字段。
+
 ## 运行时数据流
 
 1. 用户访问 `public/index.html`，前端初始化并请求 `/api/session`。

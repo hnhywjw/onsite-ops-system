@@ -109,16 +109,28 @@ docker compose --env-file .env.production -f docker-compose.prod.yml up -d --bui
 
 ## 版本
 
-当前版本：`1.2.0`
+当前版本：`1.3.0`
 
 ### 软件包下载
 
-最新版本：**[v1.2.0](https://github.com/hnhywjw/onsite-ops-system/releases/tag/v1.2.0)**
+最新版本：**[v1.3.0](https://github.com/hnhywjw/onsite-ops-system/releases/tag/v1.3.0)**
 
-- 完整安装包 `onsite-ops-system-v1.2.0-production.tar.gz`
-- 离线升级包 `onsite-ops-upgrade-v1.2.0.tar.gz`
+- 完整安装包 `onsite-ops-system-v1.3.0-production.tar.gz`
+- 离线升级包 `onsite-ops-upgrade-v1.3.0.tar.gz`
 - SHA256 校验文件
 - 部署说明见仓库 `PRODUCTION_DEPLOY.md`
+
+### v1.3.0 更新说明
+
+P2 业务增强：
+- 合同与费用：新增合同台账、分期结算、开票回款跟踪与毛利/毛利率汇总
+- 供应商与采购：供应商台账、采购申请审批与收货自动入库，未取消采购会阻止供应商删除
+- 备件盘点：按项目生成账面快照，逐项登记实盘差异，完成后回写库存并记录调整流水
+- 知识库审核：内容变更自动递增版本并回到待审核，管理员发布/驳回，客户仅可见已发布条目
+- 全局搜索：`Ctrl K` 跨资产、日志、工单、知识、合同、备件与项目检索，范围与列表权限一致
+- 审计导出：按当前筛选导出 CSV/JSON，CSV 中和公式注入
+- 服务报告：按项目与周期生成可打印的服务报告
+- 客户日志可见性：项目级开关控制客户能否查看服务日志，仅下发安全字段
 
 ### v1.2.0 更新说明
 

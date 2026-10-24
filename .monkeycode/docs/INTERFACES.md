@@ -4,14 +4,20 @@
 
 - `users`
 - `projects`
+- `contracts`
+- `contractSettlements`
 - `assets`
 - `logs`
 - `knowledgeBase`
+- `kbRevisions`
 - `documents`
 - `inspectionPlans`
 - `inspectionExecutions`
 - `spareParts`
 - `sparePartMovements`
+- `sparePartVendors`
+- `sparePartPurchases`
+- `sparePartInventoryTasks`
 - `changeRecords`
 - `incidentRecords`
 - `tickets`
@@ -69,7 +75,30 @@
 - `GET|POST|PUT|DELETE /api/kb`
   - `GET /api/kb` 列表对客户账号只返回标题、分类、标签、项目与创建信息，正文、问题描述、解决方案不下发。
   - `GET /api/kb/:id` 详情对项目内所有角色（含客户）返回完整内容；这是产品既定取舍，客户可通过详情查阅知识条目。
+  - 客户仅能看到 `published` 条目；草稿、待审核、已驳回条目不出现在列表，详情返回 403。
+  - `GET /api/kb/:id/revisions` 返回版本历史与 `currentVersion`。
+  - `POST /api/kb/:id/review` 仅管理员可用，`decision=publish|reject`，非 `pending` 条目重复审核返回 400。
 - `GET|POST|PUT|DELETE /api/documents`
+
+### 合同、采购与盘点
+
+- `GET|POST /api/contracts`、`PUT|DELETE /api/contracts/:id`
+  - 合同与结算分表存储；列表每行附带 `invoiceAmount`、`receivedAmount`、`costAmount`、`grossProfit`、`grossMargin`。
+  - `GET /api/contracts/summary` 支持 `projectId`，按已回款减成本计算毛利。
+  - 金额为负数返回 400；客户角色访问返回 403。
+- `GET|POST /api/contract-settlements`、`PUT|DELETE /api/contract-settlements/:id`
+  - 结算记录归属合同所在项目，删除合同会级联删除其结算。
+- `GET|POST /api/spare-part-vendors`、`PUT|DELETE /api/spare-part-vendors/:id`
+  - 供应商存在未取消采购申请时删除返回 409。
+- `GET|POST /api/spare-part-purchases`
+  - 状态机为 `pending -> approved -> received`，`cancelled` 为终态。
+  - `POST /api/spare-part-purchases/:id/approve` 仅管理员可调用，其他角色返回 403。
+  - `POST /api/spare-part-purchases/:id/receive` 自动把数量写入库存并生成 `inbound` 流水；重复收货返回 400。
+  - `POST /api/spare-part-purchases/:id/cancel` 仅允许未入库申请，已收货返回 400。
+- `GET|POST /api/spare-part-inventory-tasks`
+  - 创建时冻结项目内备件账面快照，状态 `pending`。
+  - `POST /api/spare-part-inventory-tasks/:id/record` 登记实盘数量，按差异置 `match`/`mismatch`。
+  - `POST /api/spare-part-inventory-tasks/:id/complete` 存在未盘点项返回 400；完成后按实盘回写库存并写入 `adjust` 流水，任务转为 `completed` 后不可继续登记。
 
 ### 运维作业
 
@@ -138,6 +167,9 @@
 - `POST /api/system/import`
 - `POST /api/system/upgrade`
 - `GET /api/audit-logs`
+- `GET /api/audit-logs/export`
+  - `format=csv|json`，支持 `search`、`action`、`targetType`、`projectId` 过滤，导出范围与页面可见范围一致。
+  - CSV 对以 `= + - @` 开头的单元格做公式注入中和，表头行不加引号。
 - `GET /api/notifications`
 - `POST /api/notifications/:id/read`
 - `GET|POST /api/notification-channels`
@@ -158,6 +190,15 @@
 - `POST /api/monitor/alerts/:id/acknowledge`、`POST /api/monitor/alerts/:id/resolve`、`POST /api/monitor/alerts/:id/silence`
 - `GET|POST /api/monitor/maintenance-windows`
 - `PUT|DELETE /api/monitor/maintenance-windows/:id`
+
+### 全局搜索与服务报告
+
+- `GET /api/search`
+  - 参数 `keyword`（至少 2 个字符，否则 400）与 `types`（逗号分隔）。
+  - 支持 `assets`、`logs`、`tickets`、`knowledge`、`documents`、`contracts`、`spareParts`、`projects`。
+  - 返回 `total`、`counts`、`data`；结果按调用者项目范围过滤，客户不参与合同与备件搜索。
+- `GET /api/reports/service/:projectId`
+  - 参数 `period=week|month|year`，返回可直接打印的 HTML 服务报告。
 
 ## 通知事件
 
@@ -242,7 +283,28 @@ draft -> submitted -> approved -> locked
 submitted -> returned -> draft -> submitted
 ```
 
+## P2 状态流与可见性
+
+```text
+采购申请: pending -> approved -> received
+pending/approved -> cancelled
+```
+
+```text
+盘点任务: pending -> running -> completed
+```
+
+```text
+知识条目: draft -> pending -> published
+                    pending -> rejected
+内容变更后回到 pending，版本号 +1
+```
+
+- 项目新增 `customerLogVisible` 开关，默认关闭；开启后客户可读取该项目的服务日志，且仅下发 `process`、`result`、`conclusion` 等安全字段，`userId`、`attachments` 不下发。
+- 审批删除：管理员删除已关联变更的审批时级联删除变更并返回 `cascadedChangeId`；非管理员只能作废本人未完成的审批。
+
 ## 审计要求
 
 - 工作汇报的创建、编辑、提交、确认、退回、锁定均写入 `auditLogs`。
 - 资料下载、变更审批、系统导入导出、升级等关键操作同样写审计。
+- 合同、结算、供应商、采购审批与收货、盘点登记与完成、知识库审核、审计导出均写入 `auditLogs`。

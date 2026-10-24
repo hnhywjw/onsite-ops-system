@@ -231,6 +231,20 @@ async function waitForMessageText(page, selector) {
   return page.locator(selector).textContent().then(text => String(text || '').trim());
 }
 
+// 表单提交处理会在响应返回后继续刷新基础数据并切换子页，期间的跳转会覆盖测试的导航。
+async function waitForSubmitIdle(page, formSelector) {
+  const buttonSelector = `${formSelector} button[type="submit"]`;
+  await page.waitForFunction(selector => {
+    const button = document.querySelector(selector);
+    return button && button.disabled;
+  }, buttonSelector, { timeout: 10000 }).catch(() => {});
+  await page.waitForFunction(selector => {
+    const button = document.querySelector(selector);
+    return button && !button.disabled;
+  }, buttonSelector, { timeout: 120000 });
+  await page.waitForTimeout(300);
+}
+
 async function browserRequest(page, resource, options = {}) {
   return page.evaluate(async ({ resource, options }) => {
     const sessionTokenFallback = localStorage.getItem('sessionTokenFallback') || '';
@@ -1239,6 +1253,8 @@ async function main() {
     assert(draftSaved?.fields?.event === '离线草稿回归内容', '日志离线草稿未保存');
     await page.reload({ waitUntil: 'domcontentloaded' });
     await page.waitForSelector('button[data-tab="logs"]', { state: 'visible', timeout: 30000 });
+    // 刷新会清空内存标记，重新关闭 WebSocket 自动刷新，避免后续打开的标签页被后台刷新切回仪表板。
+    await page.evaluate(() => { window.__DISABLE_WS_REFRESH = true; });
     await page.click('button[data-tab="logs"]');
     await page.waitForSelector('.subtab-panel[data-section="logs"][data-subtab="form"]:not(.hidden)', { state: 'visible', timeout: 10000 });
     await page.waitForSelector('#logForm', { state: 'visible', timeout: 10000 });
@@ -1251,6 +1267,269 @@ async function main() {
     await page.evaluate(() => {
       Object.keys(localStorage).filter(item => item.startsWith('onsiteOpsDraft:')).forEach(item => localStorage.removeItem(item));
     });
+
+    // === P2：合同结算、供应商采购、备件盘点、知识库审核、全局搜索、审计导出与服务报告 ===
+    logStep('P2 备件与合同结算链路');
+    const p2Marker = `P2E2E-${suffix}`;
+    const p2SpareName = `${p2Marker}备件`;
+    const p2VendorName = `${p2Marker}供应商`;
+    const p2ContractName = `${p2Marker}合同`;
+    const p2InventoryName = `${p2Marker}盘点`;
+    const p2KbTitle = `${p2Marker}知识`;
+    await page.evaluate(() => openTabWithSubtab('assetOps', 'spare'));
+    await page.waitForSelector('.subtab-panel[data-section="assetOps"][data-subtab="spare"]:not(.hidden)', { timeout: 5000 });
+    await page.waitForFunction(projectId => {
+      const select = document.getElementById('spareProjectId');
+      return select && Array.from(select.options).some(option => option.value === projectId);
+    }, createdProject.id, { timeout: 15000 });
+    await page.selectOption('#spareProjectId', createdProject.id);
+    await page.fill('#sparePartForm input[name="name"]', p2SpareName);
+    await page.fill('#sparePartForm input[name="model"]', 'P2-SSD-1T');
+    await page.fill('#sparePartForm input[name="quantity"]', '5');
+    await page.fill('#sparePartForm input[name="safeStock"]', '1');
+    const createSparePromise = page.waitForResponse(response => response.url().includes('/api/spare-parts') && response.request().method() === 'POST', { timeout: 30000 });
+    await page.click('#sparePartForm button[type="submit"]');
+    const createSpareResponse = await createSparePromise;
+    assert(createSpareResponse.ok(), `P2 备件创建接口失败: ${createSpareResponse.status()}`);
+    const p2Spare = await createSpareResponse.json();
+    assert(p2Spare && p2Spare.id, 'P2 备件创建返回缺少 ID');
+    await waitForSubmitIdle(page, '#sparePartForm');
+    await page.waitForFunction(() => state.currentSubtab?.section === 'assetOps' && state.currentSubtab?.subtab === 'spare', null, { timeout: 60000 });
+    await waitForTableRow(page, '#sparePartTable', p2SpareName);
+
+    await page.evaluate(() => openTabWithSubtab('contracts', 'form'));
+    await page.waitForSelector('.subtab-panel[data-section="contracts"][data-subtab="form"]:not(.hidden)', { timeout: 5000 });
+    await page.waitForFunction(projectId => {
+      const select = document.getElementById('contractProjectId');
+      return select && Array.from(select.options).some(option => option.value === projectId);
+    }, createdProject.id, { timeout: 15000 });
+    await page.selectOption('#contractProjectId', createdProject.id);
+    await page.fill('#contractForm input[name="name"]', p2ContractName);
+    await page.fill('#contractForm input[name="contractNo"]', `P2-${suffix}`);
+    await page.fill('#contractForm input[name="amount"]', '100000');
+    await page.fill('#contractForm input[name="taxRate"]', '6');
+    const createContractPromise = page.waitForResponse(response => response.url().includes('/api/contracts') && response.request().method() === 'POST', { timeout: 30000 });
+    await page.click('#contractForm button[type="submit"]');
+    const createContractResponse = await createContractPromise;
+    assert(createContractResponse.ok(), `P2 合同创建接口失败: ${createContractResponse.status()}`);
+    const p2Contract = await createContractResponse.json();
+    assert(p2Contract && p2Contract.id, 'P2 合同创建返回缺少 ID');
+    await waitForSubmitIdle(page, '#contractForm');
+    await page.waitForFunction(() => state.currentSubtab?.section === 'contracts' && state.currentSubtab?.subtab === 'list', null, { timeout: 60000 });
+    await page.waitForSelector('.subtab-panel[data-section="contracts"][data-subtab="list"]:not(.hidden)', { timeout: 30000 });
+    await waitForTableRow(page, '#contractTable', p2ContractName);
+
+    await page.evaluate(() => switchSectionSubtab('contracts', 'settlements'));
+    await page.waitForSelector('.subtab-panel[data-section="contracts"][data-subtab="settlements"]:not(.hidden)', { timeout: 5000 });
+    await page.waitForFunction(contractId => {
+      const select = document.getElementById('settlementContractId');
+      return select && Array.from(select.options).some(option => option.value === contractId);
+    }, p2Contract.id, { timeout: 15000 });
+    await page.selectOption('#settlementContractId', p2Contract.id);
+    await page.fill('#settlementForm input[name="periodKey"]', '2026-10');
+    await page.fill('#settlementForm input[name="title"]', 'P2 首期结算');
+    await page.fill('#settlementForm input[name="invoiceAmount"]', '60000');
+    await page.fill('#settlementForm input[name="receivedAmount"]', '40000');
+    await page.fill('#settlementForm input[name="costAmount"]', '15000');
+    await page.selectOption('#settlementForm select[name="status"]', 'received');
+    await page.fill('#settlementForm input[name="invoicedAt"]', '2026-10-01');
+    await page.fill('#settlementForm input[name="receivedAt"]', '2026-10-15');
+    const createSettlementPromise = page.waitForResponse(response => response.url().includes('/api/contract-settlements') && response.request().method() === 'POST', { timeout: 30000 });
+    await page.click('#settlementForm button[type="submit"]');
+    const createSettlementResponse = await createSettlementPromise;
+    assert(createSettlementResponse.ok(), `P2 结算登记接口失败: ${createSettlementResponse.status()}`);
+    await waitForSubmitIdle(page, '#settlementForm');
+    await page.waitForFunction(() => state.currentSubtab?.section === 'contracts' && state.currentSubtab?.subtab === 'settlements', null, { timeout: 60000 });
+    await waitForTableRow(page, '#settlementTable', 'P2 首期结算');
+    await page.evaluate(() => switchSectionSubtab('contracts', 'list'));
+    await page.waitForFunction(({ name }) => {
+      const rows = Array.from(document.querySelectorAll('#contractTable tr'));
+      return rows.some(row => (row.textContent || '').includes(name) && (row.textContent || '').includes('25,000.00'));
+    }, { name: p2ContractName }, { timeout: 30000 });
+    const p2SummaryGap = await page.evaluate(() => {
+      const cards = Array.from(document.querySelectorAll('#contractSummaryCards .card'));
+      return cards.length === 4 && cards.some(card => (card.textContent || '').includes('62.5%'));
+    });
+    assert(p2SummaryGap, '合同毛利汇总未按回款减成本计算');
+
+    logStep('P2 供应商采购与备件盘点链路');
+    await page.evaluate(() => openTabWithSubtab('assetOps', 'vendors'));
+    await page.waitForSelector('.subtab-panel[data-section="assetOps"][data-subtab="vendors"]:not(.hidden)', { timeout: 5000 });
+    await page.waitForFunction(projectId => {
+      const select = document.getElementById('vendorProjectId');
+      return select && Array.from(select.options).some(option => option.value === projectId);
+    }, createdProject.id, { timeout: 15000 });
+    await page.selectOption('#vendorProjectId', createdProject.id);
+    await page.fill('#vendorForm input[name="name"]', p2VendorName);
+    await page.fill('#vendorForm input[name="contactName"]', 'P2联系人');
+    await page.fill('#vendorForm input[name="contactPhone"]', '13900000000');
+    const createVendorPromise = page.waitForResponse(response => response.url().includes('/api/spare-part-vendors') && response.request().method() === 'POST', { timeout: 30000 });
+    await page.click('#vendorForm button[type="submit"]');
+    const createVendorResponse = await createVendorPromise;
+    assert(createVendorResponse.ok(), `P2 供应商创建接口失败: ${createVendorResponse.status()}`);
+    const p2Vendor = await createVendorResponse.json();
+    assert(p2Vendor && p2Vendor.id, 'P2 供应商创建返回缺少 ID');
+    await waitForSubmitIdle(page, '#vendorForm');
+    await page.waitForFunction(() => state.currentSubtab?.section === 'assetOps' && state.currentSubtab?.subtab === 'vendors', null, { timeout: 60000 });
+    await waitForTableRow(page, '#vendorTable', p2VendorName);
+
+    await page.evaluate(() => openTabWithSubtab('assetOps', 'purchases'));
+    await page.waitForSelector('.subtab-panel[data-section="assetOps"][data-subtab="purchases"]:not(.hidden)', { timeout: 5000 });
+    await page.waitForFunction(spareId => {
+      const select = document.getElementById('purchaseSparePartId');
+      return select && Array.from(select.options).some(option => option.value === spareId);
+    }, p2Spare.id, { timeout: 15000 });
+    await page.selectOption('#purchaseSparePartId', p2Spare.id);
+    await page.waitForFunction(vendorId => {
+      const select = document.getElementById('purchaseVendorId');
+      return select && Array.from(select.options).some(option => option.value === vendorId);
+    }, p2Vendor.id, { timeout: 15000 });
+    await page.selectOption('#purchaseVendorId', p2Vendor.id);
+    await page.fill('#purchaseForm input[name="quantity"]', '2');
+    await page.fill('#purchaseForm input[name="unitPrice"]', '100');
+    const createPurchasePromise = page.waitForResponse(response => response.url().includes('/api/spare-part-purchases') && response.request().method() === 'POST', { timeout: 30000 });
+    await page.click('#purchaseForm button[type="submit"]');
+    const createPurchaseResponse = await createPurchasePromise;
+    assert(createPurchaseResponse.ok(), `P2 采购申请接口失败: ${createPurchaseResponse.status()}`);
+    const p2Purchase = await createPurchaseResponse.json();
+    assert(p2Purchase && p2Purchase.id && p2Purchase.status === 'pending', 'P2 采购申请状态异常');
+    await waitForSubmitIdle(page, '#purchaseForm');
+    const purchaseRow = page.locator('#purchaseTable tr').filter({ hasText: p2Purchase.purchaseNo || '待审批' }).first();
+    await purchaseRow.getByRole('button', { name: '审批' }).click();
+    await waitForTableRow(page, '#purchaseTable', '已审批');
+    const approvedPurchaseRow = page.locator('#purchaseTable tr').filter({ hasText: p2Purchase.purchaseNo || '已审批' }).first();
+    await approvedPurchaseRow.getByRole('button', { name: '收货' }).click();
+    await waitForTableRow(page, '#purchaseTable', '已入库');
+    const p2SpareAfterReceive = await browserRequest(page, `/api/spare-parts?all=1&projectId=${encodeURIComponent(createdProject.id)}`);
+    assert((p2SpareAfterReceive.data?.data || []).some(item => item.id === p2Spare.id && item.quantity === 7),
+      `采购收货应自动入库至 7，当前 ${JSON.stringify((p2SpareAfterReceive.data?.data || []).find(item => item.id === p2Spare.id)?.quantity)}`);
+
+    await page.evaluate(() => openTabWithSubtab('assetOps', 'inventory'));
+    await page.waitForSelector('.subtab-panel[data-section="assetOps"][data-subtab="inventory"]:not(.hidden)', { timeout: 5000 });
+    await page.waitForFunction(projectId => {
+      const select = document.getElementById('inventoryProjectId');
+      return select && Array.from(select.options).some(option => option.value === projectId);
+    }, createdProject.id, { timeout: 15000 });
+    await page.selectOption('#inventoryProjectId', createdProject.id);
+    await page.fill('#inventoryTaskForm input[name="name"]', p2InventoryName);
+    const createInventoryPromise = page.waitForResponse(response => response.url().includes('/api/spare-part-inventory-tasks') && response.request().method() === 'POST', { timeout: 30000 });
+    await page.click('#inventoryTaskForm button[type="submit"]');
+    const createInventoryResponse = await createInventoryPromise;
+    assert(createInventoryResponse.ok(), `P2 盘点任务接口失败: ${createInventoryResponse.status()}`);
+    const p2Inventory = await createInventoryResponse.json();
+    assert(p2Inventory && p2Inventory.id, 'P2 盘点任务创建返回缺少 ID');
+    await waitForSubmitIdle(page, '#inventoryTaskForm');
+    await page.waitForFunction(() => state.currentSubtab?.section === 'assetOps' && state.currentSubtab?.subtab === 'inventory', null, { timeout: 60000 });
+    await page.waitForSelector('#inventoryDetailCard:not(.hidden)', { state: 'visible', timeout: 15000 });
+    await page.waitForFunction(spareId => Boolean(document.querySelector(`[data-inventory-input="${CSS.escape(spareId)}"]`)), p2Spare.id, { timeout: 15000 });
+    await page.fill(`[data-inventory-input="${p2Spare.id}"]`, '8');
+    await page.fill(`[data-inventory-note="${p2Spare.id}"]`, 'P2 实盘多出 1 件');
+    await page.locator('#inventoryItemTable tr').filter({ hasText: p2SpareName }).getByRole('button', { name: '登记' }).click();
+    await page.waitForFunction(spareId => {
+      const row = document.querySelector(`#inventoryItemTable [data-inventory-input="${CSS.escape(spareId)}"]`)?.closest('tr');
+      return row && (row.textContent || '').includes('差异');
+    }, p2Spare.id, { timeout: 30000 });
+    await page.click('#inventoryCompleteBtn');
+    await page.waitForSelector('#confirmOkBtn', { state: 'visible', timeout: 5000 });
+    await page.click('#confirmOkBtn');
+    await page.waitForFunction(name => {
+      const rows = Array.from(document.querySelectorAll('#inventoryTaskTable tr'));
+      return rows.some(row => (row.textContent || '').includes(name) && (row.textContent || '').includes('已完成'));
+    }, p2InventoryName, { timeout: 30000 });
+    const p2SpareAfterInventory = await browserRequest(page, `/api/spare-parts?all=1&projectId=${encodeURIComponent(createdProject.id)}`);
+    assert((p2SpareAfterInventory.data?.data || []).some(item => item.id === p2Spare.id && item.quantity === 8), '盘点完成后应按实盘数量回写库存');
+
+    logStep('P2 知识库版本与审核链路');
+    await page.evaluate(() => openTabWithSubtab('kb', 'form'));
+    await page.waitForSelector('.subtab-panel[data-section="kb"][data-subtab="form"]:not(.hidden)', { timeout: 5000 });
+    await page.waitForFunction(projectId => {
+      const select = document.getElementById('kbProjectId');
+      return select && Array.from(select.options).some(option => option.value === projectId);
+    }, createdProject.id, { timeout: 15000 });
+    await page.selectOption('#kbProjectId', createdProject.id);
+    await page.fill('#kbForm input[name="title"]', p2KbTitle);
+    await page.fill('#kbForm input[name="keywords"]', p2Marker);
+    await page.fill('#kbForm textarea[name="problem"]', 'P2 初始问题');
+    await page.fill('#kbForm textarea[name="solution"]', 'P2 初始方案');
+    const createKbPromise = page.waitForResponse(response => response.url().includes('/api/kb') && response.request().method() === 'POST', { timeout: 30000 });
+    await page.click('#kbForm button[type="submit"]');
+    const createKbResponse = await createKbPromise;
+    assert(createKbResponse.ok(), `P2 知识条目创建接口失败: ${createKbResponse.status()}`);
+    const p2Kb = await createKbResponse.json();
+    assert(p2Kb && p2Kb.id, 'P2 知识条目创建返回缺少 ID');
+    await page.waitForSelector('.subtab-panel[data-section="kb"][data-subtab="list"]:not(.hidden)', { timeout: 15000 });
+    await page.fill('#kbKeyword', p2Marker);
+    await page.click('#kbSearchBtn');
+    await waitForTableRow(page, '#kbTable', p2KbTitle);
+    await page.locator('#kbTable tr').filter({ hasText: p2KbTitle }).first().getByRole('button', { name: '修改' }).click();
+    await page.waitForSelector('#kbEditModal:not(.hidden)', { state: 'visible', timeout: 5000 });
+    await page.fill('#edKbSolution', 'P2 更新后的方案');
+    await page.click('#kbEditSaveBtn');
+    await page.waitForSelector('#kbEditModal.hidden', { state: 'attached', timeout: 15000 });
+    await page.fill('#kbKeyword', p2Marker);
+    await page.click('#kbSearchBtn');
+    await page.waitForFunction(title => {
+      const row = Array.from(document.querySelectorAll('#kbTable tr')).find(item => (item.textContent || '').includes(title));
+      return row && (row.textContent || '').includes('v2') && (row.textContent || '').includes('待审核');
+    }, p2KbTitle, { timeout: 15000 });
+    await page.locator('#kbTable tr').filter({ hasText: p2KbTitle }).first().getByRole('button', { name: '版本' }).click();
+    await page.waitForSelector('#kbRevisionModal:not(.hidden)', { state: 'visible', timeout: 5000 });
+    await page.waitForFunction(() => (document.getElementById('kbRevisionBody')?.textContent || '').includes('v2'), null, { timeout: 15000 });
+    await page.click('#kbRevisionModal button[data-action="close-modal"]');
+    await page.locator('#kbTable tr').filter({ hasText: p2KbTitle }).first().getByRole('button', { name: '审核' }).click();
+    await page.waitForSelector('#kbReviewModal:not(.hidden)', { state: 'visible', timeout: 5000 });
+    await page.fill('#kbReviewNote', 'P2 审核通过');
+    await page.click('#kbReviewPublishBtn');
+    await page.waitForSelector('#kbReviewModal.hidden', { state: 'attached', timeout: 15000 });
+    await page.fill('#kbKeyword', p2Marker);
+    await page.click('#kbSearchBtn');
+    await page.waitForFunction(title => {
+      const row = Array.from(document.querySelectorAll('#kbTable tr')).find(item => (item.textContent || '').includes(title));
+      return row && (row.textContent || '').includes('已发布');
+    }, p2KbTitle, { timeout: 15000 });
+
+    logStep('P2 全局搜索、服务报告与审计导出');
+    await page.keyboard.press('Control+K');
+    await page.fill('#globalSearchInput', p2Marker);
+    await page.waitForSelector('#globalSearchResults:not(.hidden)', { state: 'visible', timeout: 15000 });
+    await page.waitForFunction(marker => {
+      const panel = document.getElementById('globalSearchResults');
+      return panel && (panel.textContent || '').includes(marker);
+    }, p2Marker, { timeout: 30000 });
+    await page.keyboard.press('Escape');
+
+    await page.evaluate(() => openTabWithSubtab('reports', 'export'));
+    await page.waitForSelector('.subtab-panel[data-section="reports"][data-subtab="export"]:not(.hidden)', { timeout: 5000 });
+    await page.waitForFunction(projectId => {
+      const select = document.getElementById('serviceReportProject');
+      return select && Array.from(select.options).some(option => option.value === projectId);
+    }, createdProject.id, { timeout: 15000 });
+    await page.selectOption('#serviceReportProject', createdProject.id);
+    const serviceReportUrl = await page.evaluate(() => {
+      let captured = '';
+      const originalOpen = window.open;
+      window.open = url => {
+        captured = String(url || '');
+        return null;
+      };
+      try {
+        document.getElementById('serviceReportOpenBtn').click();
+      } finally {
+        window.open = originalOpen;
+      }
+      return captured;
+    });
+    assert(serviceReportUrl.includes(`/api/reports/service/${createdProject.id}`), `服务报告未使用当前项目: ${serviceReportUrl}`);
+    const serviceReport = await browserRequest(page, serviceReportUrl);
+    assert(serviceReport.status === 200 && String(serviceReport.data).includes('服务报告'), '服务报告页面加载失败');
+
+    await page.evaluate(() => openTabWithSubtab('system', 'auditLog'));
+    await page.waitForSelector('.subtab-panel[data-section="system"][data-subtab="auditLog"]:not(.hidden)', { timeout: 5000 });
+    const auditExportPath = path.join(downloadDir, `audit-logs-${suffix}.json`);
+    const auditExportText = await captureExportDownload(page, '#auditLogExportJson', '/api/audit-logs/export', auditExportPath);
+    const auditExport = JSON.parse(auditExportText);
+    assert(Array.isArray(auditExport.data) && auditExport.total === auditExport.data.length, '审计日志 JSON 导出结构异常');
+    assert(auditExport.data.some(item => String(item.detail || '').includes(p2ContractName)), '审计日志导出未包含 P2 合同操作');
 
     await cleanupData(page, { targetName, taskTitle, projectName, customerUsername, changeTitle, docTitles: [docTitle1, docTitle2], workReportDates: [reportDate, weeklyReportRangeStart] });
     process.stdout.write('E2E passed\n');

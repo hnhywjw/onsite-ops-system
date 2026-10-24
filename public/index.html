@@ -1127,6 +1127,33 @@
     .topo-align-btn:hover { background:#f3f4f6; }
     .topo-node-icon { width:32px;height:32px;margin:0 auto 4px;display:block;flex-shrink:0; }
     .topo-cmenu-item:hover { background:#f0f5ff; }
+    /* 全局搜索：顶部固定入口 + 结果浮层，避免遮挡侧栏导航。 */
+    .global-search { position: relative; display: flex; align-items: center; gap: 8px; width: 100%; }
+    .global-search input { padding-right: 34px; }
+    .global-search .search-hint { position: absolute; right: 10px; font-size: 11px; color: var(--sub); pointer-events: none; }
+    .search-results { position: absolute; top: calc(100% + 8px); left: 0; right: 0; background: #fff; border: 1px solid var(--line); border-radius: 12px; box-shadow: 0 18px 40px rgba(15,23,42,.16); max-height: 60vh; overflow-y: auto; z-index: 60; padding: 8px; }
+    .search-group-title { font-size: 12px; font-weight: 700; color: var(--sub); padding: 8px 10px 4px; letter-spacing: .04em; }
+    .search-result-item { display: block; width: 100%; text-align: left; border: 0; background: transparent; padding: 9px 10px; border-radius: 8px; cursor: pointer; font: inherit; color: inherit; }
+    .search-result-item:hover, .search-result-item:focus-visible { background: var(--primary-weak); }
+    .search-result-item strong { display: block; font-size: 13px; font-weight: 600; }
+    .search-result-item span { display: block; font-size: 12px; color: var(--sub); margin-top: 2px; }
+    .status-pill { display: inline-block; padding: 2px 8px; border-radius: 999px; font-size: 12px; font-weight: 600; }
+    .status-pill.draft { background: #f1f5f9; color: #475569; }
+    .status-pill.pending { background: #fef3c7; color: #b45309; }
+    .status-pill.published { background: #dcfce7; color: #15803d; }
+    .status-pill.rejected { background: #fee2e2; color: #b91c1c; }
+    .money-positive { color: #15803d; font-weight: 600; }
+    .money-negative { color: #dc2626; font-weight: 600; }
+    .print-only { display: none; }
+    @media print {
+      .sidebar, .nav, .toolbar, .pagination-bar, .section-tabs, .global-search, #globalErrorToast { display: none !important; }
+      .layout { display: block; }
+      .content { padding: 0; height: auto; overflow: visible; }
+      .tab-panel { display: block !important; }
+      .tab-panel:not(.print-target) { display: none !important; }
+      .card { box-shadow: none; border-color: #cbd5e1; break-inside: avoid; }
+      .print-only { display: block; }
+    }
   </style>
   <script src="/vendor/xlsx.full.min.js"></script>
   <script src="/vendor/qrcode.min.js"></script>
@@ -1462,6 +1489,10 @@
           </select>
         </label>
         <label>付款方式<input id="edPaymentMethod" /></label>
+        <label style="display:flex;align-items:center;gap:8px;">
+          <input id="edCustomerLogVisible" type="checkbox" style="width:auto;margin:0;" />
+          <span style="margin:0;">向客户展示服务日志</span>
+        </label>
         <label class="full">备注<textarea id="edDescription"></textarea></label>
       </div>
       <div id="projectEditMessage" style="margin:8px 0;font-size:13px;"></div>
@@ -1721,6 +1752,31 @@
       <div class="btn-row">
         <button class="secondary" type="button" data-action="close-modal" data-modal="kbEditModal">取消</button>
         <button class="primary" id="kbEditSaveBtn" type="button">保存修改</button>
+      </div>
+    </div>
+  </div>
+
+  <div id="kbRevisionModal" class="modal-overlay hidden">
+    <div class="modal-box" style="max-width:640px;">
+      <h3>版本历史</h3>
+      <div id="kbRevisionBody" style="max-height:60vh;overflow-y:auto;"></div>
+      <div id="kbRevisionMessage" style="margin:8px 0;font-size:13px;"></div>
+      <div class="btn-row">
+        <button class="secondary" type="button" data-action="close-modal" data-modal="kbRevisionModal">关闭</button>
+      </div>
+    </div>
+  </div>
+
+  <div id="kbReviewModal" class="modal-overlay hidden">
+    <div class="modal-box" style="max-width:460px;">
+      <h3>审核知识条目</h3>
+      <div class="muted" id="kbReviewTitle" style="margin-bottom:12px;"></div>
+      <label style="display:grid;gap:6px;">审核意见<textarea id="kbReviewNote" rows="4" maxlength="500" placeholder="发布可留空，驳回建议填写原因"></textarea></label>
+      <div id="kbReviewMessage" style="margin:8px 0;font-size:13px;"></div>
+      <div class="btn-row">
+        <button class="secondary" data-action="close-modal" data-modal="kbReviewModal">取消</button>
+        <button class="secondary" id="kbReviewRejectBtn" type="button" style="background:#fee2e2;color:#dc2626;border-color:#fecaca;">驳回</button>
+        <button class="primary" id="kbReviewPublishBtn" type="button">发布</button>
       </div>
     </div>
   </div>
@@ -2223,10 +2279,16 @@
         <div id="currentUserName"></div>
         <div id="currentUserMeta" class="subbrand" style="margin: 6px 0 0;"></div>
       </div>
+      <div class="global-search" id="globalSearch">
+        <input id="globalSearchInput" type="search" placeholder="搜索资产、日志、工单、合同..." autocomplete="off" aria-label="全局搜索" />
+        <span class="search-hint">Ctrl K</span>
+        <div id="globalSearchResults" class="search-results hidden"></div>
+      </div>
       <nav class="nav" id="navTabs">
         <hr class="nav-sep" style="margin-bottom:14px;">
         <button data-tab="dashboard" class="active"><span class="nav-icon"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M3 13h8V3H3z"></path><path d="M13 21h8v-6h-8z"></path><path d="M13 3h8v8h-8z"></path><path d="M3 21h8v-4H3z"></path></svg></span><span class="nav-label">首页仪表板</span></button>
         <button data-tab="projects" data-admin-only="true"><span class="nav-icon"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M3 7h18"></path><path d="M6 4h12l2 3v13H4V7z"></path></svg></span><span class="nav-label">项目管理</span></button>
+        <button data-tab="contracts" data-customer-hidden="true"><span class="nav-icon"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M6 2h9l5 5v15H6z"></path><path d="M15 2v5h5"></path><path d="M9 12h6"></path><path d="M9 16h6"></path><path d="M9 8h2"></path></svg></span><span class="nav-label">合同与费用</span></button>
         <button data-tab="users" data-admin-only="true"><span class="nav-icon"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M16 21v-2a4 4 0 0 0-4-4H7a4 4 0 0 0-4 4v2"></path><circle cx="9.5" cy="7" r="3"></circle><path d="M20 21v-2a4 4 0 0 0-3-3.87"></path><path d="M16 4.13a3 3 0 0 1 0 5.74"></path></svg></span><span class="nav-label">人员管理</span></button>
         <button data-tab="assets"><span class="nav-icon"><svg viewBox="0 0 24 24" aria-hidden="true"><rect x="3" y="4" width="18" height="14" rx="2"></rect><path d="M8 20h8"></path><path d="M12 18v2"></path></svg></span><span class="nav-label">资产管理</span></button>
         <button data-tab="logs" data-customer-hidden="true"><span class="nav-icon"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M8 6h13"></path><path d="M8 12h13"></path><path d="M8 18h13"></path><path d="M3 6h.01"></path><path d="M3 12h.01"></path><path d="M3 18h.01"></path></svg></span><span class="nav-label">运维日志</span></button>
@@ -2371,6 +2433,10 @@
                 付款方式
                 <input name="paymentMethod" />
               </label>
+              <label style="display:flex;align-items:center;gap:8px;">
+                <input name="customerLogVisible" type="checkbox" style="width:auto;margin:0;" />
+                <span style="margin:0;">向客户展示服务日志</span>
+              </label>
               <label class="full">
                 备注
                 <textarea name="description"></textarea>
@@ -2397,6 +2463,118 @@
                 <button class="secondary" id="projectNextBtn" type="button">下一页</button>
               </div>
             </div>
+          </div>
+        </div>
+      </section>
+
+      <section class="tab-panel hidden" data-tab="contracts">
+        <div class="page-header">
+          <div>
+            <div class="title">合同与费用</div>
+            <div class="subtitle">维护合同、登记结算并跟踪开票回款与毛利</div>
+          </div>
+        </div>
+        <div class="section-tabs" data-section="contracts">
+          <button class="active" data-subtab="list" type="button">合同列表</button>
+          <button data-subtab="form" type="button">新增合同</button>
+          <button data-subtab="settlements" type="button">结算与回款</button>
+        </div>
+        <div class="subtab-panel" data-section="contracts" data-subtab="list">
+          <div class="grid cols-4" id="contractSummaryCards" style="margin-bottom:16px;"></div>
+          <div class="card">
+            <div class="toolbar report-actions" style="margin-bottom:12px;">
+              <h3 style="margin:0;margin-right:auto;">合同列表</h3>
+              <select id="contractFilterProject"><option value="">全部项目</option></select>
+              <select id="contractFilterStatus">
+                <option value="">全部状态</option>
+                <option value="draft">草稿</option>
+                <option value="active">执行中</option>
+                <option value="completed">已完成</option>
+                <option value="terminated">已终止</option>
+              </select>
+              <button class="secondary" id="contractRefreshBtn" type="button">刷新</button>
+            </div>
+            <div class="table-wrap">
+              <table>
+                <thead><tr><th>合同名称</th><th>编号</th><th>项目</th><th>金额</th><th>已开票</th><th>已回款</th><th>成本</th><th>毛利</th><th>毛利率</th><th>状态</th><th>操作</th></tr></thead>
+                <tbody id="contractTable"></tbody>
+              </table>
+            </div>
+            <div id="contractMessage" class="message"></div>
+          </div>
+        </div>
+        <div class="subtab-panel hidden" data-section="contracts" data-subtab="form">
+          <div class="card">
+            <h3 id="contractFormTitle" style="margin-top:0;">新增合同</h3>
+            <form id="contractForm" class="grid-form">
+              <input name="id" type="hidden" />
+              <label><span>合同名称</span><input name="name" required maxlength="128" /></label>
+              <label><span>合同编号</span><input name="contractNo" maxlength="64" /></label>
+              <label><span>关联项目</span><select name="projectId" id="contractProjectId" required></select></label>
+              <label><span>合同金额（元）</span><input name="amount" type="number" min="0" step="0.01" value="0" /></label>
+              <label><span>税率（% 或小数）</span><input name="taxRate" type="number" min="0" step="0.01" value="0" /></label>
+              <label><span>结算周期</span><select name="settlementCycle">
+                <option value="monthly">按月</option>
+                <option value="quarterly">按季</option>
+                <option value="milestone">按里程碑</option>
+                <option value="once">一次性</option>
+              </select></label>
+              <label><span>签订日期</span><input name="signDate" type="date" /></label>
+              <label><span>开始日期</span><input name="startDate" type="date" /></label>
+              <label><span>结束日期</span><input name="endDate" type="date" /></label>
+              <label><span>状态</span><select name="status">
+                <option value="active">执行中</option>
+                <option value="draft">草稿</option>
+                <option value="completed">已完成</option>
+                <option value="terminated">已终止</option>
+              </select></label>
+              <label><span>甲方</span><input name="partyA" maxlength="128" /></label>
+              <label><span>乙方</span><input name="partyB" maxlength="128" /></label>
+              <label class="full"><span>备注</span><textarea name="notes" maxlength="500"></textarea></label>
+              <div class="toolbar full" style="justify-content:flex-end;">
+                <button class="primary" id="contractSubmitBtn" type="submit">保存合同</button>
+                <button class="secondary" id="contractCancelBtn" type="button">取消编辑</button>
+              </div>
+            </form>
+            <div id="contractFormMessage" class="message"></div>
+          </div>
+        </div>
+        <div class="subtab-panel hidden" data-section="contracts" data-subtab="settlements">
+          <div class="card">
+            <h3 id="settlementFormTitle" style="margin-top:0;">登记结算</h3>
+            <form id="settlementForm" class="grid-form">
+              <input name="id" type="hidden" />
+              <label><span>关联合同</span><select name="contractId" id="settlementContractId" required></select></label>
+              <label><span>结算周期</span><input name="periodKey" placeholder="如 2026-10" maxlength="32" /></label>
+              <label><span>结算标题</span><input name="title" maxlength="128" /></label>
+              <label><span>开票金额（元）</span><input name="invoiceAmount" type="number" min="0" step="0.01" value="0" /></label>
+              <label><span>回款金额（元）</span><input name="receivedAmount" type="number" min="0" step="0.01" value="0" /></label>
+              <label><span>成本金额（元）</span><input name="costAmount" type="number" min="0" step="0.01" value="0" /></label>
+              <label><span>发票号</span><input name="invoiceNo" maxlength="64" /></label>
+              <label><span>开票日期</span><input name="invoicedAt" type="date" /></label>
+              <label><span>回款日期</span><input name="receivedAt" type="date" /></label>
+              <label><span>状态</span><select name="status">
+                <option value="pending">待开票</option>
+                <option value="invoiced">已开票</option>
+                <option value="received">已回款</option>
+              </select></label>
+              <label class="full"><span>备注</span><textarea name="notes" maxlength="500"></textarea></label>
+              <div class="toolbar full" style="justify-content:flex-end;">
+                <button class="primary" id="settlementSubmitBtn" type="submit">保存结算</button>
+                <button class="secondary" id="settlementCancelBtn" type="button">取消编辑</button>
+              </div>
+            </form>
+            <div id="settlementFormMessage" class="message"></div>
+          </div>
+          <div class="card" style="margin-top:16px;">
+            <h3 style="margin-top:0;">结算记录</h3>
+            <div class="table-wrap">
+              <table>
+                <thead><tr><th>合同</th><th>周期</th><th>标题</th><th>开票</th><th>回款</th><th>成本</th><th>状态</th><th>开票日期</th><th>回款日期</th><th>操作</th></tr></thead>
+                <tbody id="settlementTable"></tbody>
+              </table>
+            </div>
+            <div id="settlementMessage" class="message"></div>
           </div>
         </div>
       </section>
@@ -2589,6 +2767,11 @@
               <label class="full"><span>关键字</span><input name="keywords" placeholder="如：升级,病毒库,防火墙" required /></label>
               <label class="full"><span>问题描述</span><textarea name="problem" required></textarea></label>
               <label class="full"><span>解决方案</span><textarea name="solution" required style="min-height:200px;"></textarea></label>
+              <label id="kbStatusField" class="hidden"><span>状态</span><select name="status">
+                <option value="draft">草稿</option>
+                <option value="pending">待审核</option>
+                <option value="published">已发布</option>
+              </select></label>
               <button class="primary full" id="kbSubmitBtn" type="submit">保存知识</button>
             </form>
             <div id="kbMessage"></div>
@@ -2606,7 +2789,7 @@
             </div>
             <div class="table-wrap">
               <table style="table-layout:fixed;">
-                <thead><tr><th style="width:30px;"><input type="checkbox" id="kbSelectAll" title="全选" /></th><th style="width:200px;">标题</th><th style="width:150px;">关键字</th><th style="width:400px;">问题</th><th style="width:520px;">方案</th><th style="white-space:nowrap;">操作</th></tr></thead>
+                <thead><tr><th style="width:30px;"><input type="checkbox" id="kbSelectAll" title="全选" /></th><th style="width:200px;">标题</th><th style="width:90px;">状态</th><th style="width:60px;">版本</th><th style="width:150px;">关键字</th><th style="width:400px;">问题</th><th style="width:520px;">方案</th><th style="white-space:nowrap;">操作</th></tr></thead>
                 <tbody id="kbTable"></tbody>
               </table>
               <div class="pagination-bar">
@@ -3030,6 +3213,9 @@
           <button data-subtab="change" type="button">变更管理</button>
           <button data-subtab="incident" type="button">故障追踪</button>
           <button data-subtab="spare" type="button">备件管理</button>
+          <button data-subtab="vendors" type="button" data-customer-hidden="true">供应商</button>
+          <button data-subtab="purchases" type="button" data-customer-hidden="true">采购申请</button>
+          <button data-subtab="inventory" type="button" data-customer-hidden="true">备件盘点</button>
         </div>
         <div class="subtab-panel" data-section="assetOps" data-subtab="inspection">
             <div class="card">
@@ -3204,6 +3390,93 @@
                 <button class="secondary" id="incidentNextBtn" type="button">下一页</button>
               </div>
             </div>
+        </div>
+        <div class="subtab-panel hidden" data-section="assetOps" data-subtab="vendors">
+          <div class="card">
+            <h3 id="vendorFormTitle" style="margin-top:0;">新增供应商</h3>
+            <form id="vendorForm" class="grid-form">
+              <input name="id" type="hidden" />
+              <label><span>供应商名称</span><input name="name" required maxlength="128" /></label>
+              <label><span>关联项目</span><select name="projectId" id="vendorProjectId" required></select></label>
+              <label><span>联系人</span><input name="contactName" maxlength="64" /></label>
+              <label><span>联系电话</span><input name="contactPhone" maxlength="32" /></label>
+              <label><span>邮箱</span><input name="email" type="email" maxlength="128" /></label>
+              <label><span>状态</span><select name="status"><option value="active">启用</option><option value="inactive">停用</option></select></label>
+              <label class="full"><span>地址</span><input name="address" maxlength="256" /></label>
+              <label class="full"><span>备注</span><textarea name="notes" maxlength="500"></textarea></label>
+              <div class="toolbar full" style="justify-content:flex-end;">
+                <button class="primary" id="vendorSubmitBtn" type="submit">保存供应商</button>
+                <button class="secondary" id="vendorCancelBtn" type="button">取消编辑</button>
+              </div>
+            </form>
+            <div id="vendorFormMessage" class="message"></div>
+          </div>
+          <div class="card" style="margin-top:16px;">
+            <h3 style="margin-top:0;">供应商列表</h3>
+            <div class="table-wrap">
+              <table><thead><tr><th>名称</th><th>项目</th><th>联系人</th><th>电话</th><th>邮箱</th><th>状态</th><th>操作</th></tr></thead><tbody id="vendorTable"></tbody></table>
+            </div>
+            <div id="vendorMessage" class="message"></div>
+          </div>
+        </div>
+        <div class="subtab-panel hidden" data-section="assetOps" data-subtab="purchases">
+          <div class="card">
+            <h3 id="purchaseFormTitle" style="margin-top:0;">发起采购申请</h3>
+            <form id="purchaseForm" class="grid-form">
+              <input name="id" type="hidden" />
+              <label><span>关联备件</span><select name="sparePartId" id="purchaseSparePartId" required></select></label>
+              <label><span>供应商</span><select name="vendorId" id="purchaseVendorId"><option value="">未指定</option></select></label>
+              <label><span>采购数量</span><input name="quantity" type="number" min="1" step="1" required /></label>
+              <label><span>采购单价（元）</span><input name="unitPrice" type="number" min="0" step="0.01" value="0" /></label>
+              <label><span>期望到货日期</span><input name="expectedAt" type="date" /></label>
+              <label class="full"><span>备注</span><textarea name="notes" maxlength="500"></textarea></label>
+              <div class="toolbar full" style="justify-content:flex-end;">
+                <button class="primary" id="purchaseSubmitBtn" type="submit">提交申请</button>
+              </div>
+            </form>
+            <div id="purchaseFormMessage" class="message"></div>
+          </div>
+          <div class="card" style="margin-top:16px;">
+            <h3 style="margin-top:0;">采购申请列表</h3>
+            <div class="table-wrap">
+              <table><thead><tr><th>采购单号</th><th>备件</th><th>供应商</th><th>数量</th><th>单价</th><th>金额</th><th>申请人</th><th>状态</th><th>操作</th></tr></thead><tbody id="purchaseTable"></tbody></table>
+            </div>
+            <div id="purchaseMessage" class="message"></div>
+          </div>
+        </div>
+        <div class="subtab-panel hidden" data-section="assetOps" data-subtab="inventory">
+          <div class="card">
+            <h3 style="margin-top:0;">创建盘点任务</h3>
+            <form id="inventoryTaskForm" class="grid-form">
+              <label><span>关联项目</span><select name="projectId" id="inventoryProjectId" required></select></label>
+              <label><span>任务名称</span><input name="name" required maxlength="128" /></label>
+              <div class="toolbar full" style="justify-content:flex-end;">
+                <button class="primary" type="submit">创建盘点任务</button>
+              </div>
+            </form>
+            <div class="muted" style="font-size:12px;margin-top:6px;">创建后按项目内备件生成账面快照；逐项登记实盘数量后才能完成盘点并回写库存。</div>
+            <div id="inventoryTaskFormMessage" class="message"></div>
+          </div>
+          <div class="card" style="margin-top:16px;">
+            <h3 style="margin-top:0;">盘点任务</h3>
+            <div class="table-wrap">
+              <table><thead><tr><th>任务名称</th><th>项目</th><th>状态</th><th>进度</th><th>创建人</th><th>创建时间</th><th>操作</th></tr></thead><tbody id="inventoryTaskTable"></tbody></table>
+            </div>
+            <div id="inventoryMessage" class="message"></div>
+          </div>
+          <div class="card hidden" id="inventoryDetailCard" style="margin-top:16px;">
+            <div class="toolbar" style="justify-content:space-between;margin-bottom:12px;">
+              <h3 id="inventoryDetailTitle" style="margin:0;">盘点明细</h3>
+              <button class="secondary" id="inventoryDetailCloseBtn" type="button">关闭</button>
+            </div>
+            <div class="table-wrap">
+              <table><thead><tr><th>备件</th><th>账面数量</th><th>实盘数量</th><th>差异</th><th>结果</th><th>备注</th><th>操作</th></tr></thead><tbody id="inventoryItemTable"></tbody></table>
+            </div>
+            <div class="toolbar" style="margin-top:12px;">
+              <button class="primary" id="inventoryCompleteBtn" type="button">完成盘点并回写库存</button>
+            </div>
+            <div id="inventoryDetailMessage" class="message"></div>
+          </div>
         </div>
       </section>
 
@@ -3640,6 +3913,19 @@
         </div>
         </div>
         <div class="subtab-panel hidden" data-section="reports" data-subtab="export">
+        <div class="card" style="margin-bottom:16px;">
+          <h3 style="margin-top:0;">服务报告（打印 / PDF）</h3>
+          <div class="toolbar report-actions">
+            <select id="serviceReportProject"></select>
+            <select id="serviceReportPeriod">
+              <option value="month" selected>本月</option>
+              <option value="week">本周</option>
+              <option value="year">本年</option>
+            </select>
+            <button class="primary" id="serviceReportOpenBtn" type="button">生成服务报告</button>
+          </div>
+          <div class="muted" style="font-size:12px;">报告页内置打印样式，可直接使用浏览器「打印 / 另存为 PDF」。</div>
+        </div>
         <div class="card">
           <h3 style="margin-top:0;">现有报表导出</h3>
           <div class="toolbar report-actions" style="margin-bottom: 16px;">
@@ -4061,6 +4347,7 @@
               <option value="system">系统</option>
             </select>
             <button class="secondary" id="auditLogExportCsv" type="button">导出CSV</button>
+            <button class="secondary" id="auditLogExportJson" type="button">导出JSON</button>
             <button class="secondary" id="auditArchiveToggle" type="button">归档查询</button>
           </div>
           <div class="table-wrap"><table><thead><tr><th>时间</th><th>操作人</th><th>动作</th><th>对象</th><th>详情</th></tr></thead><tbody id="systemAuditLogTable"></tbody></table></div>
@@ -4167,6 +4454,8 @@
       ldapCaptchaToken: '',
       regCaptchaToken: '',
       projects: [],
+      contracts: [],
+      contractSettlements: [],
       users: [],
       assets: [],
       logs: [],
@@ -4182,6 +4471,9 @@
       inspectionPlans: [],
       inspectionExecutions: [],
       spareParts: [],
+      sparePartVendors: [],
+      sparePartPurchases: [],
+      sparePartInventoryTasks: [],
         changeRecords: [],
         incidents: [],
         tickets: [],
@@ -4292,6 +4584,15 @@
       expandedUserId: '',
       expandedKbId: '',
       kbDetails: {},
+      kbRevisions: {},
+      pendingKbReviewId: '',
+      contractPage: 1,
+      contractFilterProjectId: '',
+      contractFilterStatus: '',
+      selectedInventoryTaskId: '',
+      searchTimer: null,
+      searchResults: null,
+      searchSeq: 0,
       selectedWorkReportId: ''
     };
 
@@ -7012,6 +7313,13 @@
       document.getElementById('aiInspectionTemplateForm')?.closest('.card')?.classList.toggle('hidden', !canEditData());
       document.getElementById('aiInspectionTaskForm')?.closest('.card')?.classList.toggle('hidden', !canEditData());
       document.getElementById('documentForm')?.closest('.card')?.classList.toggle('hidden', !canEditData());
+      document.getElementById('contractForm')?.closest('.card')?.classList.toggle('hidden', !canEditData());
+      document.querySelector('.section-tabs[data-section="contracts"] button[data-subtab="form"]')?.classList.toggle('hidden', !canEditData());
+      document.getElementById('settlementForm')?.closest('.card')?.classList.toggle('hidden', !canEditData());
+      document.getElementById('vendorForm')?.closest('.card')?.classList.toggle('hidden', !canEditData());
+      document.getElementById('purchaseForm')?.closest('.card')?.classList.toggle('hidden', !canEditData());
+      document.getElementById('inventoryTaskForm')?.closest('.card')?.classList.toggle('hidden', !canEditData());
+      document.getElementById('kbStatusField')?.classList.toggle('hidden', state.user.role !== 'admin');
       document.querySelector('.section-tabs[data-section="documents"] button[data-subtab="form"]')?.classList.toggle('hidden', !canEditData());
       document.querySelector('.section-tabs[data-section="assets"] button[data-subtab="form"]')?.classList.toggle('hidden', !canEditData());
       document.getElementById('assetBatchDeleteBtn')?.classList.toggle('hidden', !canEditData());
@@ -7049,6 +7357,8 @@
       }
       if (tab === 'reports') {
         refreshReports();
+      } else if (tab === 'contracts') {
+        renderContracts();
       } else if (tab === 'system') {
         refreshSystemManagement();
       }
@@ -7079,6 +7389,18 @@
       if (section === 'system' && subtab === 'auditLog') {
         renderSystemAuditLogs();
       }
+      if (section === 'assetOps' && subtab === 'vendors') {
+        renderVendors();
+      }
+      if (section === 'assetOps' && subtab === 'purchases') {
+        renderPurchases();
+      }
+      if (section === 'assetOps' && subtab === 'inventory') {
+        renderInventoryTasks();
+      }
+      if (section === 'contracts' && subtab === 'settlements') {
+        renderSettlements();
+      }
     }
 
     function openTabWithSubtab(tab, subtab = 'list') {
@@ -7087,6 +7409,108 @@
         const button = document.querySelector(`.section-tabs[data-section="${tab}"] button[data-subtab="${subtab}"]`);
         if (!button || button.classList.contains('hidden')) return;
         switchSectionSubtab(tab, subtab);
+      }
+    }
+
+    const SEARCH_TYPE_TABS = {
+      assets: { tab: 'assets', subtab: 'list' },
+      logs: { tab: 'logs', subtab: 'list' },
+      tickets: { tab: 'tickets', subtab: 'list' },
+      knowledge: { tab: 'kb', subtab: 'list' },
+      documents: { tab: 'documents', subtab: 'list' },
+      contracts: { tab: 'contracts', subtab: 'list' },
+      spareParts: { tab: 'assetOps', subtab: 'spare' },
+      projects: { tab: 'projects', subtab: 'list' }
+    };
+
+    function closeGlobalSearch() {
+      const panel = document.getElementById('globalSearchResults');
+      if (panel) {
+        panel.classList.add('hidden');
+        panel.innerHTML = '';
+      }
+      state.searchResults = null;
+    }
+
+    function renderGlobalSearchResults(result) {
+      const panel = document.getElementById('globalSearchResults');
+      if (!panel) return;
+      const keyword = document.getElementById('globalSearchInput').value.trim();
+      if (!keyword || keyword.length < 2) {
+        panel.innerHTML = '<div class="search-group-title">请输入至少 2 个字符</div>';
+        panel.classList.remove('hidden');
+        return;
+      }
+      const hits = Array.isArray(result?.data) ? result.data : [];
+      const counts = result?.counts || {};
+      if (!hits.length) {
+        panel.innerHTML = '<div class="search-group-title">未找到匹配结果</div>';
+        panel.classList.remove('hidden');
+        return;
+      }
+      const labels = {};
+      (result.availableTypes || []).forEach(item => { labels[item.key] = item.label; });
+      const grouped = {};
+      hits.forEach(hit => {
+        if (!grouped[hit.type]) grouped[hit.type] = [];
+        grouped[hit.type].push(hit);
+      });
+      panel.innerHTML = Object.entries(grouped).map(([type, list]) => `
+        <div class="search-group-title">${esc(labels[type] || type)} (${esc(counts[type] ?? list.length)})</div>
+        ${list.map(hit => `<button class="search-result-item" type="button" data-search-type="${attrEsc(type)}" data-search-id="${attrEsc(hit.id)}" data-search-project="${attrEsc(hit.projectId || '')}">
+          <strong>${esc(hit.title || '-')}</strong>
+          <span>${esc([hit.subtitle, hit.projectName].filter(Boolean).join(' · '))}</span>
+        </button>`).join('')}
+      `).join('');
+      panel.classList.remove('hidden');
+    }
+
+    function openSearchResult(type, id, projectId) {
+      closeGlobalSearch();
+      const route = SEARCH_TYPE_TABS[type];
+      if (!route) return;
+      if (type === 'logs') {
+        state.logFilterProjectId = projectId || '';
+        fillLogFilterProjectOptions();
+        fillLogFilterUserOptions();
+        renderLogs();
+      }
+      if (type === 'knowledge' && projectId) {
+        state.kbFilterProjectId = projectId;
+        fillKbFilterProjectOptions();
+        fillKbFilterUserOptions();
+        renderKb();
+      }
+      if (type === 'assets' && projectId) {
+        state.assetFilterProjectId = projectId;
+        state.assetPage = 1;
+        renderAssets();
+      }
+      switchTab(route.tab);
+      if (route.subtab) switchSectionSubtab(route.tab, route.subtab);
+    }
+
+    async function runGlobalSearch() {
+      const keyword = document.getElementById('globalSearchInput').value.trim();
+      const panel = document.getElementById('globalSearchResults');
+      if (!panel) return;
+      if (keyword.length < 2) {
+        panel.innerHTML = '<div class="search-group-title">请输入至少 2 个字符</div>';
+        panel.classList.remove('hidden');
+        return;
+      }
+      const seq = ++state.searchSeq;
+      panel.innerHTML = '<div class="search-group-title">搜索中...</div>';
+      panel.classList.remove('hidden');
+      try {
+        const result = await api(withQuery('/api/search', { keyword, limit: '5' }), { silent: true });
+        if (seq !== state.searchSeq) return;
+        state.searchResults = result;
+        renderGlobalSearchResults(result);
+      } catch (error) {
+        if (seq !== state.searchSeq) return;
+        panel.innerHTML = `<div class="search-group-title">${esc(error.message || '搜索失败')}</div>`;
+        panel.classList.remove('hidden');
       }
     }
 
@@ -8579,22 +9003,267 @@
         const expanded = state.expandedKbId === item.id;
         // 客户角色的列表接口会脱敏正文，展开时以详情接口返回的完整内容为准。
         const detail = expanded ? (state.kbDetails[item.id] || item) : item;
-        const kbActions = `<button class="secondary" data-action="detail-kb" data-id="${item.id}" type="button">${expanded ? '收起' : '详情'}</button>${canMutateOwnedRecord(item, 'createdBy') ? `<button class="secondary" data-action="edit-kb" data-id="${item.id}" type="button">修改</button><button class="secondary" data-action="delete-kb" data-id="${item.id}" type="button" style="background:#fee2e2;color:#dc2626;border-color:#fecaca;">删除</button>` : ''}`;
+        const canReview = state.user?.role === 'admin' && item.status === 'pending';
+        const kbActions = `<button class="secondary" data-action="detail-kb" data-id="${item.id}" type="button">${expanded ? '收起' : '详情'}</button><button class="secondary" data-action="kb-revisions" data-id="${item.id}" type="button">版本</button>${canReview ? `<button class="secondary" data-action="review-kb" data-id="${item.id}" type="button">审核</button>` : ''}${canMutateOwnedRecord(item, 'createdBy') ? `<button class="secondary" data-action="edit-kb" data-id="${item.id}" type="button">修改</button><button class="secondary" data-action="delete-kb" data-id="${item.id}" type="button" style="background:#fee2e2;color:#dc2626;border-color:#fecaca;">删除</button>` : ''}`;
         const checked = (state.selectedKbIds || []).includes(item.id) ? ' checked' : '';
+        const reviewNote = item.reviewNote ? `<div class="muted" style="font-size:11px;">审核意见：${esc(item.reviewNote)}</div>` : '';
         return `
         <tr>
           <td style="text-align:center;"><input type="checkbox" class="kb-checkbox" data-id="${item.id}"${checked} /></td>
           <td style="width:200px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;">${esc(item.title)}</td>
+          <td>${statusPill(KB_STATUS_LABELS[item.status] || item.status || '-', item.status || 'draft')}${reviewNote}</td>
+          <td>v${esc(item.version || 1)}</td>
           <td style="width:150px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;">${esc(item.keywords)}</td>
           <td style="width:400px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;">${esc(item.problem)}</td>
           <td style="width:520px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;">${esc(item.solution)}</td>
           <td><div class="toolbar" style="white-space:nowrap;">${kbActions}</div></td>
         </tr>
-        ${expanded ? `<tr><td colspan="6"><div class="card" style="margin:8px 0;"><div class="muted" style="margin-bottom:8px;">问题详情</div><div style="margin-bottom:12px;white-space:pre-wrap;">${esc(detail.problem)}</div><div class="muted" style="margin-bottom:8px;">解决方案</div><div style="white-space:pre-wrap;">${esc(detail.solution)}</div></div></td></tr>` : ''}`;
-      }).join('') || '<tr><td colspan="6">暂无数据</td></tr>';
+        ${expanded ? `<tr><td colspan="8"><div class="card" style="margin:8px 0;"><div class="muted" style="margin-bottom:8px;">问题详情</div><div style="margin-bottom:12px;white-space:pre-wrap;">${esc(detail.problem)}</div><div class="muted" style="margin-bottom:8px;">解决方案</div><div style="white-space:pre-wrap;">${esc(detail.solution)}</div></div></td></tr>` : ''}`;
+      }).join('') || '<tr><td colspan="8">暂无数据</td></tr>';
       document.getElementById('kbPageInfo').textContent = `第 ${state.kbPage} / ${totalPages} 页`;
       document.getElementById('kbPrevBtn').disabled = state.kbPage <= 1;
       document.getElementById('kbNextBtn').disabled = state.kbPage >= totalPages;
+    }
+
+    const CONTRACT_STATUS_LABELS = { draft: '草稿', active: '执行中', completed: '已完成', terminated: '已终止' };
+    const SETTLEMENT_STATUS_LABELS = { pending: '待开票', invoiced: '已开票', received: '已回款' };
+    const PURCHASE_STATUS_LABELS = { pending: '待审批', approved: '已审批', received: '已入库', cancelled: '已取消' };
+    const KB_STATUS_LABELS = { draft: '草稿', pending: '待审核', published: '已发布', rejected: '已驳回' };
+
+    function formatMoneyValue(value) {
+      const num = Number(value || 0);
+      return `¥${num.toLocaleString('zh-CN', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`;
+    }
+
+    function statusPill(label, key) {
+      const cls = ['draft', 'pending', 'published', 'rejected'].includes(key) ? key : 'draft';
+      return `<span class="status-pill ${cls}">${esc(label)}</span>`;
+    }
+
+    function fillP2ProjectSelects() {
+      const list = projectsInUserScope();
+      const options = list.map(item => `<option value="${attrEsc(item.id)}">${esc(formatProjectDisplay(item))}</option>`).join('');
+      ['contractProjectId', 'vendorProjectId', 'inventoryProjectId'].forEach(id => {
+        const select = document.getElementById(id);
+        if (!select) return;
+        const currentValue = select.value;
+        select.innerHTML = options || '<option value="">暂无项目</option>';
+        if (currentValue && list.some(item => item.id === currentValue)) select.value = currentValue;
+      });
+      const filter = document.getElementById('contractFilterProject');
+      if (filter) {
+        const currentValue = filter.value || state.contractFilterProjectId || '';
+        filter.innerHTML = '<option value="">全部项目</option>' + options;
+        if (currentValue && list.some(item => item.id === currentValue)) filter.value = currentValue;
+      }
+    }
+
+    function getContractSettlementTotals(contractId) {
+      return (state.contractSettlements || [])
+        .filter(item => item.contractId === contractId)
+        .reduce((acc, item) => {
+          acc.invoiceAmount += Number(item.invoiceAmount || 0);
+          acc.receivedAmount += Number(item.receivedAmount || 0);
+          acc.costAmount += Number(item.costAmount || 0);
+          return acc;
+        }, { invoiceAmount: 0, receivedAmount: 0, costAmount: 0 });
+    }
+
+    function getFilteredContracts() {
+      let list = (state.contracts || []).slice();
+      if (state.contractFilterProjectId) list = list.filter(item => item.projectId === state.contractFilterProjectId);
+      if (state.contractFilterStatus) list = list.filter(item => item.status === state.contractFilterStatus);
+      return list;
+    }
+
+    function renderContracts() {
+      if (state.user?.role === 'customer') return;
+      fillP2ProjectSelects();
+      const contracts = (state.contracts || []).filter(item => state.contractFilterProjectId ? item.projectId === state.contractFilterProjectId : true);
+      const totals = contracts.reduce((acc, contract) => {
+        const settled = getContractSettlementTotals(contract.id);
+        acc.contractAmount += Number(contract.amount || 0);
+        acc.invoiceAmount += settled.invoiceAmount;
+        acc.receivedAmount += settled.receivedAmount;
+        acc.costAmount += settled.costAmount;
+        return acc;
+      }, { contractAmount: 0, invoiceAmount: 0, receivedAmount: 0, costAmount: 0 });
+      const grossProfit = totals.receivedAmount - totals.costAmount;
+      const grossMargin = totals.receivedAmount > 0 ? (grossProfit / totals.receivedAmount) * 100 : 0;
+      const cards = [
+        ['合同总额', formatMoneyValue(totals.contractAmount)],
+        ['已开票', formatMoneyValue(totals.invoiceAmount)],
+        ['已回款', formatMoneyValue(totals.receivedAmount)],
+        ['毛利 / 毛利率', `${formatMoneyValue(grossProfit)} · ${grossMargin.toFixed(1)}%`]
+      ];
+      const summary = document.getElementById('contractSummaryCards');
+      if (summary) {
+        summary.innerHTML = cards.map(([label, value]) => `<div class="card" style="margin:0;"><div class="muted" style="font-size:12px;">${esc(label)}</div><div style="font-size:20px;font-weight:700;margin-top:6px;">${esc(value)}</div></div>`).join('');
+      }
+      const table = document.getElementById('contractTable');
+      if (table) {
+        const rows = getFilteredContracts().sort((a, b) => String(b.createdAt || '').localeCompare(String(a.createdAt || '')));
+        table.innerHTML = rows.map(contract => {
+          const settled = getContractSettlementTotals(contract.id);
+          const profit = settled.receivedAmount - settled.costAmount;
+          const margin = settled.receivedAmount > 0 ? (profit / settled.receivedAmount) * 100 : 0;
+          const canMutate = canEditProjectRecord(contract);
+          return `<tr>
+            <td>${esc(contract.name)}</td>
+            <td>${esc(contract.contractNo || '-')}</td>
+            <td>${esc(formatProjectDisplayById(contract.projectId))}</td>
+            <td>${esc(formatMoneyValue(contract.amount))}</td>
+            <td>${esc(formatMoneyValue(settled.invoiceAmount))}</td>
+            <td>${esc(formatMoneyValue(settled.receivedAmount))}</td>
+            <td>${esc(formatMoneyValue(settled.costAmount))}</td>
+            <td class="${profit >= 0 ? 'money-positive' : 'money-negative'}">${esc(formatMoneyValue(profit))}</td>
+            <td>${margin.toFixed(1)}%</td>
+            <td>${statusPill(CONTRACT_STATUS_LABELS[contract.status] || contract.status || '-', contract.status)}</td>
+            <td><div class="toolbar">${canMutate ? `<button class="secondary" data-action="edit-contract" data-id="${attrEsc(contract.id)}" type="button">修改</button><button class="secondary" data-action="add-settlement" data-id="${attrEsc(contract.id)}" type="button">登记结算</button><button class="secondary" data-action="delete-contract" data-id="${attrEsc(contract.id)}" type="button" style="background:#fee2e2;color:#dc2626;border-color:#fecaca;">删除</button>` : '-'}</div></td>
+          </tr>`;
+        }).join('') || '<tr><td colspan="11">暂无合同</td></tr>';
+      }
+      renderSettlements();
+    }
+
+    function renderSettlements() {
+      const contractSelect = document.getElementById('settlementContractId');
+      if (contractSelect) {
+        const currentValue = contractSelect.value;
+        contractSelect.innerHTML = '<option value="">请选择合同</option>' + (state.contracts || []).map(item => `<option value="${attrEsc(item.id)}">${esc(item.name)}</option>`).join('');
+        if (currentValue && (state.contracts || []).some(item => item.id === currentValue)) contractSelect.value = currentValue;
+      }
+      const table = document.getElementById('settlementTable');
+      if (!table) return;
+      const rows = (state.contractSettlements || []).slice().sort((a, b) => String(b.createdAt || '').localeCompare(String(a.createdAt || '')));
+      table.innerHTML = rows.map(item => {
+        const contract = (state.contracts || []).find(entry => entry.id === item.contractId);
+        const canMutate = canEditProjectRecord(item);
+        return `<tr>
+          <td>${esc(contract?.name || '-')}</td>
+          <td>${esc(item.periodKey || '-')}</td>
+          <td>${esc(item.title || '-')}</td>
+          <td>${esc(formatMoneyValue(item.invoiceAmount))}</td>
+          <td>${esc(formatMoneyValue(item.receivedAmount))}</td>
+          <td>${esc(formatMoneyValue(item.costAmount))}</td>
+          <td>${esc(SETTLEMENT_STATUS_LABELS[item.status] || item.status || '-')}</td>
+          <td>${esc(item.invoicedAt || '-')}</td>
+          <td>${esc(item.receivedAt || '-')}</td>
+          <td><div class="toolbar">${canMutate ? `<button class="secondary" data-action="edit-settlement" data-id="${attrEsc(item.id)}" type="button">修改</button><button class="secondary" data-action="delete-settlement" data-id="${attrEsc(item.id)}" type="button">删除</button>` : '-'}</div></td>
+        </tr>`;
+      }).join('') || '<tr><td colspan="10">暂无结算记录</td></tr>';
+    }
+
+    function renderVendors() {
+      const table = document.getElementById('vendorTable');
+      if (!table) return;
+      fillP2ProjectSelects();
+      const rows = (state.sparePartVendors || []).slice().sort((a, b) => String(b.createdAt || '').localeCompare(String(a.createdAt || '')));
+      table.innerHTML = rows.map(item => `<tr>
+        <td>${esc(item.name)}</td>
+        <td>${esc(formatProjectDisplayById(item.projectId))}</td>
+        <td>${esc(item.contactName || '-')}</td>
+        <td>${esc(item.contactPhone || '-')}</td>
+        <td>${esc(item.email || '-')}</td>
+        <td>${esc(item.status === 'inactive' ? '停用' : '启用')}</td>
+        <td><div class="toolbar">${canEditProjectRecord(item) ? `<button class="secondary" data-action="edit-vendor" data-id="${attrEsc(item.id)}" type="button">修改</button><button class="secondary" data-action="delete-vendor" data-id="${attrEsc(item.id)}" type="button">删除</button>` : '-'}</div></td>
+      </tr>`).join('') || '<tr><td colspan="7">暂无供应商</td></tr>';
+    }
+
+    function fillPurchaseSelects() {
+      const spareSelect = document.getElementById('purchaseSparePartId');
+      const vendorSelect = document.getElementById('purchaseVendorId');
+      if (spareSelect) {
+        const currentValue = spareSelect.value;
+        const list = (state.spareParts || []).slice();
+        spareSelect.innerHTML = '<option value="">请选择备件</option>' + list.map(item => `<option value="${attrEsc(item.id)}">${esc(`${item.name}${item.model ? ` / ${item.model}` : ''}（库存 ${item.quantity}）`)}</option>`).join('');
+        if (currentValue && list.some(item => item.id === currentValue)) spareSelect.value = currentValue;
+      }
+      if (vendorSelect) {
+        const currentValue = vendorSelect.value;
+        const sparePartId = spareSelect?.value || '';
+        const sparePart = (state.spareParts || []).find(item => item.id === sparePartId);
+        const list = (state.sparePartVendors || []).filter(item => !sparePart || item.projectId === sparePart.projectId);
+        vendorSelect.innerHTML = '<option value="">未指定</option>' + list.map(item => `<option value="${attrEsc(item.id)}">${esc(item.name)}</option>`).join('');
+        if (currentValue && list.some(item => item.id === currentValue)) vendorSelect.value = currentValue;
+      }
+    }
+
+    function renderPurchases() {
+      const table = document.getElementById('purchaseTable');
+      if (!table) return;
+      fillPurchaseSelects();
+      const rows = (state.sparePartPurchases || []).slice().sort((a, b) => String(b.createdAt || '').localeCompare(String(a.createdAt || '')));
+      table.innerHTML = rows.map(item => {
+        const sparePart = (state.spareParts || []).find(entry => entry.id === item.sparePartId);
+        const vendor = (state.sparePartVendors || []).find(entry => entry.id === item.vendorId);
+        const actions = [];
+        if (state.user?.role === 'admin' && item.status === 'pending') actions.push(`<button class="secondary" data-action="approve-purchase" data-id="${attrEsc(item.id)}" type="button">审批</button>`);
+        if (item.status === 'approved') actions.push(`<button class="secondary" data-action="receive-purchase" data-id="${attrEsc(item.id)}" type="button">收货</button>`);
+        if (['pending', 'approved'].includes(item.status)) actions.push(`<button class="secondary" data-action="cancel-purchase" data-id="${attrEsc(item.id)}" type="button">取消</button>`);
+        return `<tr>
+          <td>${esc(item.purchaseNo || '-')}</td>
+          <td>${esc(sparePart?.name || '-')}</td>
+          <td>${esc(vendor?.name || '-')}</td>
+          <td>${esc(item.quantity)}</td>
+          <td>${esc(formatMoneyValue(item.unitPrice))}</td>
+          <td>${esc(formatMoneyValue(item.totalAmount))}</td>
+          <td>${esc(item.applicantName || '-')}</td>
+          <td>${esc(PURCHASE_STATUS_LABELS[item.status] || item.status)}</td>
+          <td><div class="toolbar">${actions.join('') || '-'}</div></td>
+        </tr>`;
+      }).join('') || '<tr><td colspan="9">暂无采购申请</td></tr>';
+    }
+
+    function renderInventoryTasks() {
+      const table = document.getElementById('inventoryTaskTable');
+      if (!table) return;
+      const rows = (state.sparePartInventoryTasks || []).slice().sort((a, b) => String(b.createdAt || '').localeCompare(String(a.createdAt || '')));
+      table.innerHTML = rows.map(task => {
+        const items = Array.isArray(task.items) ? task.items : [];
+        const checked = items.filter(item => item.result !== 'unchecked').length;
+        return `<tr>
+          <td>${esc(task.name)}</td>
+          <td>${esc(formatProjectDisplayById(task.projectId))}</td>
+          <td>${esc(task.status === 'completed' ? '已完成' : task.status === 'running' ? '盘点中' : '待盘点')}</td>
+          <td>${checked} / ${items.length}</td>
+          <td>${esc(task.createdByName || '-')}</td>
+          <td>${esc(task.createdAt || '-')}</td>
+          <td><button class="secondary" data-action="open-inventory" data-id="${attrEsc(task.id)}" type="button">查看明细</button></td>
+        </tr>`;
+      }).join('') || '<tr><td colspan="7">暂无盘点任务</td></tr>';
+      renderInventoryDetail();
+    }
+
+    function getSelectedInventoryTask() {
+      return (state.sparePartInventoryTasks || []).find(item => item.id === state.selectedInventoryTaskId) || null;
+    }
+
+    function renderInventoryDetail() {
+      const card = document.getElementById('inventoryDetailCard');
+      if (!card) return;
+      const task = getSelectedInventoryTask();
+      if (!task) {
+        card.classList.add('hidden');
+        return;
+      }
+      card.classList.remove('hidden');
+      document.getElementById('inventoryDetailTitle').textContent = `盘点明细 · ${task.name}`;
+      const readonly = task.status === 'completed';
+      document.getElementById('inventoryItemTable').innerHTML = (task.items || []).map(entry => {
+        const differenceClass = entry.difference > 0 ? 'money-positive' : entry.difference < 0 ? 'money-negative' : '';
+        const resultLabel = entry.result === 'match' ? '一致' : entry.result === 'mismatch' ? '差异' : '未盘点';
+        return `<tr>
+          <td>${esc(entry.name)}</td>
+          <td>${esc(entry.expectedQuantity)}</td>
+          <td>${readonly ? esc(entry.actualQuantity ?? '-') : `<input type="number" min="0" step="1" style="width:96px;" data-inventory-input="${attrEsc(entry.sparePartId)}" value="${attrEsc(entry.actualQuantity ?? '')}" />`}</td>
+          <td class="${differenceClass}">${esc(entry.difference || 0)}</td>
+          <td>${esc(resultLabel)}</td>
+          <td>${readonly ? esc(entry.note || '-') : `<input type="text" style="width:160px;" data-inventory-note="${attrEsc(entry.sparePartId)}" value="${attrEsc(entry.note || '')}" maxlength="500" />`}</td>
+          <td>${readonly ? '-' : `<button class="secondary" data-action="record-inventory" data-spare-part-id="${attrEsc(entry.sparePartId)}" type="button">登记</button>`}</td>
+        </tr>`;
+      }).join('') || '<tr><td colspan="7">暂无盘点明细</td></tr>';
+      document.getElementById('inventoryCompleteBtn').classList.toggle('hidden', readonly);
     }
 
     function getMaintainReminders(limit = 6) {
@@ -9641,6 +10310,39 @@
       return filtered;
     }
 
+    async function exportAuditLogs(format) {
+      const params = new URLSearchParams({ format });
+      const search = document.getElementById('auditLogSearch')?.value.trim() || '';
+      const action = document.getElementById('auditLogFilterAction')?.value || '';
+      const targetType = document.getElementById('auditLogFilterTarget')?.value || '';
+      if (search) params.set('search', search);
+      if (action) params.set('action', action);
+      if (targetType) params.set('targetType', targetType);
+      try {
+        const response = await fetch(`/api/audit-logs/export?${params.toString()}`, { credentials: 'include' });
+        if (!response.ok) {
+          let detail = '导出失败';
+          try {
+            const payload = await response.json();
+            detail = payload.message || detail;
+          } catch (error) {
+            // 非 JSON 错误响应沿用默认提示。
+          }
+          throw new Error(detail);
+        }
+        const blob = await response.blob();
+        const url = URL.createObjectURL(blob);
+        const a = document.createElement('a');
+        a.href = url;
+        a.download = `audit-logs-${new Date().toISOString().slice(0, 10)}.${format}`;
+        a.click();
+        URL.revokeObjectURL(url);
+        showToast(`审计日志已导出为 ${format.toUpperCase()}`);
+      } catch (error) {
+        showGlobalError(error.message || '审计日志导出失败');
+      }
+    }
+
     function renderSystemAuditLogs() {
       if (!['admin', 'auditor'].includes(state.user?.role)) return;
       const pageSize = 15;
@@ -9848,6 +10550,51 @@
       form.elements.id.value = '';
       document.getElementById('kbFormTitle').textContent = '新增知识条目';
       document.getElementById('kbSubmitBtn').textContent = '保存知识';
+      if (form.elements.status) form.elements.status.value = 'published';
+    }
+
+    function resetContractForm() {
+      const form = document.getElementById('contractForm');
+      form.reset();
+      form.elements.id.value = '';
+      form.elements.amount.value = '0';
+      form.elements.taxRate.value = '0';
+      form.elements.status.value = 'active';
+      fillP2ProjectSelects();
+      document.getElementById('contractFormTitle').textContent = '新增合同';
+      document.getElementById('contractSubmitBtn').textContent = '保存合同';
+      setMessage('contractFormMessage', '');
+    }
+
+    function resetSettlementForm() {
+      const form = document.getElementById('settlementForm');
+      form.reset();
+      form.elements.id.value = '';
+      ['invoiceAmount', 'receivedAmount', 'costAmount'].forEach(key => { form.elements[key].value = '0'; });
+      form.elements.status.value = 'pending';
+      document.getElementById('settlementFormTitle').textContent = '登记结算';
+      document.getElementById('settlementSubmitBtn').textContent = '保存结算';
+      setMessage('settlementFormMessage', '');
+    }
+
+    function resetVendorForm() {
+      const form = document.getElementById('vendorForm');
+      form.reset();
+      form.elements.id.value = '';
+      form.elements.status.value = 'active';
+      fillP2ProjectSelects();
+      document.getElementById('vendorFormTitle').textContent = '新增供应商';
+      document.getElementById('vendorSubmitBtn').textContent = '保存供应商';
+      setMessage('vendorFormMessage', '');
+    }
+
+    function resetPurchaseForm() {
+      const form = document.getElementById('purchaseForm');
+      form.reset();
+      form.elements.id.value = '';
+      form.elements.unitPrice.value = '0';
+      fillPurchaseSelects();
+      setMessage('purchaseFormMessage', '');
     }
 
     function resetInspectionPlanForm() {
@@ -9912,6 +10659,7 @@
       document.getElementById('edProjectEndDate').value = project.projectEndDate || '';
       document.getElementById('edNotifyBefore').value = project.notifyBefore || '';
       document.getElementById('edPaymentMethod').value = project.paymentMethod || '';
+      document.getElementById('edCustomerLogVisible').checked = project.customerLogVisible === true;
       document.getElementById('edDescription').value = project.description || '';
       document.getElementById('projectEditMessage').textContent = '';
       document.getElementById('projectEditMessage').className = 'message';
@@ -10870,6 +11618,118 @@
       openModal('kbEditModal');
     }
 
+    function editContract(id) {
+      const item = (state.contracts || []).find(entry => entry.id === id);
+      if (!item) return;
+      const form = document.getElementById('contractForm');
+      fillP2ProjectSelects();
+      ['id', 'name', 'contractNo', 'projectId', 'amount', 'taxRate', 'settlementCycle', 'signDate', 'startDate', 'endDate', 'status', 'partyA', 'partyB', 'notes'].forEach(key => {
+        if (!form.elements[key]) return;
+        form.elements[key].value = item[key] ?? (key === 'amount' || key === 'taxRate' ? '0' : '');
+      });
+      document.getElementById('contractFormTitle').textContent = '修改合同';
+      document.getElementById('contractSubmitBtn').textContent = '保存修改';
+      setMessage('contractFormMessage', '');
+      openTabWithSubtab('contracts', 'form');
+    }
+
+    function editSettlement(id) {
+      const item = (state.contractSettlements || []).find(entry => entry.id === id);
+      if (!item) return;
+      const form = document.getElementById('settlementForm');
+      fillP2ProjectSelects();
+      renderSettlements();
+      ['id', 'contractId', 'periodKey', 'title', 'invoiceAmount', 'receivedAmount', 'costAmount', 'invoiceNo', 'invoicedAt', 'receivedAt', 'status', 'notes'].forEach(key => {
+        if (!form.elements[key]) return;
+        form.elements[key].value = item[key] ?? '';
+      });
+      document.getElementById('settlementFormTitle').textContent = '修改结算';
+      document.getElementById('settlementSubmitBtn').textContent = '保存修改';
+      setMessage('settlementFormMessage', '');
+      openTabWithSubtab('contracts', 'settlements');
+    }
+
+    function editVendor(id) {
+      const item = (state.sparePartVendors || []).find(entry => entry.id === id);
+      if (!item) return;
+      const form = document.getElementById('vendorForm');
+      fillP2ProjectSelects();
+      ['id', 'name', 'projectId', 'contactName', 'contactPhone', 'email', 'address', 'status', 'notes'].forEach(key => {
+        if (!form.elements[key]) return;
+        form.elements[key].value = item[key] ?? '';
+      });
+      document.getElementById('vendorFormTitle').textContent = '修改供应商';
+      document.getElementById('vendorSubmitBtn').textContent = '保存修改';
+      setMessage('vendorFormMessage', '');
+      openTabWithSubtab('assetOps', 'vendors');
+    }
+
+    function startSettlementForContract(contractId) {
+      resetSettlementForm();
+      renderSettlements();
+      const select = document.getElementById('settlementContractId');
+      if (select) select.value = contractId;
+      openTabWithSubtab('contracts', 'settlements');
+    }
+
+    function openInventoryTask(taskId) {
+      state.selectedInventoryTaskId = taskId;
+      renderInventoryDetail();
+      const card = document.getElementById('inventoryDetailCard');
+      card?.scrollIntoView({ behavior: 'smooth', block: 'start' });
+    }
+
+    async function showKbRevisions(kbId) {
+      const item = (state.kb || []).find(entry => entry.id === kbId);
+      const body = document.getElementById('kbRevisionBody');
+      body.innerHTML = '<div class="muted">加载中...</div>';
+      setMessage('kbRevisionMessage', '');
+      openModal('kbRevisionModal');
+      try {
+        const result = await api(`/api/kb/${kbId}/revisions`, { silent: true });
+        const revisions = Array.isArray(result?.data) ? result.data : [];
+        state.kbRevisions[kbId] = revisions;
+        body.innerHTML = `<div class="muted" style="margin-bottom:10px;">当前版本 v${esc(result?.currentVersion || item?.version || 1)} · 共 ${revisions.length} 条历史</div>` +
+          (revisions.map(rev => `<div class="card" style="margin:0 0 10px;padding:12px;">
+            <div style="display:flex;justify-content:space-between;gap:8px;flex-wrap:wrap;">
+              <strong>v${esc(rev.version || '-')} · ${esc(rev.action || '')}</strong>
+              <span class="muted">${esc(rev.createdAt || '')}</span>
+            </div>
+            <div class="muted" style="font-size:12px;margin:4px 0;">${esc(rev.operatorName || formatUserName(rev.createdBy) || '-')}${rev.note ? ` · ${esc(rev.note)}` : ''}</div>
+            <div style="margin-top:6px;font-weight:600;">${esc(rev.title || '')}</div>
+            <div style="white-space:pre-wrap;font-size:12px;margin-top:4px;">${esc(rev.problem || '')}</div>
+          </div>`).join('') || '<div class="muted">暂无版本记录</div>');
+      } catch (error) {
+        body.innerHTML = '';
+        setMessage('kbRevisionMessage', error.message, 'error');
+      }
+    }
+
+    function openKbReview(kbId) {
+      state.pendingKbReviewId = kbId;
+      const item = (state.kb || []).find(entry => entry.id === kbId);
+      document.getElementById('kbReviewTitle').textContent = item ? `条目：${item.title}（v${item.version || 1}）` : '';
+      document.getElementById('kbReviewNote').value = '';
+      setMessage('kbReviewMessage', '');
+      openModal('kbReviewModal');
+    }
+
+    async function submitKbReview(decision) {
+      const kbId = state.pendingKbReviewId;
+      if (!kbId) return;
+      const note = document.getElementById('kbReviewNote').value.trim();
+      try {
+        await api(`/api/kb/${kbId}/review`, { method: 'POST', body: JSON.stringify({ decision, note }) });
+        closeModal('kbReviewModal');
+        state.pendingKbReviewId = '';
+        state.kb = (await apiCollection('/api/kb')).data;
+        renderKb();
+        showToast(decision === 'publish' ? '知识条目已发布' : '知识条目已驳回');
+      } catch (error) {
+        setMessage('kbReviewMessage', error.message, 'error');
+      }
+    }
+
     function editInspectionPlan(id) {
       const item = state.inspectionPlans.find(entry => entry.id === id);
       if (!item) return;
@@ -11220,6 +12080,7 @@
       setMessage('kbMessage', '知识条目已删除');
       state.kb = (await apiCollection('/api/kb')).data;
       state.kbDetails = {};
+      state.kbRevisions = {};
       renderKb();
       await refreshReports();
       openTabWithSubtab('kb', 'list');
@@ -11516,6 +12377,7 @@
       fillWorkReportProjectSelect();
       fillWorkReportFilterProjectSelect();
       fillWorkReportFilterUserSelect();
+      fillServiceReportProjectSelect();
       toggleWorkloadCustomRange();
       const editorCard = document.getElementById('workReportEditorCard');
       if (editorCard) editorCard.classList.toggle('hidden', state.user?.role === 'customer');
@@ -11529,6 +12391,15 @@
         await refreshWorkReportOverview();
       }
       renderLegacyReports();
+    }
+
+    function fillServiceReportProjectSelect() {
+      const select = document.getElementById('serviceReportProject');
+      if (!select) return;
+      const currentValue = select.value;
+      const list = projectsInUserScope();
+      select.innerHTML = list.map(item => `<option value="${attrEsc(item.id)}">${esc(formatProjectDisplay(item))}</option>`).join('') || '<option value="">暂无项目</option>';
+      if (currentValue && list.some(item => item.id === currentValue)) select.value = currentValue;
     }
 
     function formatAppVersion(version) {
@@ -11646,6 +12517,8 @@
 
     const BASE_DATA_ENDPOINTS = [
       { key: 'projects', path: '/api/projects' },
+      { key: 'contracts', path: '/api/contracts' },
+      { key: 'contractSettlements', path: '/api/contract-settlements' },
       { key: 'users', path: '/api/users' },
       { key: 'assets', path: '/api/assets' },
       { key: 'assetCheckouts', path: '/api/asset-checkouts' },
@@ -11660,6 +12533,9 @@
       { key: 'inspectionExecutions', path: '/api/inspection-executions' },
       { key: 'spareParts', path: '/api/spare-parts' },
       { key: 'sparePartMovements', path: '/api/spare-part-movements' },
+      { key: 'sparePartVendors', path: '/api/spare-part-vendors' },
+      { key: 'sparePartPurchases', path: '/api/spare-part-purchases' },
+      { key: 'sparePartInventoryTasks', path: '/api/spare-part-inventory-tasks' },
       { key: 'changeRecords', path: '/api/change-records' },
       { key: 'incidents', path: '/api/incidents' },
       { key: 'tickets', path: '/api/tickets' },
@@ -11777,7 +12653,13 @@
     }
 
     async function loadBaseData(options = {}) {
-      const endpoints = BASE_DATA_ENDPOINTS.filter(ep => ep.key !== 'auditLogs' || ['admin', 'auditor'].includes(state.user?.role));
+      // 客户接口会拒绝合同、供应商、采购与盘点，直接跳过以免每次刷新都提示加载失败。
+      const customerHiddenKeys = new Set(['contracts', 'contractSettlements', 'sparePartVendors', 'sparePartPurchases', 'sparePartInventoryTasks']);
+      const endpoints = BASE_DATA_ENDPOINTS.filter(ep => {
+        if (ep.key === 'auditLogs') return ['admin', 'auditor'].includes(state.user?.role);
+        if (customerHiddenKeys.has(ep.key)) return state.user?.role !== 'customer';
+        return true;
+      });
       if (options.clearBeforeLoad) clearBaseDataState();
       await loadLogDictionaries();
       const results = await Promise.allSettled(endpoints.map(ep => apiCollection(ep.path, { silent: true })));
@@ -11830,6 +12712,7 @@
         state.changeRecordPage = 1;
         state.logPage = 1;
         state.kbPage = 1;
+        state.contractPage = 1;
         state.assetPage = 1;
         state.projectPage = 1;
         state.userPage = 1;
@@ -11872,11 +12755,15 @@
       fillKbFilterProjectOptions();
       fillKbFilterUserOptions();
       renderKb();
+      renderContracts();
       resetDocumentForm();
       renderDocuments();
       renderTickets();
       restoreTicketDraft();
       renderAssetOps();
+      renderVendors();
+      renderPurchases();
+      renderInventoryTasks();
       restoreInspectionDraft();
       renderAiInspection();
       toggleInspectionIssueFields();
@@ -12657,6 +13544,53 @@
       switchTab(button.dataset.tab);
     });
 
+    const globalSearchInput = document.getElementById('globalSearchInput');
+    const globalSearchResults = document.getElementById('globalSearchResults');
+    globalSearchInput.addEventListener('input', () => {
+      if (state.searchTimer) clearTimeout(state.searchTimer);
+      const keyword = globalSearchInput.value.trim();
+      if (keyword.length < 2) {
+        state.searchSeq += 1;
+        closeGlobalSearch();
+        if (keyword.length === 1) {
+          globalSearchResults.innerHTML = '<div class="search-group-title">请输入至少 2 个字符</div>';
+          globalSearchResults.classList.remove('hidden');
+        }
+        return;
+      }
+      state.searchTimer = setTimeout(runGlobalSearch, 300);
+    });
+    globalSearchInput.addEventListener('keydown', event => {
+      if (event.key === 'Escape') {
+        closeGlobalSearch();
+        globalSearchInput.blur();
+      }
+      if (event.key === 'Enter') {
+        const first = globalSearchResults.querySelector('button[data-search-type]');
+        if (first) {
+          event.preventDefault();
+          openSearchResult(first.dataset.searchType, first.dataset.searchId, first.dataset.searchProject);
+        } else {
+          runGlobalSearch();
+        }
+      }
+    });
+    globalSearchResults.addEventListener('click', event => {
+      const button = event.target.closest('button[data-search-type]');
+      if (!button) return;
+      openSearchResult(button.dataset.searchType, button.dataset.searchId, button.dataset.searchProject);
+    });
+    document.addEventListener('click', event => {
+      if (!event.target.closest('#globalSearch')) closeGlobalSearch();
+    });
+    document.addEventListener('keydown', event => {
+      if ((event.ctrlKey || event.metaKey) && event.key.toLowerCase() === 'k') {
+        event.preventDefault();
+        globalSearchInput.focus();
+        globalSearchInput.select();
+      }
+    });
+
     document.querySelectorAll('.section-tabs').forEach(tabBar => {
       tabBar.addEventListener('click', event => {
         const button = event.target.closest('button[data-subtab]');
@@ -13374,6 +14308,7 @@
         projectEndDate: document.getElementById('edProjectEndDate').value,
         notifyBefore: document.getElementById('edNotifyBefore').value,
         paymentMethod: document.getElementById('edPaymentMethod').value.trim(),
+        customerLogVisible: document.getElementById('edCustomerLogVisible').checked,
         description: document.getElementById('edDescription').value.trim()
       };
       const msg = document.getElementById('projectEditMessage');
@@ -13516,6 +14451,10 @@
     });
 
     document.getElementById('kbEditModal').addEventListener('click', function(e) { if (e.target === this) { closeModal('kbEditModal'); } });
+    document.getElementById('kbRevisionModal').addEventListener('click', function(e) { if (e.target === this) { closeModal('kbRevisionModal'); } });
+    document.getElementById('kbReviewModal').addEventListener('click', function(e) { if (e.target === this) { closeModal('kbReviewModal'); } });
+    document.getElementById('kbReviewPublishBtn').addEventListener('click', () => submitKbReview('publish'));
+    document.getElementById('kbReviewRejectBtn').addEventListener('click', () => submitKbReview('reject'));
 
     document.getElementById('inspectionPlanEditSaveBtn').addEventListener('click', async () => {
       const id = document.getElementById('edInspPlanId').value;
@@ -14051,6 +14990,12 @@
         }
         if (button.dataset.action === 'edit-kb') {
           editKb(button.dataset.id);
+        }
+        if (button.dataset.action === 'kb-revisions') {
+          await showKbRevisions(button.dataset.id);
+        }
+        if (button.dataset.action === 'review-kb') {
+          openKbReview(button.dataset.id);
         }
         if (button.dataset.action === 'delete-kb') {
           await removeKb(button.dataset.id);
@@ -14601,6 +15546,15 @@
       }
     });
     document.getElementById('refreshReportsBtn').addEventListener('click', refreshReports);
+    document.getElementById('serviceReportOpenBtn').addEventListener('click', () => {
+      const projectId = document.getElementById('serviceReportProject').value;
+      if (!projectId) {
+        showGlobalError('请选择项目后再生成服务报告');
+        return;
+      }
+      const period = document.getElementById('serviceReportPeriod').value;
+      window.open(`/api/reports/service/${encodeURIComponent(projectId)}?period=${encodeURIComponent(period)}`, '_blank', 'noopener');
+    });
     document.getElementById('reportDimension').addEventListener('change', refreshReports);
     document.getElementById('reportPeriod').addEventListener('change', refreshReports);
     document.getElementById('systemTimezone')?.addEventListener('change', updateSystemCurrentTimeDisplay);
@@ -15138,17 +16092,10 @@
     document.getElementById('auditLogFilterAction').addEventListener('change', () => { state.auditLogPage = 1; renderSystemAuditLogs(); });
     document.getElementById('auditLogFilterTarget').addEventListener('change', () => { state.auditLogPage = 1; renderSystemAuditLogs(); });
     document.getElementById('auditLogExportCsv').addEventListener('click', () => {
-      const csvRows = [['时间','操作人','动作','对象','详情'].map(h => `"${h}"`).join(',')];
-      getFilteredAuditLogs().forEach(item => {
-        csvRows.push([item.createdAt, item.operatorName || '', item.action, item.targetType, item.detail || ''].map(v => csvCell(v)).join(','));
-      });
-      const blob = new Blob(['\uFEFF' + csvRows.join('\n')], { type: 'text/csv;charset=utf-8' });
-      const url = URL.createObjectURL(blob);
-      const a = document.createElement('a');
-      a.href = url;
-      a.download = `audit-log-${new Date().toISOString().slice(0,10)}.csv`;
-      a.click();
-      URL.revokeObjectURL(url);
+      exportAuditLogs('csv');
+    });
+    document.getElementById('auditLogExportJson').addEventListener('click', () => {
+      exportAuditLogs('json');
     });
     document.getElementById('auditArchiveToggle').addEventListener('click', () => {
       toggleAuditArchivePanel();
@@ -15263,6 +16210,7 @@
 
     document.getElementById('projectForm').addEventListener('submit', event => withSubmitLock(event, async () => {
       const data = Object.fromEntries(new FormData(event.target).entries());
+      data.customerLogVisible = event.target.elements.customerLogVisible.checked;
       const method = data.id ? 'PUT' : 'POST';
       const path = data.id ? `/api/projects/${data.id}` : '/api/projects';
       try {
@@ -15278,6 +16226,246 @@
 
     document.getElementById('userProjectId').addEventListener('change', event => {
       syncUserProjectPeriod(event.target.value);
+    });
+
+    document.getElementById('contractFilterProject').addEventListener('change', event => {
+      state.contractFilterProjectId = event.target.value;
+      state.contractPage = 1;
+      renderContracts();
+    });
+
+    document.getElementById('contractFilterStatus').addEventListener('change', event => {
+      state.contractFilterStatus = event.target.value;
+      renderContracts();
+    });
+
+    document.getElementById('contractRefreshBtn').addEventListener('click', async () => {
+      try {
+        const [contracts, settlements] = await Promise.all([
+          apiCollection('/api/contracts'),
+          apiCollection('/api/contract-settlements')
+        ]);
+        state.contracts = contracts.data || [];
+        state.contractSettlements = settlements.data || [];
+        renderContracts();
+        showToast('合同数据已刷新');
+      } catch (error) {
+        setMessage('contractMessage', error.message, 'error');
+      }
+    });
+
+    document.getElementById('contractCancelBtn').addEventListener('click', () => resetContractForm());
+    document.getElementById('settlementCancelBtn').addEventListener('click', () => resetSettlementForm());
+    document.getElementById('vendorCancelBtn').addEventListener('click', () => resetVendorForm());
+
+    document.getElementById('contractForm').addEventListener('submit', event => withSubmitLock(event, async () => {
+      const data = Object.fromEntries(new FormData(event.target).entries());
+      const id = data.id;
+      delete data.id;
+      try {
+        await api(id ? `/api/contracts/${id}` : '/api/contracts', { method: id ? 'PUT' : 'POST', body: JSON.stringify(data) });
+        resetContractForm();
+        await reloadAfterSubmit();
+        openTabWithSubtab('contracts', 'list');
+        showToast(id ? '合同修改成功' : '合同创建成功');
+      } catch (error) {
+        setMessage('contractFormMessage', error.message, 'error');
+      }
+    }));
+
+    document.getElementById('settlementForm').addEventListener('submit', event => withSubmitLock(event, async () => {
+      const data = Object.fromEntries(new FormData(event.target).entries());
+      const id = data.id;
+      delete data.id;
+      try {
+        await api(id ? `/api/contract-settlements/${id}` : '/api/contract-settlements', { method: id ? 'PUT' : 'POST', body: JSON.stringify(data) });
+        resetSettlementForm();
+        await reloadAfterSubmit();
+        openTabWithSubtab('contracts', 'settlements');
+        showToast(id ? '结算修改成功' : '结算登记成功');
+      } catch (error) {
+        setMessage('settlementFormMessage', error.message, 'error');
+      }
+    }));
+
+    document.getElementById('vendorForm').addEventListener('submit', event => withSubmitLock(event, async () => {
+      const data = Object.fromEntries(new FormData(event.target).entries());
+      const id = data.id;
+      delete data.id;
+      try {
+        await api(id ? `/api/spare-part-vendors/${id}` : '/api/spare-part-vendors', { method: id ? 'PUT' : 'POST', body: JSON.stringify(data) });
+        resetVendorForm();
+        await reloadAfterSubmit();
+        openTabWithSubtab('assetOps', 'vendors');
+        showToast(id ? '供应商修改成功' : '供应商创建成功');
+      } catch (error) {
+        setMessage('vendorFormMessage', error.message, 'error');
+      }
+    }));
+
+    document.getElementById('purchaseForm').addEventListener('submit', event => withSubmitLock(event, async () => {
+      const data = Object.fromEntries(new FormData(event.target).entries());
+      try {
+        await api('/api/spare-part-purchases', { method: 'POST', body: JSON.stringify(data) });
+        resetPurchaseForm();
+        await reloadAfterSubmit();
+        openTabWithSubtab('assetOps', 'purchases');
+        showToast('采购申请已提交');
+      } catch (error) {
+        setMessage('purchaseFormMessage', error.message, 'error');
+      }
+    }));
+
+    document.getElementById('inventoryTaskForm').addEventListener('submit', event => withSubmitLock(event, async () => {
+      const data = Object.fromEntries(new FormData(event.target).entries());
+      try {
+        const created = await api('/api/spare-part-inventory-tasks', { method: 'POST', body: JSON.stringify(data) });
+        event.target.reset();
+        await reloadAfterSubmit();
+        const taskId = created?.data?.id || created?.id;
+        if (taskId) state.selectedInventoryTaskId = taskId;
+        renderInventoryTasks();
+        openTabWithSubtab('assetOps', 'inventory');
+        showToast('盘点任务已创建');
+      } catch (error) {
+        setMessage('inventoryTaskFormMessage', error.message, 'error');
+      }
+    }));
+
+    document.getElementById('purchaseSparePartId').addEventListener('change', async event => {
+      fillPurchaseSelects();
+      const sparePart = (state.spareParts || []).find(item => item.id === event.target.value);
+      if (sparePart) {
+        const vendor = (state.sparePartVendors || []).find(item => item.projectId === sparePart.projectId);
+        if (vendor) document.getElementById('purchaseVendorId').value = vendor.id;
+      }
+    });
+
+    document.getElementById('contractTable').addEventListener('click', async event => {
+      const button = event.target.closest('button[data-action]');
+      if (!button) return;
+      try {
+        if (button.dataset.action === 'edit-contract') editContract(button.dataset.id);
+        if (button.dataset.action === 'add-settlement') startSettlementForContract(button.dataset.id);
+        if (button.dataset.action === 'delete-contract') {
+          if (!(await showConfirm('删除合同会同时删除其结算记录，确认删除？'))) return;
+          await api(`/api/contracts/${button.dataset.id}`, { method: 'DELETE' });
+          await reloadAfterSubmit();
+          renderContracts();
+          showToast('合同已删除');
+        }
+      } catch (error) {
+        setMessage('contractMessage', error.message, 'error');
+      }
+    });
+
+    document.getElementById('settlementTable').addEventListener('click', async event => {
+      const button = event.target.closest('button[data-action]');
+      if (!button) return;
+      try {
+        if (button.dataset.action === 'edit-settlement') editSettlement(button.dataset.id);
+        if (button.dataset.action === 'delete-settlement') {
+          if (!(await showConfirm('确认删除该结算记录？'))) return;
+          await api(`/api/contract-settlements/${button.dataset.id}`, { method: 'DELETE' });
+          await reloadAfterSubmit();
+          renderSettlements();
+          showToast('结算记录已删除');
+        }
+      } catch (error) {
+        setMessage('settlementMessage', error.message, 'error');
+      }
+    });
+
+    document.getElementById('vendorTable').addEventListener('click', async event => {
+      const button = event.target.closest('button[data-action]');
+      if (!button) return;
+      try {
+        if (button.dataset.action === 'edit-vendor') editVendor(button.dataset.id);
+        if (button.dataset.action === 'delete-vendor') {
+          if (!(await showConfirm('确认删除该供应商？'))) return;
+          await api(`/api/spare-part-vendors/${button.dataset.id}`, { method: 'DELETE' });
+          await reloadAfterSubmit();
+          renderVendors();
+          showToast('供应商已删除');
+        }
+      } catch (error) {
+        setMessage('vendorMessage', error.message, 'error');
+      }
+    });
+
+    document.getElementById('purchaseTable').addEventListener('click', async event => {
+      const button = event.target.closest('button[data-action]');
+      if (!button) return;
+      const id = button.dataset.id;
+      try {
+        if (button.dataset.action === 'approve-purchase') {
+          await api(`/api/spare-part-purchases/${id}/approve`, { method: 'POST', body: JSON.stringify({}) });
+          showToast('采购申请已审批');
+        }
+        if (button.dataset.action === 'receive-purchase') {
+          await api(`/api/spare-part-purchases/${id}/receive`, { method: 'POST', body: JSON.stringify({}) });
+          showToast('采购到货已入库');
+        }
+        if (button.dataset.action === 'cancel-purchase') {
+          if (!(await showConfirm('确认取消该采购申请？'))) return;
+          await api(`/api/spare-part-purchases/${id}/cancel`, { method: 'POST', body: JSON.stringify({}) });
+          showToast('采购申请已取消');
+        }
+        await reloadAfterSubmit();
+        renderPurchases();
+      } catch (error) {
+        setMessage('purchaseMessage', error.message, 'error');
+      }
+    });
+
+    document.getElementById('inventoryTaskTable').addEventListener('click', event => {
+      const button = event.target.closest('button[data-action="open-inventory"]');
+      if (!button) return;
+      openInventoryTask(button.dataset.id);
+    });
+
+    document.getElementById('inventoryDetailCloseBtn').addEventListener('click', () => {
+      state.selectedInventoryTaskId = '';
+      renderInventoryDetail();
+    });
+
+    document.getElementById('inventoryItemTable').addEventListener('click', async event => {
+      const button = event.target.closest('button[data-action="record-inventory"]');
+      if (!button) return;
+      const task = getSelectedInventoryTask();
+      if (!task) return;
+      const sparePartId = button.dataset.sparePartId;
+      const quantityInput = document.querySelector(`[data-inventory-input="${CSS.escape(sparePartId)}"]`);
+      const noteInput = document.querySelector(`[data-inventory-note="${CSS.escape(sparePartId)}"]`);
+      if (!quantityInput || quantityInput.value === '') {
+        setMessage('inventoryDetailMessage', '请先填写实盘数量', 'error');
+        return;
+      }
+      try {
+        await api(`/api/spare-part-inventory-tasks/${task.id}/record`, {
+          method: 'POST',
+          body: JSON.stringify({ sparePartId, actualQuantity: Number(quantityInput.value), note: noteInput?.value || '' })
+        });
+        await reloadAfterSubmit();
+        renderInventoryTasks();
+        showToast('盘点结果已登记');
+      } catch (error) {
+        setMessage('inventoryDetailMessage', error.message, 'error');
+      }
+    });
+
+    document.getElementById('inventoryCompleteBtn').addEventListener('click', async () => {
+      const task = getSelectedInventoryTask();
+      if (!task) return;
+      if (!(await showConfirm('完成盘点后将按实盘数量回写库存，确认继续？'))) return;
+      try {
+        await api(`/api/spare-part-inventory-tasks/${task.id}/complete`, { method: 'POST', body: JSON.stringify({}) });
+        await reloadAfterSubmit();
+        renderInventoryTasks();
+        showToast('盘点已完成，库存已回写');
+      } catch (error) {
+        setMessage('inventoryDetailMessage', error.message, 'error');
+      }
     });
 
     document.getElementById('userForm').addEventListener('submit', event => withSubmitLock(event, async () => {
