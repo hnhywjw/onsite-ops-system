@@ -18,6 +18,9 @@
 - `dutyShifts`
 - `approvals`
 - `notifications`
+- `notificationChannels`
+- `monitorAlerts`
+- `monitorMaintenanceWindows`
 - `auditLogs`
 - `workReports`
 - `aiInspectionTargets`
@@ -61,6 +64,8 @@
 - `GET|POST|PUT|DELETE /api/assets`
 - `POST /api/assets/import`
 - `GET|POST|PUT|DELETE /api/logs`
+  - 日志支持 `attachments` 数组（最多 6 张现场取证图），每项包含 `dataUrl`、`capturedAt`、`location{latitude,longitude,address}` 与 `watermark`。
+  - 单张图片上限 3MB，仅接受 PNG/JPEG/WebP dataURL；累计配额由 `LOG_ATTACHMENT_QUOTA_PER_USER_BYTES`（默认 100MB）与 `LOG_ATTACHMENT_QUOTA_PER_PROJECT_BYTES`（默认 1GB）控制，超限返回 413。
 - `GET|POST|PUT|DELETE /api/kb`
   - `GET /api/kb` 列表对客户账号只返回标题、分类、标签、项目与创建信息，正文、问题描述、解决方案不下发。
   - `GET /api/kb/:id` 详情对项目内所有角色（含客户）返回完整内容；这是产品既定取舍，客户可通过详情查阅知识条目。
@@ -135,6 +140,41 @@
 - `GET /api/audit-logs`
 - `GET /api/notifications`
 - `POST /api/notifications/:id/read`
+- `GET|POST /api/notification-channels`
+- `PUT|DELETE /api/notification-channels/:id`
+- `POST /api/notification-channels/:id/test`
+  - 仅管理员可访问；Webhook 密钥与 SMTP 密码以 `enc:` 前缀加密存储，响应仅返回 `hasWebhookSecret`/`hasSmtpPassword`。
+  - `GET` 同时返回 `events` 事件目录；支持事件见下方通知事件表。
+
+### 资产监控
+
+- `GET /api/assets/monitor-status`
+- `POST /api/monitor/run`
+  - 仅管理员；`assetIds` 可限定采集范围，强制采样不受采样间隔节流限制，已有采集任务运行时返回 409。
+- `GET /api/monitor/history`
+  - 参数 `assetId`、`range=1h|24h|7d|30d`；数据来自 `data/monitor-history/<date>.jsonl`，按 5 分钟原始粒度落盘。
+- `GET /api/monitor/alerts`
+  - 支持 `projectId`、`assetId`、`metric`、`status=open` 筛选，返回 `openCount`。
+- `POST /api/monitor/alerts/:id/acknowledge`、`POST /api/monitor/alerts/:id/resolve`、`POST /api/monitor/alerts/:id/silence`
+- `GET|POST /api/monitor/maintenance-windows`
+- `PUT|DELETE /api/monitor/maintenance-windows/:id`
+
+## 通知事件
+
+```text
+monitor-alert      监控告警
+ticket             工单流转
+incident           故障记录
+approval           审批
+inspection         巡检
+inventory          备件盘点
+project-expiry     项目到期
+maintenance-expiry 维保到期
+work-report        工作汇报
+duty-handover      值班交接
+config-backup      配置备份
+manual             手动通知
+```
 
 ## workReports 数据模型
 

@@ -109,16 +109,26 @@ docker compose --env-file .env.production -f docker-compose.prod.yml up -d --bui
 
 ## 版本
 
-当前版本：`1.1.1`
+当前版本：`1.2.0`
 
 ### 软件包下载
 
-最新版本：**[v1.1.1](https://github.com/hnhywjw/onsite-ops-system/releases/tag/v1.1.1)**
+最新版本：**[v1.2.0](https://github.com/hnhywjw/onsite-ops-system/releases/tag/v1.2.0)**
 
-- 完整安装包 `onsite-ops-system-v1.1.1-production.tar.gz`
-- 离线升级包 `onsite-ops-upgrade-v1.1.1.tar.gz`
+- 完整安装包 `onsite-ops-system-v1.2.0-production.tar.gz`
+- 离线升级包 `onsite-ops-upgrade-v1.2.0.tar.gz`
 - SHA256 校验文件
 - 部署说明见仓库 `PRODUCTION_DEPLOY.md`
+
+### v1.2.0 更新说明
+
+P1 运维增强：
+- 资产监控：支持 Ping/TCP/SNMP 指标采集、30 天趋势、连续异常告警与维护窗口抑制
+- 通知外发：新增 Webhook 与 SMTP 邮件通道，按事件组订阅，支持通道连通性测试
+- 日志取证：日志可上传带拍摄时间、地点与记录人水印的现场照片，受张数与配额约束
+- PWA 与离线草稿：支持安装到桌面，日志、工单、巡检表单断网后可暂存并恢复
+- 多项目协作：工程师可围绕主项目参与多个项目，权限按项目集判定
+- 移动端适配：窄屏下的列表、表单与操作区布局优化
 
 ### v1.1.1 更新说明
 

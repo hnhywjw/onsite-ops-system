@@ -280,6 +280,51 @@ async function waitForProjectNotifications(cookie, projectId, predicate, attempt
   return list;
 }
 
+// 调度器每分钟自动采集，手动采集可能与其重叠；遇到 409 时等待本轮结束后重试。
+async function runMonitorNow(cookie, assetIds) {
+  for (let attempt = 0; attempt < 20; attempt += 1) {
+    const response = await request('/api/monitor/run', {
+      method: 'POST', headers: { cookie, 'Content-Type': 'application/json' },
+      body: JSON.stringify(assetIds ? { assetIds } : {})
+    });
+    if (response.status !== 409) return response;
+    await new Promise(resolve => setTimeout(resolve, 1000));
+  }
+  return { status: 409, data: { message: '监控采集任务持续占用，无法完成回归验证' } };
+}
+
+// 通道回归用本机回环 HTTP 服务接收 Webhook，避免依赖外部通知平台。
+function startWebhookReceiver() {
+  const received = [];
+  const server = http.createServer((req, res) => {
+    const chunks = [];
+    req.on('data', chunk => chunks.push(chunk));
+    req.on('end', () => {
+      received.push({
+        headers: req.headers,
+        body: Buffer.concat(chunks).toString('utf8')
+      });
+      res.writeHead(200, { 'Content-Type': 'application/json' });
+      res.end('{"ok":true}');
+    });
+  });
+  return new Promise((resolve, reject) => {
+    server.once('error', reject);
+    server.listen(0, '127.0.0.1', () => {
+      resolve({ server, received, port: server.address().port });
+    });
+  });
+}
+
+async function waitFor(predicate, timeoutMs = 10000, intervalMs = 200) {
+  const deadline = Date.now() + timeoutMs;
+  while (Date.now() < deadline) {
+    if (predicate()) return true;
+    await new Promise(resolve => setTimeout(resolve, intervalMs));
+  }
+  return false;
+}
+
 function assert(condition, message) {
   if (!condition) {
     throw new Error(message);
@@ -325,7 +370,13 @@ function createTarGz(entries) {
   }
 }
 
-const regressionTestProjectPrefixes = ['提醒回归项目-', '时区提醒项目-', '布局隔离项目-', '视图范围回归项目-'];
+const regressionTestProjectPrefixes = ['提醒回归项目-', '时区提醒项目-', '布局隔离项目-', '视图范围回归项目-', '多项目回归项目-'];
+// 监控类测试资产会参与每轮采集，失败中断后必须能自动清除，否则会拖慢后续回归。
+const regressionTestAssetPrefixes = [
+  '布局Ping-', '布局SNMP-', '布局他项-', '布局冲突', '布局排序', '布局未分配-', '布局非法U-', '布局缺起始U-',
+  '监控回归资产-', '维护窗口资产-', '通知通道资产-', '生命周期资产-', '多项目兼任资产-',
+  '并发测试资产A', '并发测试资产B', '视图范围资产', '无团体字-'
+];
 
 // 回归用例创建的项目不会自动消失，长期累积会撑爆登录时的项目下拉（pageSize=100）并让 e2e 偶发失败。
 // 用例结束统一强制删除本轮项目及其关联数据，并清理中断运行时残留的测试周期任务。
@@ -335,6 +386,12 @@ async function cleanupRegressionArtifacts(cookie) {
   for (const project of projectList) {
     if (!regressionTestProjectPrefixes.some(prefix => String(project.name || '').startsWith(prefix))) continue;
     await request(`/api/projects/${project.id}?force=1`, { method: 'DELETE', headers: { cookie } });
+  }
+  const assets = await request('/api/assets?all=1', { headers: { cookie } });
+  const assetList = Array.isArray(assets.data?.data) ? assets.data.data : [];
+  for (const asset of assetList) {
+    if (!regressionTestAssetPrefixes.some(prefix => String(asset.name || '').startsWith(prefix))) continue;
+    await request(`/api/assets/${asset.id}`, { method: 'DELETE', headers: { cookie } });
   }
   const tasks = await request('/api/ai-inspection/tasks?all=1', { headers: { cookie } });
   const taskList = Array.isArray(tasks.data?.data) ? tasks.data.data : [];
@@ -387,6 +444,8 @@ async function main() {
   assert(Number(admin.data.systemConfig?.webIdleLogoutMinutes) >= 1, '登录响应未返回控制台超时配置');
   let cookie = admin.cookie;
   assert(String(admin.headers['set-cookie'] || '').includes('SameSite=Lax'), '登录 Cookie 应为 SameSite=Lax');
+  // 先清掉上一次中断留下的监控测试资产，避免累积资产拖慢本轮采集。
+  await cleanupRegressionArtifacts(cookie);
 
   // 动态令牌（TOTP）二次认证：绑定、挑战登录、恢复码、重新生成与关闭。
   const twoFactorUsername = `tf_${Date.now()}_${Math.floor(Math.random() * 1000)}`;
@@ -1018,6 +1077,57 @@ async function main() {
   });
   assert(logQualityCheck.status === 200, '日志质量检查接口失败');
   assert(Array.isArray(logQualityCheck.data.warnings) && logQualityCheck.data.warnings.length >= 1, '日志质量检查未返回重复或重叠提醒');
+  // 现场取证附件：只接受图片 dataURL，保留拍摄时间与定位元数据，并限制张数。
+  const sampleImageDataUrl = 'data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8BQDwAEhQGAhKmMIQAAAABJRU5ErkJggg==';
+  const logWithAttachment = await request('/api/logs', {
+    method: 'POST',
+    headers: { cookie: engineerCookie, 'Content-Type': 'application/json' },
+    body: JSON.stringify({
+      projectId,
+      assetId,
+      date: reportDate,
+      ticketType: '事务工作',
+      event: '现场取证附件回归日志',
+      result: '已完成',
+      process: '上传现场取证图片',
+      conclusion: '附件入库成功',
+      durationHours: 0.5,
+      attachments: [{
+        name: '现场取证.png',
+        mimeType: 'image/png',
+        dataUrl: sampleImageDataUrl,
+        capturedAt: '2026-06-20T10:00:00.000Z',
+        location: { latitude: 31.2304, longitude: 121.4737, address: '31.230400, 121.473700' },
+        watermark: '拍摄时间：2026-06-20 10:00 ｜ 拍摄地点：31.230400, 121.473700'
+      }]
+    })
+  });
+  assert(logWithAttachment.status === 201, `创建带现场取证附件的日志失败: ${JSON.stringify(logWithAttachment.data)}`);
+  const savedAttachment = (logWithAttachment.data.attachments || [])[0];
+  assert(savedAttachment && savedAttachment.dataUrl === sampleImageDataUrl, '日志附件未正确保存');
+  assert(savedAttachment.capturedAt === '2026-06-20T10:00:00.000Z' && savedAttachment.location?.latitude === 31.2304, '日志附件元数据丢失');
+  const invalidAttachmentType = await request('/api/logs', {
+    method: 'POST',
+    headers: { cookie: engineerCookie, 'Content-Type': 'application/json' },
+    body: JSON.stringify({
+      projectId, assetId, date: reportDate, ticketType: '事务工作', event: '非法附件类型校验',
+      result: '已完成', process: '校验非法附件', conclusion: '应被拦截', durationHours: 1,
+      attachments: [{ name: 'payload.txt', dataUrl: 'data:text/plain;base64,aGVsbG8=' }]
+    })
+  });
+  assert(invalidAttachmentType.status === 400, '非图片附件应返回 400');
+  const tooManyAttachments = await request('/api/logs', {
+    method: 'POST',
+    headers: { cookie: engineerCookie, 'Content-Type': 'application/json' },
+    body: JSON.stringify({
+      projectId, assetId, date: reportDate, ticketType: '事务工作', event: '附件数量校验',
+      result: '已完成', process: '校验附件张数', conclusion: '应被拦截', durationHours: 1,
+      attachments: Array.from({ length: 7 }, (_, index) => ({ name: `取证-${index}.png`, dataUrl: sampleImageDataUrl }))
+    })
+  });
+  assert(tooManyAttachments.status === 400, '超过 6 张现场取证附件应返回 400');
+  const deleteAttachmentLog = await request(`/api/logs/${logWithAttachment.data.id}`, { method: 'DELETE', headers: { cookie: engineerCookie } });
+  assert(deleteAttachmentLog.status === 200, '清理现场取证回归日志失败');
   const previousMonthWorkReport = await request('/api/work-reports', {
     method: 'POST',
     headers: { cookie: engineerCookie, 'Content-Type': 'application/json' },
@@ -2747,6 +2857,324 @@ async function main() {
   assert(scopedTemplateDelete.status === 200, '管理员应能删除项目隔离巡检模板');
   const engineerTemplateDelete = await request(`/api/ai-inspection/templates/${engineerTemplate.data.id}`, { method: 'DELETE', headers: { cookie: engineerRelogin.cookie } });
   assert(engineerTemplateDelete.status === 200, '工程师应能删除自己创建的巡检模板');
+
+  // 一人多项目：projectIds 参与权限判断，主项目仍是默认写归属。
+  const lifecycleSuffix = Date.now();
+  const multiProject = await request('/api/projects', {
+    method: 'POST', headers: { cookie, 'Content-Type': 'application/json' },
+    body: JSON.stringify({ name: `多项目回归项目-${lifecycleSuffix}`, customerName: '多项目客户' })
+  });
+  assert(multiProject.status === 201, '创建多项目回归项目失败');
+  const multiUsername = `multi_engineer_${lifecycleSuffix}`;
+  const multiUser = await request('/api/users', {
+    method: 'POST', headers: { cookie, 'Content-Type': 'application/json' },
+    body: JSON.stringify({
+      username: multiUsername, password: 'MultiPass1!', role: 'engineer', name: '多项目回归工程师',
+      projectId, projectIds: [projectId, multiProject.data.id]
+    })
+  });
+  assert(multiUser.status === 201, `创建多项目工程师失败: ${JSON.stringify(multiUser.data)}`);
+  const multiLogin = await login(multiUsername, 'MultiPass1!');
+  assert(multiLogin.status === 200, '多项目工程师登录失败');
+  const multiCookie = multiLogin.cookie;
+  const multiProjects = await request('/api/projects?all=1', { headers: { cookie: multiCookie } });
+  const multiProjectIds = (multiProjects.data.data || []).map(item => item.id);
+  assert(multiProjectIds.includes(projectId) && multiProjectIds.includes(multiProject.data.id), '多项目工程师应看到主项目与兼任项目');
+  assert(!multiProjectIds.includes(otherProject.data.id), '多项目工程师不应看到未授权项目');
+  const multiAssetOther = await request('/api/assets', {
+    method: 'POST', headers: { cookie: multiCookie, 'Content-Type': 'application/json' },
+    body: JSON.stringify({
+      name: `多项目兼任资产-${lifecycleSuffix}`, type: '服务器', brand: '测', model: '测',
+      serialNumber: `SN-MULTI-${lifecycleSuffix}`, status: '使用中', maintainExpiryDate: '2027-12-31',
+      projectId: multiProject.data.id
+    })
+  });
+  assert(multiAssetOther.status === 201 && multiAssetOther.data.projectId === multiProject.data.id, '工程师应能在兼任项目下创建资产');
+  const multiScopedAssets = await request('/api/assets?all=1', { headers: { cookie: multiCookie } });
+  const multiVisibleProjectIds = new Set((multiScopedAssets.data.data || []).map(item => item.projectId));
+  assert(multiVisibleProjectIds.has(projectId) && multiVisibleProjectIds.has(multiProject.data.id), '多项目资产列表应覆盖主项目与兼任项目');
+  assert(!multiVisibleProjectIds.has(otherProject.data.id), '多项目资产列表不应包含未授权项目');
+  const multiCrossEdit = await request(`/api/assets/${otherAsset.data.id}`, {
+    method: 'PUT', headers: { cookie: multiCookie, 'Content-Type': 'application/json' },
+    body: JSON.stringify({ name: '越权改名' })
+  });
+  assert(multiCrossEdit.status === 403, '多项目工程师修改未授权项目资产应返回 403');
+  const multiCrossTransfer = await request(`/api/assets/${multiAssetOther.data.id}/transfer`, {
+    method: 'POST', headers: { cookie: multiCookie, 'Content-Type': 'application/json' },
+    body: JSON.stringify({ projectId: otherProject.data.id, reason: '越权调拨' })
+  });
+  assert(multiCrossTransfer.status === 403, '工程师不应执行跨项目调拨');
+
+  // 资产全生命周期：借出 → 归还 → 调拨 → 报废，以及盘点差异。
+  const lifecycleAsset = await request('/api/assets', {
+    method: 'POST', headers: { cookie, 'Content-Type': 'application/json' },
+    body: JSON.stringify({
+      name: `生命周期资产-${lifecycleSuffix}`, type: '服务器', brand: '测', model: '测',
+      serialNumber: `SN-LIFE-${lifecycleSuffix}`, status: '使用中', maintainExpiryDate: '2027-12-31',
+      projectId, cabinetName: '生命周期柜', rackUnitStart: 20, rackUnitSize: 1,
+      monitorEnabled: true, monitorType: 'ping', monitorHost: '127.0.0.1'
+    })
+  });
+  assert(lifecycleAsset.status === 201, `创建生命周期资产失败: ${JSON.stringify(lifecycleAsset.data)}`);
+  const lifeAssetId = lifecycleAsset.data.id;
+  const checkoutRecord = await request('/api/asset-checkouts', {
+    method: 'POST', headers: { cookie, 'Content-Type': 'application/json' },
+    body: JSON.stringify({ assetId: lifeAssetId, borrowerId: approverId, purpose: '回归借出', dueAt: '2027-01-31' })
+  });
+  assert(checkoutRecord.status === 201 && checkoutRecord.data.status === 'checked_out', '资产借出登记失败');
+  const lifeAssetAfterCheckout = (await request('/api/assets?all=1', { headers: { cookie } })).data.data.find(item => item.id === lifeAssetId);
+  assert(lifeAssetAfterCheckout?.status === '借出', '借出后资产状态应变为借出');
+  const duplicateCheckout = await request('/api/asset-checkouts', {
+    method: 'POST', headers: { cookie, 'Content-Type': 'application/json' },
+    body: JSON.stringify({ assetId: lifeAssetId, borrowerId: approverId, purpose: '重复借出' })
+  });
+  assert(duplicateCheckout.status === 400, '重复借出应返回 400');
+  const retireWhileCheckedOut = await request(`/api/assets/${lifeAssetId}/retire`, {
+    method: 'POST', headers: { cookie, 'Content-Type': 'application/json' },
+    body: JSON.stringify({ reason: '借出中退役' })
+  });
+  assert(retireWhileCheckedOut.status === 400, '借出中的资产不应允许退役');
+  const returnRecord = await request(`/api/asset-checkouts/${checkoutRecord.data.id}/return`, {
+    method: 'POST', headers: { cookie, 'Content-Type': 'application/json' },
+    body: JSON.stringify({ condition: '外观完好' })
+  });
+  assert(returnRecord.status === 200 && returnRecord.data.status === 'returned', '资产归还失败');
+  const lifeAssetAfterReturn = (await request('/api/assets?all=1', { headers: { cookie } })).data.data.find(item => item.id === lifeAssetId);
+  assert(lifeAssetAfterReturn?.status === '使用中', '归还后资产状态应恢复为使用中');
+  const transferBack = await request(`/api/assets/${lifeAssetId}/transfer`, {
+    method: 'POST', headers: { cookie, 'Content-Type': 'application/json' },
+    body: JSON.stringify({ projectId: otherProject.data.id, reason: '回归调拨' })
+  });
+  assert(transferBack.status === 200 && transferBack.data.projectId === otherProject.data.id, '资产调拨失败');
+  const lifecyclesAfterTransfer = await request(`/api/asset-lifecycles?assetId=${encodeURIComponent(lifeAssetId)}&all=1`, { headers: { cookie } });
+  const lifecycleActions = (lifecyclesAfterTransfer.data.data || []).map(item => item.action);
+  assert(lifecycleActions.includes('create') && lifecycleActions.includes('checkout') && lifecycleActions.includes('return'), '生命周期流水缺少创建/借出/归还记录');
+  assert(lifecycleActions.includes('transfer'), '生命周期流水缺少调拨记录');
+  assert((lifecyclesAfterTransfer.data.data || []).every(item => item.projectId === otherProject.data.id), '调拨后历史流水应跟随资产归属');
+  const transferWithoutReason = await request(`/api/assets/${lifeAssetId}/scrap`, {
+    method: 'POST', headers: { cookie, 'Content-Type': 'application/json' },
+    body: JSON.stringify({})
+  });
+  assert(transferWithoutReason.status === 400, '报废未填写原因应返回 400');
+  const scrapAsset = await request(`/api/assets/${lifeAssetId}/scrap`, {
+    method: 'POST', headers: { cookie, 'Content-Type': 'application/json' },
+    body: JSON.stringify({ reason: '主板损坏' })
+  });
+  assert(scrapAsset.status === 200 && scrapAsset.data.status === '已报废', '资产报废失败');
+  assert(scrapAsset.data.monitorEnabled === false, '报废资产应自动停止监控');
+  const directTerminal = await request(`/api/assets/${lifeAssetId}`, {
+    method: 'PUT', headers: { cookie, 'Content-Type': 'application/json' },
+    body: JSON.stringify({ status: '已退役' })
+  });
+  assert(directTerminal.status === 200, '终态资产之间允许管理员调整终态类型');
+  const inventoryTask = await request('/api/asset-inventory-tasks', {
+    method: 'POST', headers: { cookie, 'Content-Type': 'application/json' },
+    body: JSON.stringify({ projectId: multiProject.data.id, name: `回归盘点-${lifecycleSuffix}` })
+  });
+  assert(inventoryTask.status === 201 && inventoryTask.data.items.length >= 1, '创建盘点任务失败');
+  const inventoryTaskId = inventoryTask.data.id;
+  const inventoryStart = await request(`/api/asset-inventory-tasks/${inventoryTaskId}/start`, { method: 'POST', headers: { cookie } });
+  assert(inventoryStart.status === 200 && inventoryStart.data.status === 'running', '启动盘点任务失败');
+  const inventoryEntries = inventoryTask.data.items.map((item, index) => index === 0
+    ? { assetId: item.assetId, missing: true, note: '回归缺失' }
+    : { assetId: item.assetId, actualStatus: item.expectedStatus, location: item.location });
+  const inventorySave = await request(`/api/asset-inventory-tasks/${inventoryTaskId}/items`, {
+    method: 'POST', headers: { cookie, 'Content-Type': 'application/json' },
+    body: JSON.stringify({ items: inventoryEntries })
+  });
+  assert(inventorySave.status === 200, `登记盘点结果失败: ${JSON.stringify(inventorySave.data)}`);
+  assert(inventorySave.data.items.some(item => item.result === 'missing'), '盘点缺失应标记为 missing');
+  const inventoryComplete = await request(`/api/asset-inventory-tasks/${inventoryTaskId}/complete`, { method: 'POST', headers: { cookie } });
+  assert(inventoryComplete.status === 200 && inventoryComplete.data.status === 'completed', '完成盘点任务失败');
+  const inventoryAfter = await request('/api/asset-inventory-tasks?all=1', { headers: { cookie: multiCookie } });
+  assert((inventoryAfter.data.data || []).some(item => item.id === inventoryTaskId), '多项目工程师应能查看主项目盘点任务');
+  const inventoryForeign = await request('/api/asset-inventory-tasks?all=1', { headers: { cookie: engineerRelogin.cookie } });
+  assert(!(inventoryForeign.data.data || []).some(item => item.id === inventoryTaskId), '其他项目工程师不应看到盘点任务');
+
+  // 监控历史与告警处置：连续失败触发、确认后重触发、静默抑制、维护窗口抑制与恢复。
+  const monitorOutsiderName = `monitor_outsider_${Date.now()}`;
+  const monitorOutsider = await request('/api/users', {
+    method: 'POST', headers: { cookie, 'Content-Type': 'application/json' },
+    body: JSON.stringify({
+      username: monitorOutsiderName, password: 'MonitorPass1!', role: 'engineer',
+      name: '监控越权回归工程师', projectId: multiProject.data.id
+    })
+  });
+  assert(monitorOutsider.status === 201, `创建监控越权测试账号失败: ${JSON.stringify(monitorOutsider.data)}`);
+  const monitorOutsiderLogin = await login(monitorOutsiderName, 'MonitorPass1!');
+  assert(monitorOutsiderLogin.status === 200, '监控越权测试账号登录失败');
+  const monitorOutsiderCookie = monitorOutsiderLogin.cookie;
+  const monitorSettings = await updateSystemSettings(cookie, { monitorSampleIntervalMinutes: 1, monitorConsecutiveFailures: 1 });
+  assert(monitorSettings.status === 200 && monitorSettings.data.systemConfig?.monitorConsecutiveFailures === 1, '监控阈值设置保存失败');
+  const monitorAssetName = `监控回归资产-${Date.now()}`;
+  const monitorAsset = await request('/api/assets', {
+    method: 'POST', headers: { cookie, 'Content-Type': 'application/json' },
+    body: JSON.stringify({
+      name: monitorAssetName, type: '服务器', brand: '测', model: '测',
+      serialNumber: `SN-MONITOR-${Date.now()}`, status: '使用中', maintainExpiryDate: '2027-12-31',
+      projectId, monitorEnabled: true, monitorType: 'tcp', monitorHost: '127.0.0.1', monitorPort: 1
+    })
+  });
+  assert(monitorAsset.status === 201, `创建监控回归资产失败: ${JSON.stringify(monitorAsset.data)}`);
+  const monitorAssetId = monitorAsset.data.id;
+  const monitorRun = await runMonitorNow(cookie, [monitorAssetId]);
+  assert(monitorRun.status === 200 && monitorRun.data.sampled === true, `手动采集失败: ${JSON.stringify(monitorRun.data)}`);
+  const monitorHistory = await request(`/api/monitor/history?assetId=${encodeURIComponent(monitorAssetId)}&range=1h`, { headers: { cookie } });
+  assert(monitorHistory.status === 200 && monitorHistory.data.sampleCount >= 1, '监控历史未写入采样');
+  assert(Array.isArray(monitorHistory.data.points) && monitorHistory.data.points.length > 0, '监控趋势缺少数据点');
+  assert(monitorHistory.data.availability === 0, '离线资产的可用性应统计为 0');
+  const openAlerts = await request(`/api/monitor/alerts?assetId=${encodeURIComponent(monitorAssetId)}&status=open&all=1`, { headers: { cookie } });
+  const availabilityAlert = (openAlerts.data.data || []).find(item => item.metric === 'availability');
+  assert(openAlerts.status === 200 && availabilityAlert && availabilityAlert.status === 'open', '连续失败应触发可用性告警');
+  const historyForeign = await request(`/api/monitor/history?assetId=${encodeURIComponent(monitorAssetId)}&range=1h`, { headers: { cookie: monitorOutsiderCookie } });
+  assert(historyForeign.status === 403, '其他项目工程师查看监控历史应返回 403');
+  const foreignAlerts = await request(`/api/monitor/alerts?assetId=${encodeURIComponent(monitorAssetId)}&all=1`, { headers: { cookie: monitorOutsiderCookie } });
+  assert(foreignAlerts.status === 200 && (foreignAlerts.data.data || []).length === 0, '其他项目工程师不应看到告警');
+  const foreignAck = await request(`/api/monitor/alerts/${availabilityAlert.id}/acknowledge`, {
+    method: 'POST', headers: { cookie: monitorOutsiderCookie, 'Content-Type': 'application/json' },
+    body: JSON.stringify({ note: '越权确认' })
+  });
+  assert(foreignAck.status === 403, '其他项目工程师确认告警应返回 403');
+  const ackAlert = await request(`/api/monitor/alerts/${availabilityAlert.id}/acknowledge`, {
+    method: 'POST', headers: { cookie, 'Content-Type': 'application/json' },
+    body: JSON.stringify({ note: '已通知现场' })
+  });
+  assert(ackAlert.status === 200 && ackAlert.data.status === 'acknowledged' && ackAlert.data.acknowledgeNote === '已通知现场', '告警确认失败');
+  await runMonitorNow(cookie, [monitorAssetId]);
+  const reopenedAlerts = await request(`/api/monitor/alerts?assetId=${encodeURIComponent(monitorAssetId)}&all=1`, { headers: { cookie } });
+  const reopenedAlert = (reopenedAlerts.data.data || []).find(item => item.id === availabilityAlert.id);
+  assert(reopenedAlert?.status === 'open' && reopenedAlert.occurrences >= 2, '已确认告警再次触发应回到待确认并累计次数');
+  const notificationsBeforeSilence = await listProjectNotifications(cookie, projectId);
+  const alertNotificationCount = notificationsBeforeSilence.filter(item => item.sourceId === monitorAssetId && item.category === 'monitor-alert').length;
+  const silenceAlert = await request(`/api/monitor/alerts/${availabilityAlert.id}/silence`, {
+    method: 'POST', headers: { cookie, 'Content-Type': 'application/json' },
+    body: JSON.stringify({ minutes: 30 })
+  });
+  assert(silenceAlert.status === 200 && Date.parse(silenceAlert.data.silencedUntil) > Date.now(), '告警静默失败');
+  await runMonitorNow(cookie, [monitorAssetId]);
+  const notificationsAfterSilence = await listProjectNotifications(cookie, projectId);
+  assert(notificationsAfterSilence.filter(item => item.sourceId === monitorAssetId && item.category === 'monitor-alert').length === alertNotificationCount, '静默期内不应重复推送告警通知');
+  const resolveAlert = await request(`/api/monitor/alerts/${availabilityAlert.id}/resolve`, {
+    method: 'POST', headers: { cookie, 'Content-Type': 'application/json' },
+    body: JSON.stringify({ reason: '回归人工恢复' })
+  });
+  assert(resolveAlert.status === 200 && resolveAlert.data.status === 'resolved', '告警恢复标记失败');
+
+  const maintenanceAsset = await request('/api/assets', {
+    method: 'POST', headers: { cookie, 'Content-Type': 'application/json' },
+    body: JSON.stringify({
+      name: `维护窗口资产-${Date.now()}`, type: '服务器', brand: '测', model: '测',
+      serialNumber: `SN-WINDOW-${Date.now()}`, status: '使用中', maintainExpiryDate: '2027-12-31',
+      projectId, monitorEnabled: true, monitorType: 'tcp', monitorHost: '127.0.0.1', monitorPort: 1
+    })
+  });
+  assert(maintenanceAsset.status === 201, '创建维护窗口资产失败');
+  const maintenanceAssetId = maintenanceAsset.data.id;
+  const maintenanceWindow = await request('/api/monitor/maintenance-windows', {
+    method: 'POST', headers: { cookie, 'Content-Type': 'application/json' },
+    body: JSON.stringify({
+      name: `回归维护窗口-${Date.now()}`, projectId, assetIds: [maintenanceAssetId],
+      startAt: new Date(Date.now() - 60000).toISOString(), endAt: new Date(Date.now() + 3600000).toISOString(),
+      notes: '回归窗口'
+    })
+  });
+  assert(maintenanceWindow.status === 201, `创建维护窗口失败: ${JSON.stringify(maintenanceWindow.data)}`);
+  await runMonitorNow(cookie, [maintenanceAssetId]);
+  const suppressedAlerts = await request(`/api/monitor/alerts?assetId=${encodeURIComponent(maintenanceAssetId)}&all=1`, { headers: { cookie } });
+  const suppressedAlert = (suppressedAlerts.data.data || []).find(item => item.metric === 'availability');
+  assert(suppressedAlert?.suppressedReason === 'maintenance', '维护窗口内的告警应标记为维护抑制');
+  const windowUpdate = await request(`/api/monitor/maintenance-windows/${maintenanceWindow.data.id}`, {
+    method: 'PUT', headers: { cookie, 'Content-Type': 'application/json' },
+    body: JSON.stringify({ name: `回归维护窗口改名-${Date.now()}` })
+  });
+  assert(windowUpdate.status === 200 && windowUpdate.data.name.startsWith('回归维护窗口改名-'), '维护窗口修改失败');
+  const windowDelete = await request(`/api/monitor/maintenance-windows/${maintenanceWindow.data.id}`, { method: 'DELETE', headers: { cookie } });
+  assert(windowDelete.status === 200, '维护窗口删除失败');
+  await runMonitorNow(cookie, [maintenanceAssetId]);
+  const resumedAlerts = await request(`/api/monitor/alerts?assetId=${encodeURIComponent(maintenanceAssetId)}&all=1`, { headers: { cookie } });
+  const resumedAlert = (resumedAlerts.data.data || []).find(item => item.metric === 'availability');
+  assert(resumedAlert?.suppressedReason === '', '维护窗口结束后应恢复正常告警推送状态');
+
+  // 通知外发通道：Webhook 投递、签名、事件订阅、权限与参数校验。
+  const webhookReceiver = await startWebhookReceiver();
+  try {
+    const badChannel = await request('/api/notification-channels', {
+      method: 'POST', headers: { cookie, 'Content-Type': 'application/json' },
+      body: JSON.stringify({ name: '非法通道', type: 'webhook', webhookUrl: 'ftp://example.com/hook', events: ['monitor-alert'] })
+    });
+    assert(badChannel.status === 400, '非 http(s) Webhook 地址应返回 400');
+    const badEmailChannel = await request('/api/notification-channels', {
+      method: 'POST', headers: { cookie, 'Content-Type': 'application/json' },
+      body: JSON.stringify({ name: '缺收件人', type: 'email', smtpHost: '127.0.0.1', smtpPort: '2525', fromAddress: 'ops@example.com', toAddresses: [], events: ['monitor-alert'] })
+    });
+    assert(badEmailChannel.status === 400, '邮件通道缺少收件人应返回 400');
+    const createChannel = await request('/api/notification-channels', {
+      method: 'POST', headers: { cookie, 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        name: `回归 Webhook-${Date.now()}`,
+        type: 'webhook',
+        projectId,
+        events: ['monitor-alert'],
+        webhookUrl: `http://127.0.0.1:${webhookReceiver.port}/hook`,
+        webhookSecret: 'regression-webhook-secret'
+      })
+    });
+    assert(createChannel.status === 201 && createChannel.data.hasWebhookSecret === true, `创建 Webhook 通道失败: ${JSON.stringify(createChannel.data)}`);
+    assert(createChannel.data.webhookSecret === undefined, 'Webhook 通道不应返回明文密钥');
+    const channelList = await request('/api/notification-channels', { headers: { cookie } });
+    assert(channelList.status === 200 && (channelList.data.data || []).some(item => item.id === createChannel.data.id), '通知通道列表缺少新建通道');
+    assert((channelList.data.events || []).some(item => item.value === 'monitor-alert'), '通知通道应返回可选事件目录');
+    const foreignChannelList = await request('/api/notification-channels', { headers: { cookie: monitorOutsiderCookie } });
+    assert(foreignChannelList.status === 403, '非管理员不应查看通知通道');
+    const testChannel = await request(`/api/notification-channels/${createChannel.data.id}/test`, { method: 'POST', headers: { cookie } });
+    assert(testChannel.status === 200 && webhookReceiver.received.length === 1, `测试投递失败: ${JSON.stringify(testChannel.data)}`);
+    const testPayload = JSON.parse(webhookReceiver.received[0].body);
+    assert(testPayload.title === '通知通道测试' && testPayload.msgtype === 'text', 'Webhook 测试载荷格式异常');
+    assert(Boolean(webhookReceiver.received[0].headers['x-onsite-signature']), 'Webhook 应携带 HMAC 签名头');
+
+    const channelAsset = await request('/api/assets', {
+      method: 'POST', headers: { cookie, 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        name: `通知通道资产-${Date.now()}`, type: '服务器', brand: '测', model: '测',
+        serialNumber: `SN-NOTIFY-${Date.now()}`, status: '使用中', maintainExpiryDate: '2027-12-31',
+        projectId, monitorEnabled: true, monitorType: 'tcp', monitorHost: '127.0.0.1', monitorPort: 1
+      })
+    });
+    assert(channelAsset.status === 201, '创建通知通道测试资产失败');
+    await runMonitorNow(cookie, [channelAsset.data.id]);
+    const webhookDelivered = await waitFor(() => webhookReceiver.received.length >= 2, 15000);
+    assert(webhookDelivered, '监控告警未推送到 Webhook 通道');
+    const alertPayload = JSON.parse(webhookReceiver.received[webhookReceiver.received.length - 1].body);
+    assert(alertPayload.event === 'monitor-alert' && alertPayload.notificationId, 'Webhook 告警事件载荷异常');
+    const channelAfterSend = await request('/api/notification-channels', { headers: { cookie } });
+    const sentChannel = (channelAfterSend.data.data || []).find(item => item.id === createChannel.data.id);
+    assert(sentChannel?.lastSentAt && !sentChannel.lastError, 'Webhook 发送后应记录最近发送时间且无错误');
+    const disableChannel = await request(`/api/notification-channels/${createChannel.data.id}`, {
+      method: 'PUT', headers: { cookie, 'Content-Type': 'application/json' },
+      body: JSON.stringify({ enabled: false })
+    });
+    assert(disableChannel.status === 200 && disableChannel.data.enabled === false, '停用通知通道失败');
+    assert(disableChannel.data.hasWebhookSecret === true, '编辑通道时应保留已配置的密钥');
+    const deleteChannel = await request(`/api/notification-channels/${createChannel.data.id}`, { method: 'DELETE', headers: { cookie } });
+    assert(deleteChannel.status === 200, '删除通知通道失败');
+    await request(`/api/assets/${channelAsset.data.id}`, { method: 'DELETE', headers: { cookie } });
+  } finally {
+    webhookReceiver.server.close();
+  }
+
+  await request(`/api/assets/${monitorAssetId}`, { method: 'DELETE', headers: { cookie } });
+  await request(`/api/assets/${maintenanceAssetId}`, { method: 'DELETE', headers: { cookie } });
+  const deleteMonitorOutsider = await request(`/api/users/${monitorOutsider.data.id}`, { method: 'DELETE', headers: { cookie } });
+  assert(deleteMonitorOutsider.status === 200, `清理监控越权测试账号失败: ${JSON.stringify(deleteMonitorOutsider.data)}`);
+  const restoreMonitorSettings = await updateSystemSettings(cookie, { monitorSampleIntervalMinutes: 5, monitorConsecutiveFailures: 3 });
+  assert(restoreMonitorSettings.status === 200, '恢复监控阈值设置失败');
+
+  await request(`/api/assets/${multiAssetOther.data.id}`, { method: 'DELETE', headers: { cookie } });
+  const deleteMultiUser = await request(`/api/users/${multiUser.data.id}`, { method: 'DELETE', headers: { cookie } });
+  assert(deleteMultiUser.status === 200, `清理多项目工程师失败: ${JSON.stringify(deleteMultiUser.data)}`);
+  const deleteMultiProject = await request(`/api/projects/${multiProject.data.id}?force=1`, { method: 'DELETE', headers: { cookie } });
+  assert(deleteMultiProject.status === 200, '清理多项目回归项目失败');
+  await request(`/api/assets/${lifeAssetId}`, { method: 'DELETE', headers: { cookie } });
 
   await request(`/api/assets/${pingAsset.data.id}`, { method: 'DELETE', headers: { cookie } });
   await request(`/api/assets/${snmpAsset.data.id}`, { method: 'DELETE', headers: { cookie } });

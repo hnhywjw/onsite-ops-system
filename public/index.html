@@ -4,6 +4,12 @@
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
   <title>驻场运维管理系统</title>
+  <meta name="theme-color" content="#2563eb" />
+  <meta name="mobile-web-app-capable" content="yes" />
+  <meta name="apple-mobile-web-app-capable" content="yes" />
+  <meta name="apple-mobile-web-app-status-bar-style" content="default" />
+  <link rel="manifest" href="/manifest.webmanifest" />
+  <link rel="apple-touch-icon" href="/pwa-192.png" />
   <link rel="icon" type="image/svg+xml" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 200 200'%3E%3Cdefs%3E%3ClinearGradient id='g' x1='0%25' y1='0%25' x2='100%25' y2='100%25'%3E%3Cstop offset='0%25' stop-color='%232563eb'/%3E%3Cstop offset='100%25' stop-color='%231d4ed8'/%3E%3C/linearGradient%3E%3C/defs%3E%3Crect x='40' y='50' width='120' height='100' rx='12' fill='url(%23g)'/%3E%3Crect x='55' y='60' width='90' height='8' rx='4' fill='white' opacity='.9'/%3E%3Ccircle cx='70' cy='80' r='6' fill='%2322c55e'/%3E%3Ccircle cx='70' cy='100' r='6' fill='%2322c55e'/%3E%3Ccircle cx='70' cy='120' r='6' fill='%23eab308'/%3E%3Crect x='85' y='76' width='50' height='6' rx='3' fill='white' opacity='.6'/%3E%3Crect x='85' y='96' width='50' height='6' rx='3' fill='white' opacity='.6'/%3E%3Crect x='85' y='116' width='50' height='6' rx='3' fill='white' opacity='.6'/%3E%3Cpath d='M30 90 L30 140 Q30 165 55 175 L100 190 L145 175 Q170 165 170 140 L170 90' fill='none' stroke='url(%23g)' stroke-width='8' stroke-linecap='round'/%3E%3C/svg%3E" />
   <style nonce="__CSP_NONCE__">
     :root {
@@ -1388,6 +1394,10 @@
           关联项目
           <select id="edProjectId"></select>
         </label>
+        <label class="full">
+          兼任项目（可多选）
+          <select id="edProjectIds" multiple size="4" style="min-height:96px;"></select>
+        </label>
         <label>
           角色
           <select id="edRole">
@@ -1464,10 +1474,42 @@
 
   <div id="assetDetailModal" class="modal-overlay hidden">
     <div class="modal-box" style="max-width:520px;">
-      <h3 style="margin-top:0;">资产详情</h3>
+      <h3 id="assetDetailTitle" style="margin-top:0;">资产详情</h3>
       <div id="assetDetailBody" style="max-height:60vh;overflow-y:auto;"></div>
+      <div id="assetDetailActions" class="btn-row" style="margin-top:12px;flex-wrap:wrap;"></div>
       <div class="btn-row" style="margin-top:12px;">
         <button class="secondary" type="button" data-action="close-modal" data-modal="assetDetailModal">关闭</button>
+      </div>
+    </div>
+  </div>
+
+  <div id="assetActionModal" class="modal-overlay hidden">
+    <div class="modal-box" style="max-width:440px;">
+      <h3 id="assetActionTitle" style="margin-top:0;">资产操作</h3>
+      <div id="assetActionBody" style="display:flex;flex-direction:column;gap:10px;font-size:13px;"></div>
+      <div id="assetActionMessage" style="margin:8px 0;font-size:13px;"></div>
+      <div class="btn-row">
+        <button class="secondary" type="button" data-action="close-modal" data-modal="assetActionModal">取消</button>
+        <button class="primary" id="assetActionConfirmBtn" type="button">确认</button>
+      </div>
+    </div>
+  </div>
+
+  <div id="assetInventoryModal" class="modal-overlay hidden">
+    <div class="modal-box" style="max-width:860px;">
+      <h3 id="assetInventoryTitle" style="margin-top:0;">盘点登记</h3>
+      <div id="assetInventoryMeta" class="muted" style="font-size:12px;margin-bottom:10px;"></div>
+      <div class="table-wrap" style="max-height:55vh;overflow-y:auto;">
+        <table>
+          <thead><tr><th>资产名称</th><th>账面状态</th><th>实盘状态</th><th>实盘位置</th><th>缺失</th><th>备注</th><th>结果</th></tr></thead>
+          <tbody id="assetInventoryItems"></tbody>
+        </table>
+      </div>
+      <div id="assetInventoryMessage" style="margin:8px 0;font-size:13px;"></div>
+      <div class="btn-row">
+        <button class="secondary" type="button" data-action="close-modal" data-modal="assetInventoryModal">取消</button>
+        <button class="secondary" id="assetInventorySaveBtn" type="button">保存进度</button>
+        <button class="primary" id="assetInventoryCompleteBtn" type="button">保存并完成</button>
       </div>
     </div>
   </div>
@@ -1538,7 +1580,15 @@
         <label>责任人/部门<input id="edAssetOwner" /></label>
         <label>版本<input id="edAssetVersion" /></label>
         <label>序列号<input id="edAssetSerialNumber" required placeholder="请输入序列号" /></label>
-        <label>状态<input id="edAssetStatus" placeholder="使用中/停用/维护中" /></label>
+        <label>状态
+          <select id="edAssetStatus">
+            <option value="使用中">使用中</option>
+            <option value="闲置">闲置</option>
+            <option value="维修中">维修中</option>
+            <option value="借出">借出</option>
+            <option value="待报废">待报废</option>
+          </select>
+        </label>
         <label>维保到期日<input id="edAssetMaintainExpiryDate" type="date" required /></label>
         <label class="full">安装位置<input id="edAssetInstallationLocation" placeholder="例：A区机房-03号机柜-2U" /></label>
         <label>机柜名称<input id="edAssetCabinetName" placeholder="例：03号机柜" /></label>
@@ -1641,6 +1691,12 @@
         <label class="full">结论<textarea id="edLogConclusion" required></textarea></label>
         <label>工单用时（小时）<input id="edLogDurationHours" type="number" min="0" step="0.5" required /></label>
         <label class="full">备注<textarea id="edLogRemark"></textarea></label>
+        <label class="full">
+          现场取证（可选）
+          <input id="edLogAttachmentInput" type="file" accept="image/*" capture="environment" multiple />
+          <span class="muted" style="font-size:12px;">最多 6 张，新增图片会自动压缩并叠加水印</span>
+          <div id="edLogAttachmentPreview" style="display:flex;gap:8px;flex-wrap:wrap;margin-top:8px;"></div>
+        </label>
       </div>
       <div id="logEditMessage" style="margin:8px 0;font-size:13px;"></div>
       <div class="btn-row">
@@ -1892,6 +1948,99 @@
     </div>
   </div>
 
+  <div id="monitorWindowModal" class="modal-overlay hidden">
+    <div class="modal-box" style="max-width:560px;">
+      <h3 id="monitorWindowModalTitle">新建维护窗口</h3>
+      <div class="grid-form" style="max-height:64vh; overflow-y:auto;">
+        <input id="monitorWindowId" type="hidden" />
+        <label class="full"><span>窗口名称</span><input id="monitorWindowName" maxlength="100" placeholder="例：核心交换机例行维护" /></label>
+        <label class="full"><span>关联项目</span><select id="monitorWindowProject"></select></label>
+        <label class="full"><span>覆盖资产（留空表示项目全部资产）</span><select id="monitorWindowAssets" multiple size="5" style="min-height:110px;"></select></label>
+        <label><span>开始时间</span><input id="monitorWindowStart" type="datetime-local" /></label>
+        <label><span>结束时间</span><input id="monitorWindowEnd" type="datetime-local" /></label>
+        <label class="full"><span>备注</span><textarea id="monitorWindowNotes" rows="2" maxlength="500"></textarea></label>
+      </div>
+      <div id="monitorWindowMessage" style="margin:8px 0;font-size:13px;"></div>
+      <div class="btn-row">
+        <button class="secondary" type="button" data-action="close-modal" data-modal="monitorWindowModal">取消</button>
+        <button class="primary" id="monitorWindowSaveBtn" type="button">保存</button>
+      </div>
+    </div>
+  </div>
+
+  <div id="monitorAlertModal" class="modal-overlay hidden">
+    <div class="modal-box" style="max-width:520px;">
+      <h3 id="monitorAlertModalTitle">处理告警</h3>
+      <div class="grid-form" style="max-height:60vh; overflow-y:auto;">
+        <input id="monitorAlertId" type="hidden" />
+        <label class="full hidden" id="monitorAlertNoteField"><span>处理说明</span><textarea id="monitorAlertNote" rows="3" maxlength="500"></textarea></label>
+        <label class="full hidden" id="monitorAlertSilenceField"><span>静默时长</span>
+          <select id="monitorAlertSilenceMinutes">
+            <option value="30">30 分钟</option>
+            <option value="60" selected>1 小时</option>
+            <option value="240">4 小时</option>
+            <option value="1440">1 天</option>
+            <option value="10080">7 天</option>
+          </select>
+        </label>
+      </div>
+      <div id="monitorAlertMessage" style="margin:8px 0;font-size:13px;"></div>
+      <div class="btn-row">
+        <button class="secondary" type="button" data-action="close-modal" data-modal="monitorAlertModal">取消</button>
+        <button class="primary" id="monitorAlertSaveBtn" type="button">确认</button>
+      </div>
+    </div>
+  </div>
+
+  <div id="notificationChannelModal" class="modal-overlay hidden">
+    <div class="modal-box" style="max-width:640px;">
+      <h3 id="notificationChannelModalTitle">新建通知通道</h3>
+      <div class="grid-form" style="max-height:66vh; overflow-y:auto;">
+        <input id="notificationChannelId" type="hidden" />
+        <label><span>通道名称</span><input id="notificationChannelName" maxlength="60" placeholder="例：运维值班群" /></label>
+        <label><span>通道类型</span>
+          <select id="notificationChannelType">
+            <option value="webhook">Webhook</option>
+            <option value="email">邮件（SMTP）</option>
+          </select>
+        </label>
+        <label><span>关联项目（留空表示全部项目）</span><select id="notificationChannelProject"></select></label>
+        <label class="full"><span>订阅事件</span><div id="notificationChannelEvents" style="display:flex;flex-wrap:wrap;gap:12px;margin-top:6px;"></div></label>
+        <div class="full" id="notificationChannelWebhookFields">
+          <div class="grid-form">
+            <label class="full"><span>Webhook 地址</span><input id="notificationChannelWebhookUrl" maxlength="2048" placeholder="https://qyapi.weixin.qq.com/cgi-bin/webhook/send?key=..." /></label>
+            <label class="full"><span>签名密钥（可选，用于 X-Onsite-Signature）</span><input id="notificationChannelWebhookSecret" type="password" autocomplete="new-password" placeholder="留空表示不签名；不修改请保持空白" /></label>
+          </div>
+        </div>
+        <div class="full hidden" id="notificationChannelEmailFields">
+          <div class="grid-form">
+            <label><span>SMTP 服务器</span><input id="notificationChannelSmtpHost" maxlength="255" /></label>
+            <label><span>端口</span><input id="notificationChannelSmtpPort" type="number" min="1" max="65535" placeholder="465 / 587" /></label>
+            <label><span>加密方式</span>
+              <select id="notificationChannelSmtpSecure">
+                <option value="false">STARTTLS / 明文</option>
+                <option value="true">SSL/TLS</option>
+              </select>
+            </label>
+            <label><span>SMTP 账号</span><input id="notificationChannelSmtpUser" maxlength="255" autocomplete="off" /></label>
+            <label><span>SMTP 密码</span><input id="notificationChannelSmtpPassword" type="password" autocomplete="new-password" placeholder="不修改请保持空白" /></label>
+            <label><span>发件人</span><input id="notificationChannelFrom" maxlength="255" placeholder="ops@example.com" /></label>
+            <label class="full"><span>收件人（逗号或换行分隔）</span><textarea id="notificationChannelTo" rows="2" placeholder="ops@example.com, manager@example.com"></textarea></label>
+          </div>
+        </div>
+        <label class="full" style="flex-direction:row;align-items:center;gap:8px;">
+          <input id="notificationChannelEnabled" type="checkbox" checked style="width:auto;" />
+          <span>启用该通道</span>
+        </label>
+      </div>
+      <div id="notificationChannelModalMessage" style="margin:8px 0;font-size:13px;"></div>
+      <div class="btn-row">
+        <button class="secondary" type="button" data-action="close-modal" data-modal="notificationChannelModal">取消</button>
+        <button class="primary" id="notificationChannelSaveBtn" type="button">保存</button>
+      </div>
+    </div>
+  </div>
+
   <div id="unconfiguredModal" class="modal-overlay hidden">
     <div class="modal-box">
       <h3 id="unconfiguredTitle">功能未配置</h3>
@@ -2098,6 +2247,10 @@
       <div style="display:flex;gap:8px;margin-top:8px;">
         <button id="twoFactorBtn" class="logout" style="flex:1;margin-top:0;">账号安全</button>
       </div>
+      <div id="pwaBar" style="display:flex;gap:8px;margin-top:8px;align-items:center;">
+        <span id="networkStatus" class="muted" style="font-size:12px;">在线</span>
+        <button id="pwaInstallBtn" class="logout hidden" type="button" style="flex:1;margin-top:0;">安装到桌面</button>
+      </div>
       <div class="sidebar-footer">
         <div class="sidebar-version">软件版本：<span id="sidebarCurrentVersion">-</span></div>
         <div>© 2026 Onsite-Ops-System. All rights reserved.</div>
@@ -2293,6 +2446,11 @@
                 <span>关联项目 <em style="color:#dc2626;font-style:normal;">*</em></span>
                 <select name="projectId" id="userProjectId" required></select>
               </label>
+              <label class="full">
+                <span>兼任项目（可多选）</span>
+                <select name="projectIds" id="userProjectIds" multiple size="4" style="min-height:96px;"></select>
+                <span class="muted" style="font-size:12px;">主项目用于默认归属，兼任项目同样参与工单、资产、巡检等权限判断。</span>
+              </label>
               <label><span>开始日期 <em style="color:#dc2626;font-style:normal;">*</em></span><input name="startDate" type="date" required /></label>
               <label><span>结束日期 <em style="color:#dc2626;font-style:normal;">*</em></span><input name="endDate" type="date" required /></label>
               <div class="toolbar full" style="justify-content: flex-end;">
@@ -2364,8 +2522,21 @@
               <label class="full"><span>结论</span><textarea name="conclusion" required placeholder="请输入结论"></textarea></label>
               <label><span>工单用时（小时）</span><input name="durationHours" type="number" min="0" step="0.5" required /></label>
               <label class="full"><span>备注</span><textarea name="remark" placeholder="请输入备注信息"></textarea></label>
+              <label class="full">
+                <span>现场取证（可选）</span>
+                <input id="logAttachmentInput" type="file" accept="image/*" capture="environment" multiple />
+                <span class="muted" style="font-size:12px;">最多 6 张，自动压缩并叠加拍摄时间与地点水印</span>
+                <label style="display:flex;align-items:center;gap:6px;font-size:12px;margin-top:6px;">
+                  <input id="logAttachmentGeo" type="checkbox" checked style="width:auto;" /> 记录拍摄地点（需浏览器授权定位）
+                </label>
+                <div id="logAttachmentPreview" style="display:flex;gap:8px;flex-wrap:wrap;margin-top:8px;"></div>
+              </label>
               <button class="primary full" type="submit">保存日志</button>
             </form>
+              <div class="muted" style="font-size:12px;margin-top:6px;display:flex;gap:8px;align-items:center;">
+                <span id="logDraftHint">草稿会自动保存在本机</span>
+                <button class="secondary" type="button" data-action="clear-draft" data-draft="log" style="padding:2px 8px;font-size:12px;">清除草稿</button>
+              </div>
               <div id="logMessage"></div>
           </div>
         </div>
@@ -2460,6 +2631,8 @@
           <button data-subtab="list" type="button">资产列表</button>
           <button data-subtab="topology" type="button">资产拓扑图</button>
           <button data-subtab="cabinetLayout" type="button">资产布局图</button>
+          <button data-subtab="lifecycle" type="button">借还与盘点</button>
+          <button data-subtab="monitor" type="button">监控告警</button>
         </div>
         <div class="subtab-panel" data-section="assets" data-subtab="form">
           <div class="card">
@@ -2495,7 +2668,15 @@
                <label><span>机柜名称</span><input name="cabinetName" placeholder="例：03号机柜" /></label>
                <label><span>起始U位</span><input name="rackUnitStart" type="number" min="1" max="48" placeholder="1-48" /></label>
                <label><span>占用U数</span><input name="rackUnitSize" type="number" min="1" max="48" placeholder="默认 1" /></label>
-               <label><span>状态</span><input name="status" placeholder="使用中/停用/维护中" /></label>
+                <label><span>状态</span>
+                  <select name="status">
+                    <option value="使用中">使用中</option>
+                    <option value="闲置">闲置</option>
+                    <option value="维修中">维修中</option>
+                    <option value="借出">借出</option>
+                    <option value="待报废">待报废</option>
+                  </select>
+                </label>
                <label><span>责任人/部门</span><input name="owner" /></label>
                 <label class="full"><span>备注</span><textarea name="notes"></textarea></label>
                 <label class="full" style="border-top:1px solid #e5e7eb;padding-top:12px;margin-top:4px;font-weight:600;color:#374151;font-size:13px;">设备监控设置</label>
@@ -2560,6 +2741,7 @@
                 <span id="assetPageInfo">第 1 / 1 页</span>
                 <button class="secondary" id="assetNextBtn" type="button">下一页</button>
                 <button class="secondary" id="assetExportBtn" type="button">导出Excel</button>
+                <button class="secondary" id="assetBatchLabelBtn" type="button">批量打印标签</button>
                 <button class="secondary" id="assetBatchDeleteBtn" type="button" style="background:#fee2e2;color:#dc2626;border-color:#fecaca;">批量删除</button>
                  <a id="assetExportLink" style="display:none;"></a>
               </div>
@@ -2633,6 +2815,106 @@
             </div>
           </div>
         </div>
+        <div class="subtab-panel hidden" data-section="assets" data-subtab="lifecycle">
+          <div class="card">
+            <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:12px;flex-wrap:wrap;gap:8px;">
+              <div>
+                <h3 style="margin:0;">借出记录</h3>
+                <p style="margin:6px 0 0;font-size:12px;color:#6b7280;">借出与归还记录，可在资产列表发起借出或归还</p>
+              </div>
+              <button class="secondary" id="assetCheckoutRefreshBtn" type="button" style="font-size:13px;padding:6px 12px;">刷新</button>
+            </div>
+            <div class="table-wrap">
+              <table>
+                <thead><tr><th>资产名称</th><th>借用人</th><th>借用用途</th><th>借出时间</th><th>预计归还</th><th>归还时间</th><th>状态</th><th>操作</th></tr></thead>
+                <tbody id="assetCheckoutTable"></tbody>
+              </table>
+              <div id="assetCheckoutEmpty" class="hidden" style="padding:24px;text-align:center;color:#9ca3af;">暂无借出记录</div>
+            </div>
+          </div>
+          <div class="card" style="margin-top:16px;">
+            <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:12px;flex-wrap:wrap;gap:8px;">
+              <div>
+                <h3 style="margin:0;">盘点任务</h3>
+                <p style="margin:6px 0 0;font-size:12px;color:#6b7280;">按项目冻结资产快照，逐项登记状态与位置差异</p>
+              </div>
+              <div style="display:flex;gap:8px;align-items:center;">
+                <select id="assetInventoryProject" style="font-size:13px;padding:6px 8px;border:1px solid var(--line);border-radius:8px;max-width:220px;"></select>
+                <button class="primary" id="assetInventoryCreateBtn" type="button" style="font-size:13px;padding:6px 12px;">新建盘点</button>
+              </div>
+            </div>
+            <div class="table-wrap">
+              <table>
+                <thead><tr><th>任务名称</th><th>关联项目</th><th>资产数</th><th>状态</th><th>创建人</th><th>创建时间</th><th>差异</th><th>操作</th></tr></thead>
+                <tbody id="assetInventoryTable"></tbody>
+              </table>
+              <div id="assetInventoryEmpty" class="hidden" style="padding:24px;text-align:center;color:#9ca3af;">暂无盘点任务</div>
+            </div>
+          </div>
+        </div>
+        <div class="subtab-panel hidden" data-section="assets" data-subtab="monitor">
+          <div class="card">
+            <div style="display:flex;justify-content:space-between;align-items:center;gap:8px;flex-wrap:wrap;margin-bottom:12px;">
+              <div>
+                <h3 style="margin:0;">监控趋势</h3>
+                <p style="margin:6px 0 0;font-size:12px;color:#6b7280;">按采样间隔留存 30 天指标，连续 N 次超阈值才触发告警</p>
+              </div>
+              <div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap;">
+                <select id="monitorTrendAsset" style="font-size:13px;padding:6px 8px;border:1px solid var(--line);border-radius:8px;max-width:240px;"></select>
+                <select id="monitorTrendRange" style="font-size:13px;padding:6px 8px;border:1px solid var(--line);border-radius:8px;">
+                  <option value="1h">最近 1 小时</option>
+                  <option value="24h" selected>最近 24 小时</option>
+                  <option value="7d">最近 7 天</option>
+                  <option value="30d">最近 30 天</option>
+                </select>
+                <button class="secondary hidden" id="monitorRunBtn" type="button" style="font-size:13px;padding:6px 12px;">立即采集</button>
+                <button class="secondary" id="monitorTrendRefreshBtn" type="button" style="font-size:13px;padding:6px 12px;">刷新</button>
+              </div>
+            </div>
+            <div id="monitorTrendSummary" class="muted" style="margin-bottom:8px;">请选择已启用监控的资产</div>
+            <div id="monitorTrendChart" style="min-height:280px;"></div>
+          </div>
+          <div class="card" style="margin-top:16px;">
+            <div style="display:flex;justify-content:space-between;align-items:center;gap:8px;flex-wrap:wrap;margin-bottom:12px;">
+              <div>
+                <h3 style="margin:0;">告警处置</h3>
+                <p style="margin:6px 0 0;font-size:12px;color:#6b7280;">支持确认、恢复与临时静默；静默期满后自动恢复播报</p>
+              </div>
+              <div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap;">
+                <select id="monitorAlertStatusFilter" style="font-size:13px;padding:6px 8px;border:1px solid var(--line);border-radius:8px;">
+                  <option value="open">未恢复</option>
+                  <option value="">全部</option>
+                  <option value="acknowledged">已确认</option>
+                  <option value="resolved">已恢复</option>
+                </select>
+                <button class="secondary" id="monitorAlertRefreshBtn" type="button" style="font-size:13px;padding:6px 12px;">刷新</button>
+              </div>
+            </div>
+            <div class="table-wrap">
+              <table>
+                <thead><tr><th>告警</th><th>资产</th><th>指标</th><th>级别</th><th>状态</th><th>触发次数</th><th>最近触发</th><th>静默至</th><th>操作</th></tr></thead>
+                <tbody id="monitorAlertTable"></tbody>
+              </table>
+              <div id="monitorAlertEmpty" class="hidden" style="padding:24px;text-align:center;color:#9ca3af;">暂无告警</div>
+            </div>
+          </div>
+          <div class="card" style="margin-top:16px;">
+            <div style="display:flex;justify-content:space-between;align-items:center;gap:8px;flex-wrap:wrap;margin-bottom:12px;">
+              <div>
+                <h3 style="margin:0;">维护窗口</h3>
+                <p style="margin:6px 0 0;font-size:12px;color:#6b7280;">窗口内的告警只记录不推送，可按项目或指定资产生效</p>
+              </div>
+              <button class="primary" id="monitorWindowCreateBtn" type="button" style="font-size:13px;padding:6px 12px;">新建维护窗口</button>
+            </div>
+            <div class="table-wrap">
+              <table>
+                <thead><tr><th>名称</th><th>关联项目</th><th>覆盖资产</th><th>开始</th><th>结束</th><th>状态</th><th>操作</th></tr></thead>
+                <tbody id="monitorWindowTable"></tbody>
+              </table>
+              <div id="monitorWindowEmpty" class="hidden" style="padding:24px;text-align:center;color:#9ca3af;">暂无维护窗口</div>
+            </div>
+          </div>
+        </div>
       </section>
 
       <section class="tab-panel hidden" data-tab="tickets">
@@ -2700,6 +2982,10 @@
               <label class="full"><span>问题描述</span><textarea name="description" rows="5" maxlength="4000"></textarea></label>
               <button class="primary full" id="ticketSubmitBtn" type="submit">提交工单</button>
             </form>
+            <div class="muted" style="font-size:12px;margin-top:6px;display:flex;gap:8px;align-items:center;">
+              <span id="ticketDraftHint">草稿会自动保存在本机</span>
+              <button class="secondary" type="button" data-action="clear-draft" data-draft="ticket" style="padding:2px 8px;font-size:12px;">清除草稿</button>
+            </div>
             <div id="ticketMessage"></div>
           </div>
         </div>
@@ -2798,6 +3084,10 @@
                 <label><span>下次巡检日</span><input name="nextDate" type="date" /></label>
                 <button class="primary full" type="submit">提交巡检记录</button>
               </form>
+              <div class="muted" style="font-size:12px;margin-top:6px;display:flex;gap:8px;align-items:center;">
+                <span id="inspectionDraftHint">草稿会自动保存在本机</span>
+                <button class="secondary" type="button" data-action="clear-draft" data-draft="inspection" style="padding:2px 8px;font-size:12px;">清除草稿</button>
+              </div>
               <div id="inspectionExecutionMessage"></div>
             </div>
             <div class="card" style="margin-top: 16px;">
@@ -3646,6 +3936,40 @@
             <div id="workReportReminderMessage"></div>
           </div>
           <div class="card" style="margin-top: 16px;">
+            <h3 style="margin:0 0 8px;">监控采样与告警阈值</h3>
+            <div class="muted">采样间隔决定趋势精度；连续失败次数达到阈值后才触发离线告警；资源阈值按百分比判定。</div>
+            <div class="grid-form" style="margin-top:12px;">
+              <label>
+                <span>采样间隔（分钟）</span>
+                <input id="monitorSampleIntervalMinutes" type="number" min="1" max="60" step="1" />
+              </label>
+              <label>
+                <span>历史保留（天）</span>
+                <input id="monitorHistoryRetentionDays" type="number" min="1" max="365" step="1" />
+              </label>
+              <label>
+                <span>连续失败次数</span>
+                <input id="monitorConsecutiveFailures" type="number" min="1" max="10" step="1" />
+              </label>
+              <label>
+                <span>CPU 阈值（%）</span>
+                <input id="monitorCpuThreshold" type="number" min="1" max="100" step="1" />
+              </label>
+              <label>
+                <span>内存阈值（%）</span>
+                <input id="monitorMemoryThreshold" type="number" min="1" max="100" step="1" />
+              </label>
+              <label>
+                <span>磁盘阈值（%）</span>
+                <input id="monitorDiskThreshold" type="number" min="1" max="100" step="1" />
+              </label>
+            </div>
+            <div class="system-actions" style="margin-top: 16px;">
+              <button class="primary" id="saveMonitorThresholdsBtn" type="button">保存设置</button>
+            </div>
+            <div id="monitorThresholdMessage"></div>
+          </div>
+          <div class="card" style="margin-top: 16px;">
             <h3 style="margin:0 0 8px;">巡检 / 监控目标白名单</h3>
             <div class="muted">每行一条，支持 IP、CIDR（如 10.0.0.0/24、2001:db8::/32）与主机名（*.example.com 匹配子域）。留空表示除特殊地址外全部放行；填写后仅白名单内的目标可配置与探测。回环、链路本地、云元数据、组播、保留段与 IPv6 ULA 地址始终禁止。</div>
             <label style="margin-top:12px; display:block;">
@@ -3660,6 +3984,23 @@
               <button class="primary" id="saveMonitorAllowlistBtn" type="button">保存白名单</button>
             </div>
             <div id="monitorAllowlistMessage"></div>
+          </div>
+          <div class="card" style="margin-top: 16px;">
+            <div style="display:flex;justify-content:space-between;align-items:center;gap:8px;flex-wrap:wrap;">
+              <div>
+                <h3 style="margin:0 0 8px;">通知外发通道</h3>
+                <div class="muted">满足事件订阅时，站内通知会同步推送到 Webhook 或邮件；凭据加密保存，仅管理员可配置。</div>
+              </div>
+              <button class="primary" id="notificationChannelCreateBtn" type="button" style="font-size:13px;padding:6px 12px;">新建通道</button>
+            </div>
+            <div class="table-wrap" style="margin-top:12px;">
+              <table>
+                <thead><tr><th>名称</th><th>类型</th><th>范围</th><th>订阅事件</th><th>状态</th><th>最近发送</th><th>操作</th></tr></thead>
+                <tbody id="notificationChannelTable"></tbody>
+              </table>
+              <div id="notificationChannelEmpty" class="hidden" style="padding:24px;text-align:center;color:#9ca3af;">暂无通知通道</div>
+            </div>
+            <div id="notificationChannelMessage"></div>
           </div>
         </div>
         <div class="subtab-panel hidden" data-section="system" data-subtab="auditLog">
@@ -3829,6 +4170,11 @@
       users: [],
       assets: [],
       logs: [],
+      pendingLogAttachments: [],
+      pendingEdLogAttachments: [],
+      draftRestored: {},
+      draftTimers: {},
+      installPromptEvent: null,
       kb: [],
       documents: [],
       workReports: [],
@@ -3836,11 +4182,15 @@
       inspectionPlans: [],
       inspectionExecutions: [],
       spareParts: [],
-      changeRecords: [],
-      incidents: [],
-      tickets: [],
-      dutyShifts: [],
-      sparePartMovements: [],
+        changeRecords: [],
+        incidents: [],
+        tickets: [],
+        dutyShifts: [],
+        monitorAlerts: [],
+        monitorMaintenanceWindows: [],
+        notificationChannels: [],
+        notificationEventOptions: [],
+        sparePartMovements: [],
       approvals: [],
       listScopes: {},
       pendingRejectionId: '',
@@ -4709,7 +5059,7 @@
 
     function buildProjectReportRows(period) {
       const range = getCurrentDateRange(period);
-      const targetProjects = state.user.role === 'admin' ? state.projects : state.projects.filter(item => item.id === state.user.projectId);
+      const targetProjects = projectsInUserScope();
       return targetProjects.map(project => {
         const metrics = buildFrontEndMetrics({ projectId: project.id, rangeStart: range.rangeStart, rangeEnd: range.rangeEnd });
         return {
@@ -4729,7 +5079,7 @@
 
     function buildInspectionReportRows(period) {
       const currentPeriod = getCurrentPeriodKey(period);
-      const targetProjects = state.user.role === 'admin' ? state.projects : state.projects.filter(item => item.id === state.user.projectId);
+      const targetProjects = projectsInUserScope();
       return targetProjects.map(project => {
         const executions = state.inspectionExecutions.filter(item => item.projectId === project.id && getPeriodKey(item.executedAt, period) === currentPeriod);
         const abnormalCount = executions.filter(item => item.result === '异常').length;
@@ -5290,7 +5640,7 @@
       const user = state.user;
       if (!user || !item) return false;
       if (user.role === 'admin') return true;
-      return user.role === 'engineer' && Boolean(user.projectId) && item.projectId === user.projectId;
+      return user.role === 'engineer' && userProjectIdSet().has(item.projectId);
     }
 
     // 与后端一致：管理员或（同项目且为记录创建者）才可编辑/删除归属型记录。
@@ -5307,8 +5657,21 @@
 
     function filterByUserProject(arr) {
       if (state.user?.role === 'admin') return arr;
-      if (!state.user?.projectId) return [];
-      return arr.filter(item => item.projectId === state.user.projectId);
+      const projectIds = userProjectIdSet();
+      if (!projectIds.size) return [];
+      return arr.filter(item => projectIds.has(item.projectId));
+    }
+
+    function userProjectIdSet() {
+      const user = state.user || {};
+      const ids = Array.isArray(user.projectIds) && user.projectIds.length ? user.projectIds : [user.projectId];
+      return new Set(ids.filter(Boolean));
+    }
+
+    function projectsInUserScope() {
+      if (state.user?.role === 'admin') return state.projects;
+      const projectIds = userProjectIdSet();
+      return state.projects.filter(item => projectIds.has(item.id));
     }
 
     // 列表「只看我的 / 项目全部」视图。工程师默认只看本人，其余角色可切换到项目全量。
@@ -5431,13 +5794,282 @@
       fillLogDictionaryOptions();
     }
 
+    // 现场取证：前端压缩到长边 1600px，并把拍摄时间、地点与操作人写入水印，避免原始大图入库。
+    function loadImageElement(file) {
+      return new Promise((resolve, reject) => {
+        const url = URL.createObjectURL(file);
+        const image = new Image();
+        image.onload = () => { URL.revokeObjectURL(url); resolve(image); };
+        image.onerror = () => { URL.revokeObjectURL(url); reject(new Error('图片读取失败')); };
+        image.src = url;
+      });
+    }
+
+    function formatGeoCoordinate(latitude, longitude) {
+      if (!Number.isFinite(latitude) || !Number.isFinite(longitude)) return '';
+      return `${latitude.toFixed(6)}, ${longitude.toFixed(6)}`;
+    }
+
+    async function resolveLogAttachmentLocation(enabled) {
+      if (!enabled || !navigator.geolocation) return null;
+      return new Promise(resolve => {
+        navigator.geolocation.getCurrentPosition(
+          position => resolve({
+            latitude: position.coords.latitude,
+            longitude: position.coords.longitude,
+            address: formatGeoCoordinate(position.coords.latitude, position.coords.longitude)
+          }),
+          () => resolve(null),
+          { enableHighAccuracy: true, timeout: 8000, maximumAge: 60000 }
+        );
+      });
+    }
+
+    async function buildLogAttachment(file, location) {
+      const image = await loadImageElement(file);
+      const maxEdge = 1600;
+      const scale = Math.min(1, maxEdge / Math.max(image.width, image.height));
+      const width = Math.max(1, Math.round(image.width * scale));
+      const height = Math.max(1, Math.round(image.height * scale));
+      const canvas = document.createElement('canvas');
+      canvas.width = width;
+      canvas.height = height;
+      const context = canvas.getContext('2d');
+      context.drawImage(image, 0, 0, width, height);
+      const capturedAt = new Date().toISOString();
+      const watermarkLines = [
+        `拍摄时间：${new Date(capturedAt).toLocaleString('zh-CN', { hour12: false })}`,
+        location?.address ? `拍摄地点：${location.address}` : '拍摄地点：未授权或不可用',
+        `记录人：${state.user?.name || state.user?.username || '-'}`
+      ];
+      const fontSize = Math.max(14, Math.round(width / 46));
+      const lineHeight = Math.round(fontSize * 1.4);
+      const padding = Math.round(fontSize * 0.6);
+      const boxHeight = lineHeight * watermarkLines.length + padding * 2;
+      context.fillStyle = 'rgba(15, 23, 42, 0.62)';
+      context.fillRect(0, height - boxHeight, width, boxHeight);
+      context.fillStyle = '#f8fafc';
+      context.font = `${fontSize}px "Noto Sans SC", "PingFang SC", sans-serif`;
+      context.textBaseline = 'top';
+      watermarkLines.forEach((line, index) => {
+        context.fillText(line, padding, height - boxHeight + padding + index * lineHeight, width - padding * 2);
+      });
+      const dataUrl = canvas.toDataURL('image/jpeg', 0.82);
+      return {
+        name: file.name || `现场取证-${Date.now()}.jpg`,
+        mimeType: 'image/jpeg',
+        size: Math.round(dataUrl.length * 3 / 4),
+        dataUrl,
+        capturedAt,
+        location,
+        watermark: watermarkLines.slice(0, 2).join(' ｜ ')
+      };
+    }
+
+    function renderLogAttachmentPreview(prefix) {
+      const container = document.getElementById(prefix ? `${prefix}LogAttachmentPreview` : 'logAttachmentPreview');
+      if (!container) return;
+      const list = prefix ? state.pendingEdLogAttachments : state.pendingLogAttachments;
+      container.innerHTML = (list || []).map((item, index) => `
+        <div style="position:relative;width:96px;">
+          <img src="${esc(item.dataUrl)}" alt="${esc(item.name)}" style="width:96px;height:72px;object-fit:cover;border-radius:6px;border:1px solid #cbd5e1;" />
+          <button type="button" class="secondary" data-action="remove-log-attachment" data-prefix="${prefix}" data-index="${index}" style="position:absolute;top:-6px;right:-6px;padding:0 6px;font-size:12px;line-height:18px;border-radius:9px;background:#fee2e2;color:#b91c1c;">×</button>
+          <div class="muted" style="font-size:11px;word-break:break-all;">${esc(item.watermark || item.name)}</div>
+        </div>
+      `).join('');
+    }
+
+    async function handleLogAttachmentFiles(prefix, files) {
+      const target = prefix ? state.pendingEdLogAttachments : state.pendingLogAttachments;
+      const input = document.getElementById(prefix ? `${prefix}LogAttachmentInput` : 'logAttachmentInput');
+      const remaining = Math.max(0, 6 - target.length);
+      const selected = Array.from(files || []).filter(file => file.type.startsWith('image/')).slice(0, remaining);
+      if (!selected.length) {
+        if (input) input.value = '';
+        return;
+      }
+      const geoEnabled = !prefix && document.getElementById('logAttachmentGeo')?.checked;
+      const location = await resolveLogAttachmentLocation(geoEnabled);
+      for (const file of selected) {
+        try {
+          target.push(await buildLogAttachment(file, location));
+        } catch (error) {
+          showToast(error.message || '图片处理失败', 'error');
+        }
+      }
+      if (input) input.value = '';
+      renderLogAttachmentPreview(prefix);
+      if (!prefix) scheduleDraftSave('log');
+      if (target.length >= 6) showToast('现场取证图片最多 6 张');
+    }
+
+    // 离线草稿：按用户隔离保存在 localStorage，联网后由用户手动提交，避免自动重放造成重复单据。
+    function draftStorageKey(type) {
+      return `onsiteOpsDraft:${type}:${state.user?.id || 'anonymous'}`;
+    }
+
+    function readDraft(type) {
+      try {
+        const raw = localStorage.getItem(draftStorageKey(type));
+        return raw ? JSON.parse(raw) : null;
+      } catch (_) {
+        return null;
+      }
+    }
+
+    function writeDraft(type, data) {
+      try {
+        localStorage.setItem(draftStorageKey(type), JSON.stringify({ ...data, savedAt: new Date().toISOString() }));
+        return true;
+      } catch (_) {
+        return false;
+      }
+    }
+
+    function removeDraft(type) {
+      try { localStorage.removeItem(draftStorageKey(type)); } catch (_) {}
+      state.draftRestored[type] = false;
+    }
+
+    function formatDraftTime(value) {
+      if (!value) return '';
+      const date = new Date(value);
+      if (Number.isNaN(date.getTime())) return '';
+      return date.toLocaleString('zh-CN', { hour12: false });
+    }
+
+    function setDraftHint(id, draft) {
+      const hint = document.getElementById(id);
+      if (!hint) return;
+      hint.textContent = draft?.savedAt
+        ? `已恢复 ${formatDraftTime(draft.savedAt)} 的本地草稿`
+        : '草稿会自动保存在本机';
+    }
+
+    function collectLogDraft() {
+      const form = document.getElementById('logForm');
+      if (!form) return null;
+      return {
+        fields: Object.fromEntries(new FormData(form).entries()),
+        attachments: state.pendingLogAttachments.map(item => ({ ...item }))
+      };
+    }
+
+    function restoreLogDraft() {
+      if (state.draftRestored.log) return;
+      state.draftRestored.log = true;
+      const draft = readDraft('log');
+      if (!draft?.fields) return;
+      const form = document.getElementById('logForm');
+      for (const [key, value] of Object.entries(draft.fields || {})) {
+        if (form.elements[key] && value !== undefined) form.elements[key].value = value;
+      }
+      state.pendingLogAttachments = Array.isArray(draft.attachments) ? draft.attachments : [];
+      renderLogAttachmentPreview('');
+      setDraftHint('logDraftHint', draft);
+    }
+
+    function collectTicketDraft() {
+      const form = document.getElementById('ticketForm');
+      if (!form || form.elements.id?.value) return null;
+      return { fields: Object.fromEntries(new FormData(form).entries()) };
+    }
+
+    function restoreTicketDraft() {
+      if (state.draftRestored.ticket) return;
+      state.draftRestored.ticket = true;
+      const draft = readDraft('ticket');
+      if (!draft?.fields) return;
+      const form = document.getElementById('ticketForm');
+      if (!form || form.elements.id?.value) return;
+      for (const [key, value] of Object.entries(draft.fields || {})) {
+        if (form.elements[key] && value !== undefined) form.elements[key].value = value;
+      }
+      setDraftHint('ticketDraftHint', draft);
+    }
+
+    function collectInspectionDraft() {
+      const form = document.getElementById('inspectionExecutionForm');
+      if (!form || form.elements.id?.value) return null;
+      return {
+        fields: Object.fromEntries(new FormData(form).entries()),
+        checklistItems: readInspectionChecklistItems()
+      };
+    }
+
+    function restoreInspectionDraft() {
+      if (state.draftRestored.inspection) return;
+      state.draftRestored.inspection = true;
+      const draft = readDraft('inspection');
+      if (!draft?.fields) return;
+      const form = document.getElementById('inspectionExecutionForm');
+      if (!form || form.elements.id?.value) return;
+      for (const [key, value] of Object.entries(draft.fields || {})) {
+        if (key === 'attachmentFile') continue;
+        if (form.elements[key] && value !== undefined) form.elements[key].value = value;
+      }
+      if (Array.isArray(draft.checklistItems) && draft.checklistItems.length) {
+        renderInspectionChecklistEditor([], draft.checklistItems);
+      }
+      setDraftHint('inspectionDraftHint', draft);
+    }
+
+    function scheduleDraftSave(type) {
+      clearTimeout(state.draftTimers[type]);
+      state.draftTimers[type] = setTimeout(() => {
+        if (!state.user) return;
+        const collectors = { log: collectLogDraft, ticket: collectTicketDraft, inspection: collectInspectionDraft };
+        const data = collectors[type]?.();
+        if (!data) return;
+        if (!writeDraft(type, data) && type === 'log') {
+          // 图片草稿可能超出 localStorage 配额，降级为仅保存文字字段。
+          const fallback = { ...data, attachments: [] };
+          if (writeDraft(type, fallback)) {
+            setMessage('logDraftHint', '图片过大，草稿仅保存了文字内容', 'error');
+            return;
+          }
+        }
+        const hints = { log: 'logDraftHint', ticket: 'ticketDraftHint', inspection: 'inspectionDraftHint' };
+        const hint = document.getElementById(hints[type]);
+        if (hint) hint.textContent = '草稿已自动保存';
+      }, 600);
+    }
+
+    function bindDraftPersistence() {
+      const bindings = [
+        ['logForm', 'log'],
+        ['ticketForm', 'ticket'],
+        ['inspectionExecutionForm', 'inspection']
+      ];
+      bindings.forEach(([formId, type]) => {
+        const form = document.getElementById(formId);
+        if (!form) return;
+        ['input', 'change'].forEach(ev => form.addEventListener(ev, () => scheduleDraftSave(type)));
+        form.addEventListener('submit', () => {
+          // 提交时先取消待执行的保存任务，成功后由业务回调清理草稿。
+          clearTimeout(state.draftTimers[type]);
+        }, true);
+      });
+    }
+
+    function updateNetworkStatus(online) {
+      const label = document.getElementById('networkStatus');
+      if (!label) return;
+      label.textContent = online ? '在线' : '离线（草稿保存在本机）';
+      label.style.color = online ? '' : '#d97706';
+    }
+
     function fillUserProjectSelect() {
       const select = document.getElementById('userProjectId');
+      const multi = document.getElementById('userProjectIds');
       const currentValue = select.value;
+      const currentMulti = Array.from(multi.selectedOptions).map(option => option.value);
       select.innerHTML = '<option value="">请选择关联项目</option>' + state.projects.map(item => `<option value="${item.id}">${esc(formatProjectDisplay(item))}</option>`).join('');
+      multi.innerHTML = state.projects.map(item => `<option value="${item.id}">${esc(formatProjectDisplay(item))}</option>`).join('');
       if (currentValue && state.projects.some(item => item.id === currentValue)) {
         select.value = currentValue;
       }
+      for (const option of multi.options) option.selected = currentMulti.includes(option.value);
     }
 
     function syncUserProjectPeriod(projectId) {
@@ -6254,7 +6886,7 @@
       const select = document.getElementById('logFilterProject');
       if (!select) return;
       const currentValue = select.value;
-      const list = state.user.role === 'admin' ? state.projects : state.projects.filter(item => item.id === state.user.projectId);
+      const list = projectsInUserScope();
       select.innerHTML = '<option value="">全部项目</option>' + list.map(item => `<option value="${item.id}">${esc(formatProjectDisplay(item))}</option>`).join('');
       if (currentValue && list.some(item => item.id === currentValue)) select.value = currentValue;
     }
@@ -6274,7 +6906,7 @@
       const select = document.getElementById('kbFilterProject');
       if (!select) return;
       const currentValue = select.value;
-      const list = state.user.role === 'admin' ? state.projects : state.projects.filter(item => item.id === state.user.projectId);
+      const list = projectsInUserScope();
       select.innerHTML = '<option value="">全部项目</option>' + list.map(item => `<option value="${item.id}">${esc(formatProjectDisplay(item))}</option>`).join('');
       if (currentValue && list.some(item => item.id === currentValue)) select.value = currentValue;
     }
@@ -6383,6 +7015,7 @@
       document.querySelector('.section-tabs[data-section="documents"] button[data-subtab="form"]')?.classList.toggle('hidden', !canEditData());
       document.querySelector('.section-tabs[data-section="assets"] button[data-subtab="form"]')?.classList.toggle('hidden', !canEditData());
       document.getElementById('assetBatchDeleteBtn')?.classList.toggle('hidden', !canEditData());
+      document.getElementById('monitorRunBtn')?.classList.toggle('hidden', state.user.role !== 'admin');
       document.getElementById('configBackupPlanForm')?.closest('.card')?.classList.toggle('hidden', !canEditData());
       document.getElementById('topoSaveLayoutBtn')?.classList.toggle('hidden', !canEditData());
       document.getElementById('topoResetLayoutBtn')?.classList.toggle('hidden', !canEditData());
@@ -6435,6 +7068,13 @@
       if (section === 'assets' && subtab === 'cabinetLayout') {
         startCabinetMonitorPoll();
         loadCabinetLayout();
+      }
+      if (section === 'assets' && subtab === 'lifecycle') {
+        renderAssetCheckouts();
+        renderAssetInventory();
+      }
+      if (section === 'assets' && subtab === 'monitor') {
+        renderMonitorPanel();
       }
       if (section === 'system' && subtab === 'auditLog') {
         renderSystemAuditLogs();
@@ -6517,7 +7157,9 @@
     function renderUsers() {
       const pageSize = 10;
       const filterProjectId = state.userProjectFilter || '';
-      const filteredUsers = (filterProjectId ? state.users.filter(item => item.projectId === filterProjectId) : state.users.slice());
+      const filteredUsers = (filterProjectId
+        ? state.users.filter(item => item.projectId === filterProjectId || (item.projectIds || []).includes(filterProjectId))
+        : state.users.slice());
       if (state.userProjectSort) {
         filteredUsers.sort((a, b) => {
           const pa = (a.projectId || '').toLowerCase();
@@ -6564,7 +7206,7 @@
           <td>${esc(item.username)}</td>
           <td>${esc(roleLabel(item.role))}</td>
           <td>${twoFactorTag}</td>
-          <td>${esc(formatProjectDisplayById(item.projectId))}</td>
+          <td>${esc(formatProjectDisplayById(item.projectId))}${(item.projectIds || []).filter(id => id !== item.projectId).length ? `<div class="muted" style="font-size:12px;">兼任 ${item.projectIds.filter(id => id !== item.projectId).map(id => esc(formatProjectDisplayById(id))).join('、')}</div>` : ''}</td>
           <td>${esc(item.startDate || '-')} ~ ${esc(item.endDate || '-')}</td>
           <td><div class="toolbar"><button class="secondary" data-action="view-user-detail" data-id="${item.id}" type="button">${expanded ? '收起' : '详情'}</button>${adminActions}</div></td>
         </tr>
@@ -7854,6 +8496,8 @@
         const checked = (state.selectedAssetIds || []).includes(item.id) ? ' checked' : '';
         const assetEditBtn = canEditProjectRecord(item) ? `<button class="secondary" data-action="edit-asset" data-id="${item.id}" type="button">修改</button>` : '';
         const assetDeleteBtn = canMutateOwnedRecord(item, 'createdBy') ? `<button class="secondary" data-action="delete-asset" data-id="${item.id}" type="button" style="background:#fee2e2;color:#dc2626;border-color:#fecaca;">删除</button>` : '';
+        const assetLifecycleBtn = `<button class="secondary" data-action="asset-lifecycle" data-id="${item.id}" type="button">履历</button>`;
+        const assetLabelBtn = `<button class="secondary" data-action="asset-label" data-id="${item.id}" type="button">标签</button>`;
         return `
         <tr>
           <td style="text-align:center;"><input type="checkbox" class="asset-checkbox" data-id="${item.id}"${checked} /></td>
@@ -7870,7 +8514,7 @@
           <td>${esc(item.status === '运行中' ? '使用中' : (item.status || '-'))}</td>
           <td>${esc(item.owner || '-')}</td>
           <td title="${esc(item.notes || '')}">${esc(item.notes || '')}</td>
-          <td><div class="toolbar" style="white-space:nowrap;">${assetEditBtn}<button class="secondary" data-action="detail-asset" data-id="${item.id}" type="button">详情</button>${assetDeleteBtn}</div></td>
+          <td><div class="toolbar" style="white-space:nowrap;">${assetEditBtn}<button class="secondary" data-action="detail-asset" data-id="${item.id}" type="button">详情</button>${assetLifecycleBtn}${assetLabelBtn}${assetDeleteBtn}</div></td>
         </tr>
         `;
       }).join('') || '<tr><td colspan="15">暂无数据</td></tr>';
@@ -7910,7 +8554,7 @@
                <td><div class="toolbar"><button class="secondary" data-action="view-log-detail" data-id="${item.id}" type="button">${expanded ? '收起' : '详情'}</button>${logMutate ? `<button class="secondary" data-action="edit-log" data-id="${item.id}" type="button">修改</button><button class="secondary" data-action="delete-log" data-id="${item.id}" type="button" style="background:#fee2e2;color:#dc2626;border-color:#fecaca;">删除</button>` : ''}</div></td>
 
             </tr>
-            ${expanded ? `<tr><td colspan="7"><div class="card" style="margin: 8px 0;"><div class="muted" style="margin-bottom: 8px;">工单详情</div><div class="grid-form" style="grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));"><div><div class="muted">派单时间</div><div>${esc(item.date || '-')}</div></div><div><div class="muted">派单部门</div><div>${esc(item.dispatchDepartment || '-')}</div></div><div><div class="muted">派单人</div><div>${esc(item.dispatcher || '-')}</div></div><div><div class="muted">工单类型</div><div>${esc(item.ticketType || '-')}</div></div><div><div class="muted">接单人</div><div>${esc(item.assignee || '-')}</div></div><div><div class="muted">关联项目</div><div>${esc(formatProjectDisplayById(item.projectId))}</div></div><div><div class="muted">关联资产</div><div>${esc(formatAssetName(item.assetId))}</div></div><div><div class="muted">工单位置</div><div>${esc(item.relatedTarget || '-')}</div></div><div><div class="muted">处理结果</div><div>${esc(item.result || '-')}</div></div><div><div class="muted">工单用时（小时）</div><div>${esc(item.durationHours)}</div></div></div><div class="muted" style="margin: 12px 0 8px;">工单内容</div><div style="white-space:pre-wrap;">${esc(item.event || '-')}</div><div class="muted" style="margin: 12px 0 8px;">处理过程</div><div style="white-space:pre-wrap;">${esc(item.process || '暂无处理过程')}</div><div class="muted" style="margin: 12px 0 8px;">结论</div><div style="white-space:pre-wrap;">${esc(item.conclusion || '-')}</div><div class="muted" style="margin: 12px 0 8px;">备注</div><div style="white-space:pre-wrap;">${esc(item.remark || '-')}</div></div></td></tr>` : ''}`;
+            ${expanded ? `<tr><td colspan="7"><div class="card" style="margin: 8px 0;"><div class="muted" style="margin-bottom: 8px;">工单详情</div><div class="grid-form" style="grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));"><div><div class="muted">派单时间</div><div>${esc(item.date || '-')}</div></div><div><div class="muted">派单部门</div><div>${esc(item.dispatchDepartment || '-')}</div></div><div><div class="muted">派单人</div><div>${esc(item.dispatcher || '-')}</div></div><div><div class="muted">工单类型</div><div>${esc(item.ticketType || '-')}</div></div><div><div class="muted">接单人</div><div>${esc(item.assignee || '-')}</div></div><div><div class="muted">关联项目</div><div>${esc(formatProjectDisplayById(item.projectId))}</div></div><div><div class="muted">关联资产</div><div>${esc(formatAssetName(item.assetId))}</div></div><div><div class="muted">工单位置</div><div>${esc(item.relatedTarget || '-')}</div></div><div><div class="muted">处理结果</div><div>${esc(item.result || '-')}</div></div><div><div class="muted">工单用时（小时）</div><div>${esc(item.durationHours)}</div></div></div><div class="muted" style="margin: 12px 0 8px;">工单内容</div><div style="white-space:pre-wrap;">${esc(item.event || '-')}</div><div class="muted" style="margin: 12px 0 8px;">处理过程</div><div style="white-space:pre-wrap;">${esc(item.process || '暂无处理过程')}</div><div class="muted" style="margin: 12px 0 8px;">结论</div><div style="white-space:pre-wrap;">${esc(item.conclusion || '-')}</div><div class="muted" style="margin: 12px 0 8px;">备注</div><div style="white-space:pre-wrap;">${esc(item.remark || '-')}</div>${(item.attachments || []).length ? `<div class="muted" style="margin: 12px 0 8px;">现场取证（${item.attachments.length}）</div><div style="display:flex;gap:10px;flex-wrap:wrap;">${item.attachments.map(attachment => `<a href="${esc(attachment.dataUrl)}" download="${esc(attachment.name)}" title="${esc(attachment.watermark || attachment.name)}"><img src="${esc(attachment.dataUrl)}" alt="${esc(attachment.name)}" style="width:150px;height:110px;object-fit:cover;border-radius:6px;border:1px solid #cbd5e1;" /></a>`).join('')}</div>` : ''}</div></td></tr>` : ''}`;
         }).join('') || '<tr><td colspan="7">暂无数据</td></tr>';
       document.getElementById('logPageInfo').textContent = `第 ${state.logPage} / ${totalPages} 页`;
       document.getElementById('logPrevBtn').disabled = state.logPage <= 1;
@@ -8834,6 +9478,18 @@
       if (dailyHighHoursThresholdInput) dailyHighHoursThresholdInput.value = String(Number(state.systemConfig?.dailyHighHoursThreshold ?? 12));
       if (noLogStreakDaysInput) noLogStreakDaysInput.value = String(Number(state.systemConfig?.noLogStreakDays ?? 3));
       if (projectInactiveDaysInput) projectInactiveDaysInput.value = String(Number(state.systemConfig?.projectInactiveDays ?? 7));
+      const monitorSampleInput = document.getElementById('monitorSampleIntervalMinutes');
+      if (monitorSampleInput) monitorSampleInput.value = String(Number(state.systemConfig?.monitorSampleIntervalMinutes ?? 5));
+      const monitorRetentionInput = document.getElementById('monitorHistoryRetentionDays');
+      if (monitorRetentionInput) monitorRetentionInput.value = String(Number(state.systemConfig?.monitorHistoryRetentionDays ?? 30));
+      const monitorFailuresInput = document.getElementById('monitorConsecutiveFailures');
+      if (monitorFailuresInput) monitorFailuresInput.value = String(Number(state.systemConfig?.monitorConsecutiveFailures ?? 3));
+      const monitorCpuInput = document.getElementById('monitorCpuThreshold');
+      if (monitorCpuInput) monitorCpuInput.value = String(Number(state.systemConfig?.monitorCpuThreshold ?? 90));
+      const monitorMemoryInput = document.getElementById('monitorMemoryThreshold');
+      if (monitorMemoryInput) monitorMemoryInput.value = String(Number(state.systemConfig?.monitorMemoryThreshold ?? 90));
+      const monitorDiskInput = document.getElementById('monitorDiskThreshold');
+      if (monitorDiskInput) monitorDiskInput.value = String(Number(state.systemConfig?.monitorDiskThreshold ?? 90));
       const monitorTargetAllowlistInput = document.getElementById('monitorTargetAllowlist');
       if (monitorTargetAllowlistInput) monitorTargetAllowlistInput.value = String(state.systemConfig?.monitorTargetAllowlist || '');
       const ssoAllowlistInput = document.getElementById('ssoAutoApproveAllowlist');
@@ -9096,6 +9752,8 @@
       fillLogDispatcherOptions(form.elements.projectId.value);
       if (form.elements.result) form.elements.result.value = '已完成';
       applyLogProcessTemplate('', { force: false });
+      state.pendingLogAttachments = [];
+      renderLogAttachmentPreview('');
     }
 
     function exportSelectedLogs() {
@@ -9177,6 +9835,8 @@
       document.getElementById('edLogDispatcher').value = log.dispatcher || '';
       document.getElementById('edLogAssignee').value = log.assignee || '';
       applyLogProcessTemplate('ed', { force: false });
+      state.pendingEdLogAttachments = (log.attachments || []).map(item => ({ ...item }));
+      renderLogAttachmentPreview('ed');
       document.getElementById('logEditMessage').textContent = '';
       document.getElementById('logEditMessage').className = 'message';
       openModal('logEditModal');
@@ -9261,6 +9921,7 @@
     function detailAsset(id) {
       const asset = state.assets.find(item => item.id === id);
       if (!asset) return;
+      document.getElementById('assetDetailTitle').textContent = '资产详情';
       const isCustomer = state.user?.role === 'customer';
       const fields = [
         ['资产名称', asset.name],
@@ -9299,7 +9960,804 @@
       });
       html += '</div>';
       document.getElementById('assetDetailBody').innerHTML = html;
+      renderAssetDetailActions(asset);
       openModal('assetDetailModal');
+    }
+
+    function renderAssetDetailActions(asset) {
+      const container = document.getElementById('assetDetailActions');
+      if (!container) return;
+      const actions = [];
+      const status = asset.status === '运行中' ? '使用中' : (asset.status || '');
+      const isTerminal = ['已报废', '已退役'].includes(status);
+      const canManage = canEditProjectRecord(asset) && !isTerminal;
+      if (canManage && status !== '借出') {
+        actions.push('<button class="secondary" data-action="asset-checkout" type="button">借出</button>');
+      }
+      if (canManage && status === '借出') {
+        actions.push('<button class="secondary" data-action="asset-return" type="button">归还</button>');
+      }
+      if (canManage && state.user?.role === 'admin') {
+        actions.push('<button class="secondary" data-action="asset-transfer" type="button">调拨</button>');
+        actions.push('<button class="secondary" data-action="asset-retire" type="button">退役</button>');
+        actions.push('<button class="secondary" data-action="asset-scrap" type="button" style="background:#fee2e2;color:#dc2626;border-color:#fecaca;">报废</button>');
+      }
+      actions.push('<button class="secondary" data-action="asset-lifecycle" type="button">查看履历</button>');
+      container.innerHTML = actions.join('');
+      container.dataset.assetId = asset.id;
+    }
+
+    async function showAssetLifecycle(id) {
+      const asset = state.assets.find(item => item.id === id);
+      if (!asset) return;
+      const result = await api(`/api/asset-lifecycles?assetId=${encodeURIComponent(id)}&pageSize=100`, { silent: true });
+      const rows = result.data || [];
+      const actionLabels = {
+        create: '创建', update: '修改', status: '状态变更', transfer: '调拨',
+        checkout: '借出', return: '归还', retire: '退役', scrap: '报废', inventory: '盘点'
+      };
+      const meta = [
+        ['资产名称', asset.name],
+        ['序列号', asset.serialNumber],
+        ['当前状态', asset.status],
+        ...(asset.retiredAt ? [['退役时间', asset.retiredAt], ['退役原因', asset.retiredReason]] : [])
+      ];
+      let html = '<div style="display:grid;grid-template-columns:90px 1fr;gap:6px 12px;font-size:13px;margin-bottom:12px;">';
+      meta.forEach(([label, value]) => {
+        html += `<div style="color:#6b7280;text-align:right;">${esc(label)}</div><div>${esc(value || '-')}</div>`;
+      });
+      html += '</div>';
+      html += '<div style="font-weight:600;font-size:13px;margin-bottom:6px;">生命周期流水</div>';
+      if (!rows.length) {
+        html += '<div class="muted" style="font-size:12px;">暂无流水记录</div>';
+      } else {
+        html += '<div style="display:flex;flex-direction:column;gap:6px;">';
+        rows.forEach(item => {
+          const label = actionLabels[item.action] || item.action;
+          html += `<div style="border-left:3px solid #3b82f6;padding:6px 10px;background:#f8fafc;border-radius:4px;font-size:12px;">
+            <div style="display:flex;justify-content:space-between;gap:8px;"><b>${esc(label)}</b><span class="muted">${esc(item.createdAt || '')}</span></div>
+            <div style="margin-top:2px;">${esc(item.detail || '-')}</div>
+            <div class="muted" style="margin-top:2px;">操作人：${esc(item.operatorName || '-')}</div>
+          </div>`;
+        });
+        html += '</div>';
+      }
+      document.getElementById('assetDetailTitle').textContent = '资产履历';
+      document.getElementById('assetDetailBody').innerHTML = html;
+      openModal('assetDetailModal');
+    }
+
+    // 二维码标签只承载资产识别信息，打印时通过独立窗口避免带出系统界面。
+    function printAssetLabels(ids) {
+      const assets = (ids || []).map(id => state.assets.find(item => item.id === id)).filter(Boolean);
+      if (!assets.length) return;
+      const cards = assets.map(asset => {
+        const qr = qrcode(0, 'M');
+        qr.addData(JSON.stringify({ t: 'asset', id: asset.id, sn: asset.serialNumber || '', name: asset.name || '' }));
+        qr.make();
+        const projectName = formatProjectDisplayById(asset.projectId);
+        return `<div class="label">
+          <div class="qr">${qr.createImgTag(3, 4)}</div>
+          <div class="meta">
+            <div class="name">${esc(asset.name || '-')}</div>
+            <div>${esc(asset.type || '')} ${esc(asset.brand || '')}</div>
+            <div>型号：${esc(asset.model || '-')}</div>
+            <div>SN：${esc(asset.serialNumber || '-')}</div>
+            <div>项目：${esc(projectName)}</div>
+          </div>
+        </div>`;
+      }).join('');
+      const win = window.open('', '_blank');
+      if (!win) return;
+      win.document.write(`<!DOCTYPE html><html><head><meta charset="utf-8" /><title>资产二维码标签</title>
+        <style>
+          body { font-family: Arial, "Microsoft YaHei", sans-serif; margin: 12px; }
+          .label { display: flex; gap: 10px; align-items: center; border: 1px dashed #94a3b8; border-radius: 6px; padding: 8px; margin-bottom: 8px; width: 300px; page-break-inside: avoid; }
+          .qr img { display: block; width: 84px; height: 84px; }
+          .meta { font-size: 11px; line-height: 1.5; color: #0f172a; }
+          .meta .name { font-size: 13px; font-weight: 700; margin-bottom: 2px; }
+          @media print { body { margin: 0; } }
+        </style></head><body>${cards}</body></html>`);
+      win.document.close();
+      win.focus();
+      setTimeout(() => win.print(), 300);
+    }
+
+    let assetActionContext = null;
+
+    function findActiveCheckout(assetId) {
+      return (state.assetCheckouts || []).find(item => item.assetId === assetId && item.status === 'checked_out');
+    }
+
+    function openAssetAction(assetId, action) {
+      const asset = state.assets.find(item => item.id === assetId);
+      if (!asset) return;
+      const titles = {
+        checkout: '借出资产', return: '归还资产', transfer: '调拨资产',
+        retire: '退役资产', scrap: '报废资产'
+      };
+      const projectUsers = state.users.filter(item => item.role !== 'customer' && (item.projectIds || [item.projectId]).includes(asset.projectId));
+      let html = '';
+      if (action === 'checkout') {
+        const active = findActiveCheckout(asset.id);
+        if (active) { showToast('该资产已借出，请先归还'); return; }
+        html = `
+          <label>借用人
+            <select id="assetActionBorrower">
+              <option value="">请选择借用人</option>
+              ${projectUsers.map(user => `<option value="${attrEsc(user.id)}">${esc(user.name)}</option>`).join('')}
+            </select>
+          </label>
+          <label>借用用途<textarea id="assetActionPurpose" rows="2" maxlength="200"></textarea></label>
+          <label>预计归还日期<input id="assetActionDueAt" type="date" /></label>`;
+      } else if (action === 'return') {
+        const active = findActiveCheckout(asset.id);
+        if (!active) { showToast('未找到进行中的借出记录'); return; }
+        html = `<div>借用人：<b>${esc(active.borrowerName)}</b>，借出时间：${esc(active.checkoutAt || '-')}</div>
+          <label>归还状况<textarea id="assetActionCondition" rows="2" maxlength="200" placeholder="选填，如外观完好、配件齐全"></textarea></label>`;
+      } else if (action === 'transfer') {
+        html = `
+          <label>目标项目
+            <select id="assetActionProject">
+              <option value="">请选择目标项目</option>
+              ${state.projects.filter(project => project.id !== asset.projectId).map(project => `<option value="${attrEsc(project.id)}">${esc(formatProjectDisplay(project))}</option>`).join('')}
+            </select>
+          </label>
+          <label>调拨原因<input id="assetActionReason" maxlength="200" placeholder="选填" /></label>`;
+      } else {
+        html = `<div>资产：<b>${esc(asset.name)}</b>（${esc(asset.serialNumber || '-')}）</div>
+          <label>${action === 'scrap' ? '报废' : '退役'}原因<textarea id="assetActionReason" rows="3" maxlength="200" required></textarea></label>
+          <div class="muted" style="font-size:12px;">${action === 'scrap' ? '报废' : '退役'}后资产将进入终态并停止监控，该操作不可撤销。</div>`;
+      }
+      document.getElementById('assetActionTitle').textContent = titles[action] || '资产操作';
+      document.getElementById('assetActionBody').innerHTML = html;
+      document.getElementById('assetActionMessage').textContent = '';
+      document.getElementById('assetActionMessage').className = '';
+      assetActionContext = { assetId, action };
+      closeModal('assetDetailModal');
+      openModal('assetActionModal');
+    }
+
+    async function submitAssetAction() {
+      if (!assetActionContext) return;
+      const { assetId, action } = assetActionContext;
+      const msg = document.getElementById('assetActionMessage');
+      const fail = text => { msg.textContent = text; msg.className = 'message error'; };
+      try {
+        if (action === 'checkout') {
+          const borrowerId = document.getElementById('assetActionBorrower').value;
+          if (!borrowerId) return fail('请选择借用人');
+          const borrower = state.users.find(item => item.id === borrowerId);
+          await api('/api/asset-checkouts', {
+            method: 'POST',
+            body: JSON.stringify({
+              assetId,
+              borrowerId,
+              borrowerName: borrower?.name || '',
+              purpose: document.getElementById('assetActionPurpose').value,
+              dueAt: document.getElementById('assetActionDueAt').value
+            })
+          });
+        } else if (action === 'return') {
+          const active = findActiveCheckout(assetId);
+          if (!active) return fail('未找到进行中的借出记录');
+          await api(`/api/asset-checkouts/${active.id}/return`, {
+            method: 'POST',
+            body: JSON.stringify({ condition: document.getElementById('assetActionCondition').value })
+          });
+        } else if (action === 'transfer') {
+          const projectId = document.getElementById('assetActionProject').value;
+          if (!projectId) return fail('请选择目标项目');
+          await api(`/api/assets/${assetId}/transfer`, {
+            method: 'POST',
+            body: JSON.stringify({ projectId, reason: document.getElementById('assetActionReason').value })
+          });
+        } else {
+          const reason = document.getElementById('assetActionReason').value.trim();
+          if (!reason) return fail('请填写原因');
+          await api(`/api/assets/${assetId}/${action}`, {
+            method: 'POST',
+            body: JSON.stringify({ reason })
+          });
+        }
+        closeModal('assetActionModal');
+        assetActionContext = null;
+        showToast('操作成功');
+        await loadBaseData();
+      } catch (error) {
+        fail(error.message);
+      }
+    }
+
+    let activeInventoryTask = null;
+
+    function renderAssetCheckouts() {
+      const tbody = document.getElementById('assetCheckoutTable');
+      const empty = document.getElementById('assetCheckoutEmpty');
+      if (!tbody) return;
+      const rows = (state.assetCheckouts || []).slice();
+      if (!rows.length) {
+        tbody.innerHTML = '';
+        empty.classList.remove('hidden');
+        return;
+      }
+      empty.classList.add('hidden');
+      tbody.innerHTML = rows.map(item => {
+        const asset = state.assets.find(a => a.id === item.assetId);
+        const returned = item.status === 'returned';
+        const canReturn = !returned && canEditProjectRecord(item);
+        return `<tr>
+          <td>${esc(asset?.name || item.assetName || '-')}</td>
+          <td>${esc(item.borrowerName || '-')}</td>
+          <td>${esc(item.purpose || '-')}</td>
+          <td>${esc(item.checkoutAt || '-')}</td>
+          <td>${esc(item.dueAt || '-')}</td>
+          <td>${esc(item.returnedAt || '-')}</td>
+          <td>${returned ? '已归还' : '借出中'}</td>
+          <td>${canReturn ? `<button class="secondary" data-action="asset-return" data-id="${attrEsc(item.assetId)}" type="button">归还</button>` : '-'}</td>
+        </tr>`;
+      }).join('');
+    }
+
+    function renderAssetInventory() {
+      const tbody = document.getElementById('assetInventoryTable');
+      const empty = document.getElementById('assetInventoryEmpty');
+      if (!tbody) return;
+      const projectSelect = document.getElementById('assetInventoryProject');
+      if (projectSelect) {
+        const currentValue = projectSelect.value;
+        const projects = projectsInUserScope();
+        projectSelect.innerHTML = ['<option value="">请选择项目</option>'].concat(
+          projects.map(project => `<option value="${attrEsc(project.id)}">${esc(formatProjectDisplay(project))}</option>`)
+        ).join('');
+        if (currentValue && projects.some(project => project.id === currentValue)) projectSelect.value = currentValue;
+      }
+      const statusLabels = { pending: '待开始', running: '盘点中', completed: '已完成' };
+      const rows = (state.assetInventoryTasks || []).slice();
+      if (!rows.length) {
+        tbody.innerHTML = '';
+        empty.classList.remove('hidden');
+        return;
+      }
+      empty.classList.add('hidden');
+      tbody.innerHTML = rows.map(task => {
+        const diff = (task.items || []).filter(item => item.result && item.result !== 'match').length;
+        const checked = (task.items || []).filter(item => item.checkedAt).length;
+        let action = '-';
+        if (task.status !== 'completed' && canEditProjectRecord(task)) {
+          action = `<button class="secondary" data-action="asset-inventory-open" data-id="${attrEsc(task.id)}" type="button">${task.status === 'pending' ? '开始盘点' : '继续盘点'}</button>`;
+        } else if (task.status === 'completed') {
+          action = `<button class="secondary" data-action="asset-inventory-open" data-id="${attrEsc(task.id)}" type="button">查看</button>`;
+        }
+        return `<tr>
+          <td>${esc(task.name || '-')}</td>
+          <td>${esc(formatProjectDisplayById(task.projectId))}</td>
+          <td>${(task.items || []).length}（已盘 ${checked}）</td>
+          <td>${statusLabels[task.status] || task.status}</td>
+          <td>${esc(task.createdByName || '-')}</td>
+          <td>${esc(task.createdAt || '-')}</td>
+          <td>${diff}</td>
+          <td>${action}</td>
+        </tr>`;
+      }).join('');
+    }
+
+    const monitorAlertStatusMeta = {
+      open: { label: '待确认', color: '#dc2626' },
+      acknowledged: { label: '已确认', color: '#ea580c' },
+      resolved: { label: '已恢复', color: '#16a34a' }
+    };
+    const monitorMetricLabels = { availability: '可用性', cpu: 'CPU', memory: '内存', disk: '磁盘' };
+    let monitorAlertActionContext = null;
+
+    function formatMonitorTime(value) {
+      const ms = Date.parse(String(value || ''));
+      if (!Number.isFinite(ms)) return '-';
+      const minutes = Number(state.systemConfig?.timezoneOffset);
+      const offsetMinutes = Number.isFinite(minutes) ? minutes : 480;
+      return new Date(ms + offsetMinutes * 60000).toISOString().slice(0, 16).replace('T', ' ');
+    }
+
+    function toMonitorInputTime(value) {
+      const ms = Date.parse(String(value || ''));
+      if (!Number.isFinite(ms)) return '';
+      const minutes = Number(state.systemConfig?.timezoneOffset);
+      const offsetMinutes = Number.isFinite(minutes) ? minutes : 480;
+      return new Date(ms + offsetMinutes * 60000).toISOString().slice(0, 16);
+    }
+
+    function renderMonitorAlerts() {
+      const tbody = document.getElementById('monitorAlertTable');
+      const empty = document.getElementById('monitorAlertEmpty');
+      if (!tbody) return;
+      const filter = document.getElementById('monitorAlertStatusFilter')?.value ?? 'open';
+      let rows = (state.monitorAlerts || []).slice();
+      if (filter === 'open') rows = rows.filter(item => item.status !== 'resolved');
+      else if (filter) rows = rows.filter(item => item.status === filter);
+      if (!rows.length) {
+        tbody.innerHTML = '';
+        empty.classList.remove('hidden');
+        return;
+      }
+      empty.classList.add('hidden');
+      tbody.innerHTML = rows.map(item => {
+        const meta = monitorAlertStatusMeta[item.status] || { label: item.status || '-', color: '#64748b' };
+        const silenced = item.silencedUntil && Date.parse(item.silencedUntil) > Date.now();
+        const actions = [];
+        if (item.status === 'open') actions.push(`<button class="secondary" data-monitor-alert="acknowledge" data-id="${attrEsc(item.id)}" type="button">确认</button>`);
+        if (item.status !== 'resolved') {
+          actions.push(`<button class="secondary" data-monitor-alert="resolve" data-id="${attrEsc(item.id)}" type="button">恢复</button>`);
+          actions.push(`<button class="secondary" data-monitor-alert="silence" data-id="${attrEsc(item.id)}" type="button">静默</button>`);
+        }
+        return `<tr>
+          <td>${esc(item.title || '-')}<div class="muted" style="font-size:11px;">${esc(item.content || '')}</div></td>
+          <td>${esc(item.assetName || '-')}</td>
+          <td>${esc(monitorMetricLabels[item.metric] || item.metric || '-')}</td>
+          <td>${item.level === 'error' ? '严重' : '警告'}</td>
+          <td style="color:${meta.color};font-weight:600;">${esc(meta.label)}${item.suppressedReason === 'maintenance' ? '（维护窗口）' : ''}</td>
+          <td>${Number(item.occurrences || 1)}</td>
+          <td>${esc(formatMonitorTime(item.lastTriggeredAt))}</td>
+          <td>${silenced ? esc(formatMonitorTime(item.silencedUntil)) : '-'}</td>
+          <td><div class="toolbar">${actions.join('') || '-'}</div></td>
+        </tr>`;
+      }).join('');
+    }
+
+    function renderMonitorWindows() {
+      const tbody = document.getElementById('monitorWindowTable');
+      const empty = document.getElementById('monitorWindowEmpty');
+      if (!tbody) return;
+      const rows = (state.monitorMaintenanceWindows || []).slice();
+      if (!rows.length) {
+        tbody.innerHTML = '';
+        empty.classList.remove('hidden');
+        return;
+      }
+      empty.classList.add('hidden');
+      tbody.innerHTML = rows.map(item => {
+        const startMs = Date.parse(item.startAt || '');
+        const endMs = Date.parse(item.endAt || '');
+        const active = item.enabled !== false && Number.isFinite(startMs) && Number.isFinite(endMs) && startMs <= Date.now() && endMs >= Date.now();
+        const status = !item.enabled ? '已停用' : active ? '生效中' : (Number.isFinite(endMs) && endMs < Date.now() ? '已结束' : '未开始');
+        const covered = (item.assetIds || []).length ? `${item.assetIds.length} 项` : '项目全部资产';
+        const actions = canEditProjectRecord(item)
+          ? `<div class="toolbar"><button class="secondary" data-monitor-window="edit" data-id="${attrEsc(item.id)}" type="button">修改</button><button class="secondary" data-monitor-window="delete" data-id="${attrEsc(item.id)}" type="button" style="background:#fee2e2;color:#dc2626;border-color:#fecaca;">删除</button></div>`
+          : '-';
+        return `<tr>
+          <td>${esc(item.name || '-')}${item.notes ? `<div class="muted" style="font-size:11px;">${esc(item.notes)}</div>` : ''}</td>
+          <td>${esc(formatProjectDisplayById(item.projectId) || '-')}</td>
+          <td>${esc(covered)}</td>
+          <td>${esc(formatMonitorTime(item.startAt))}</td>
+          <td>${esc(formatMonitorTime(item.endAt))}</td>
+          <td style="color:${active ? '#16a34a' : '#64748b'};font-weight:600;">${status}</td>
+          <td>${actions}</td>
+        </tr>`;
+      }).join('');
+    }
+
+    function fillMonitorAssetSelect(select, projectId, selectedIds = []) {
+      if (!select) return;
+      const selected = new Set(selectedIds);
+      const assets = filterByUserProject(state.assets).filter(item => !projectId || item.projectId === projectId);
+      select.innerHTML = assets.map(item => `<option value="${attrEsc(item.id)}"${selected.has(item.id) ? ' selected' : ''}>${esc(item.name || item.serialNumber || item.id)}</option>`).join('');
+    }
+
+    function fillMonitorTrendAssets() {
+      const select = document.getElementById('monitorTrendAsset');
+      if (!select) return;
+      const current = select.value;
+      const assets = filterByUserProject(state.assets).filter(item => item.monitorEnabled);
+      select.innerHTML = ['<option value="">请选择资产</option>'].concat(
+        assets.map(item => `<option value="${attrEsc(item.id)}">${esc(item.name || item.id)}</option>`)
+      ).join('');
+      if (current && assets.some(item => item.id === current)) select.value = current;
+      else if (assets.length) select.value = assets[0].id;
+    }
+
+    function renderMonitorTrend(payload) {
+      const chart = document.getElementById('monitorTrendChart');
+      const summary = document.getElementById('monitorTrendSummary');
+      if (!chart || !summary) return;
+      if (!payload || !Array.isArray(payload.points) || !payload.sampleCount) {
+        summary.textContent = '所选区间内暂无采样数据，等待下一轮采集';
+        chart.innerHTML = '<div class="muted" style="padding:48px;text-align:center;">暂无监控数据</div>';
+        return;
+      }
+      const points = payload.points;
+      const latest = [...points].reverse().find(item => item.availability !== null || item.cpuPercent !== null) || {};
+      summary.textContent = `采样 ${payload.sampleCount} 次 · 可用性 ${payload.availability === null ? '-' : `${payload.availability}%`} · 最近 CPU ${latest.cpuPercent ?? '-'}% / 内存 ${latest.memoryPercent ?? '-'}% / 磁盘 ${latest.diskPercent ?? '-'}%`;
+      const width = 920;
+      const height = 300;
+      const left = 48;
+      const right = width - 16;
+      const top = 24;
+      const baseY = 250;
+      const chartHeight = baseY - top;
+      const slot = points.length > 1 ? (right - left) / (points.length - 1) : 0;
+      const y = value => baseY - (Math.max(0, Math.min(100, Number(value))) / 100) * chartHeight;
+      const grid = [100, 75, 50, 25, 0].map(value => {
+        const gy = y(value);
+        return `<g><line x1="${left}" y1="${gy}" x2="${right}" y2="${gy}" stroke="#e5e7eb" stroke-width="1" /><text x="${left - 8}" y="${gy + 4}" text-anchor="end" font-size="11" fill="#64748b">${value}%</text></g>`;
+      }).join('');
+      const series = [
+        { key: 'availability', color: '#16a34a', label: '可用性' },
+        { key: 'cpuPercent', color: '#2563eb', label: 'CPU' },
+        { key: 'memoryPercent', color: '#ea580c', label: '内存' },
+        { key: 'diskPercent', color: '#9333ea', label: '磁盘' }
+      ];
+      const paths = series.map(item => {
+        let path = '';
+        let started = false;
+        points.forEach((point, index) => {
+          const value = point[item.key];
+          if (value === null || value === undefined) { started = false; return; }
+          const px = left + slot * index;
+          path += `${started ? 'L' : 'M'}${px.toFixed(1)} ${y(value).toFixed(1)} `;
+          started = true;
+        });
+        return path ? `<path d="${path}" fill="none" stroke="${item.color}" stroke-width="2" stroke-linejoin="round" />` : '';
+      }).join('');
+      const labelStep = Math.max(1, Math.ceil(points.length / 6));
+      const xLabels = points.map((point, index) => index % labelStep === 0 || index === points.length - 1
+        ? `<text x="${(left + slot * index).toFixed(1)}" y="${baseY + 20}" text-anchor="middle" font-size="10" fill="#64748b">${esc(formatMonitorTime(point.at).slice(5))}</text>`
+        : '').join('');
+      const legend = series.map((item, index) => `<g><line x1="${left + 8 + index * 96}" y1="${height - 8}" x2="${left + 28 + index * 96}" y2="${height - 8}" stroke="${item.color}" stroke-width="2" /><text x="${left + 33 + index * 96}" y="${height - 4}" font-size="11" fill="#334155">${item.label}</text></g>`).join('');
+      chart.innerHTML = `<svg viewBox="0 0 ${width} ${height}" style="max-width:100%;display:block;margin:0 auto;" height="300" role="img" aria-label="资产监控趋势折线图"><rect x="0" y="0" width="${width}" height="${height}" fill="#ffffff"></rect>${grid}<line x1="${left}" y1="${baseY}" x2="${right}" y2="${baseY}" stroke="#94a3b8" stroke-width="1" />${paths}${xLabels}${legend}</svg>`;
+    }
+
+    async function loadMonitorTrend() {
+      const assetId = document.getElementById('monitorTrendAsset')?.value || '';
+      const range = document.getElementById('monitorTrendRange')?.value || '24h';
+      if (!assetId) {
+        renderMonitorTrend(null);
+        return;
+      }
+      try {
+        const payload = await api(`/api/monitor/history?assetId=${encodeURIComponent(assetId)}&range=${encodeURIComponent(range)}`, { silent: true });
+        if (document.getElementById('monitorTrendAsset')?.value !== assetId) return;
+        renderMonitorTrend(payload);
+      } catch (error) {
+        const summary = document.getElementById('monitorTrendSummary');
+        if (summary) summary.textContent = `监控趋势加载失败：${error.message}`;
+      }
+    }
+
+    function renderMonitorPanel() {
+      fillMonitorTrendAssets();
+      renderMonitorAlerts();
+      renderMonitorWindows();
+      loadMonitorTrend();
+    }
+
+    function openMonitorWindowModal(windowId = '') {
+      const record = windowId ? (state.monitorMaintenanceWindows || []).find(item => item.id === windowId) : null;
+      const projectSelect = document.getElementById('monitorWindowProject');
+      const projects = projectsInUserScope();
+      projectSelect.innerHTML = ['<option value="">请选择项目</option>'].concat(
+        projects.map(project => `<option value="${attrEsc(project.id)}">${esc(formatProjectDisplay(project))}</option>`)
+      ).join('');
+      const projectId = record?.projectId || (projects[0]?.id || '');
+      projectSelect.value = projectId;
+      document.getElementById('monitorWindowId').value = record?.id || '';
+      document.getElementById('monitorWindowModalTitle').textContent = record ? '修改维护窗口' : '新建维护窗口';
+      document.getElementById('monitorWindowName').value = record?.name || '';
+      document.getElementById('monitorWindowStart').value = toMonitorInputTime(record?.startAt || '');
+      document.getElementById('monitorWindowEnd').value = toMonitorInputTime(record?.endAt || '');
+      document.getElementById('monitorWindowNotes').value = record?.notes || '';
+      document.getElementById('monitorWindowMessage').textContent = '';
+      fillMonitorAssetSelect(document.getElementById('monitorWindowAssets'), projectId, record?.assetIds || []);
+      openModal('monitorWindowModal');
+    }
+
+    async function saveMonitorWindow() {
+      const windowId = document.getElementById('monitorWindowId').value;
+      const message = document.getElementById('monitorWindowMessage');
+      const name = document.getElementById('monitorWindowName').value.trim();
+      if (!name) {
+        message.textContent = '请填写维护窗口名称';
+        message.className = 'message error';
+        return;
+      }
+      const projectId = document.getElementById('monitorWindowProject').value;
+      if (!projectId) {
+        message.textContent = '请选择关联项目';
+        message.className = 'message error';
+        return;
+      }
+      const startAt = document.getElementById('monitorWindowStart').value;
+      const endAt = document.getElementById('monitorWindowEnd').value;
+      if (!startAt || !endAt) {
+        message.textContent = '请填写开始与结束时间';
+        message.className = 'message error';
+        return;
+      }
+      const assetIds = [...document.getElementById('monitorWindowAssets').selectedOptions].map(option => option.value);
+      const button = document.getElementById('monitorWindowSaveBtn');
+      button.disabled = true;
+      try {
+        const payload = {
+          name,
+          projectId,
+          assetIds,
+          startAt: new Date(startAt).toISOString(),
+          endAt: new Date(endAt).toISOString(),
+          notes: document.getElementById('monitorWindowNotes').value.trim()
+        };
+        await api(windowId ? `/api/monitor/maintenance-windows/${encodeURIComponent(windowId)}` : '/api/monitor/maintenance-windows', {
+          method: windowId ? 'PUT' : 'POST',
+          body: JSON.stringify(payload)
+        });
+        closeModal('monitorWindowModal');
+        await loadBaseData();
+        renderMonitorPanel();
+        showToast(windowId ? '维护窗口已更新' : '维护窗口已创建');
+      } catch (error) {
+        message.textContent = error.message;
+        message.className = 'message error';
+      } finally {
+        button.disabled = false;
+      }
+    }
+
+    function openMonitorAlertAction(alertId, action) {
+      const alert = (state.monitorAlerts || []).find(item => item.id === alertId);
+      if (!alert) return;
+      monitorAlertActionContext = { alertId, action };
+      document.getElementById('monitorAlertId').value = alertId;
+      const titles = { acknowledge: '确认告警', resolve: '标记恢复', silence: '静默告警' };
+      document.getElementById('monitorAlertModalTitle').textContent = titles[action] || '处理告警';
+      document.getElementById('monitorAlertNoteField').classList.toggle('hidden', action === 'silence');
+      document.getElementById('monitorAlertSilenceField').classList.toggle('hidden', action !== 'silence');
+      document.getElementById('monitorAlertNote').value = '';
+      document.getElementById('monitorAlertMessage').textContent = '';
+      openModal('monitorAlertModal');
+    }
+
+    async function submitMonitorAlertAction() {
+      if (!monitorAlertActionContext) return;
+      const { alertId, action } = monitorAlertActionContext;
+      const message = document.getElementById('monitorAlertMessage');
+      const button = document.getElementById('monitorAlertSaveBtn');
+      button.disabled = true;
+      try {
+        const body = action === 'silence'
+          ? { minutes: Number(document.getElementById('monitorAlertSilenceMinutes').value) }
+          : { note: document.getElementById('monitorAlertNote').value.trim(), reason: document.getElementById('monitorAlertNote').value.trim() };
+        await api(`/api/monitor/alerts/${encodeURIComponent(alertId)}/${action}`, { method: 'POST', body: JSON.stringify(body) });
+        closeModal('monitorAlertModal');
+        await loadBaseData();
+        renderMonitorPanel();
+        showToast(action === 'silence' ? '告警已静默' : action === 'resolve' ? '告警已恢复' : '告警已确认');
+      } catch (error) {
+        message.textContent = error.message;
+        message.className = 'message error';
+      } finally {
+        button.disabled = false;
+      }
+    }
+
+    function notificationEventLabel(value) {
+      const option = (state.notificationEventOptions || []).find(item => item.value === value);
+      return option ? option.label : value;
+    }
+
+    function renderNotificationChannels() {
+      const table = document.getElementById('notificationChannelTable');
+      if (!table) return;
+      const empty = document.getElementById('notificationChannelEmpty');
+      const rows = state.notificationChannels || [];
+      table.innerHTML = rows.map(item => {
+        const project = item.projectId ? (state.projects || []).find(entry => entry.id === item.projectId) : null;
+        const events = (item.events || []).map(notificationEventLabel).join('、') || '未订阅';
+        const status = item.enabled === false
+          ? '<span class="muted">已停用</span>'
+          : item.lastError ? `<span style="color:#dc2626;">异常：${esc(item.lastError)}</span>` : '<span style="color:#16a34a;">正常</span>';
+        return `<tr>
+          <td>${esc(item.name)}</td>
+          <td>${item.type === 'email' ? '邮件' : 'Webhook'}</td>
+          <td>${esc(project ? formatProjectDisplay(project) : '全部项目')}</td>
+          <td>${esc(events)}</td>
+          <td>${status}</td>
+          <td>${esc(item.lastSentAt ? formatMonitorTime(item.lastSentAt) : '-')}</td>
+          <td>
+            <button class="secondary" data-notification-channel="edit" data-id="${attrEsc(item.id)}" type="button">编辑</button>
+            <button class="secondary" data-notification-channel="test" data-id="${attrEsc(item.id)}" type="button">测试</button>
+            <button class="secondary" data-notification-channel="delete" data-id="${attrEsc(item.id)}" type="button">删除</button>
+          </td>
+        </tr>`;
+      }).join('');
+      empty.classList.toggle('hidden', rows.length > 0);
+    }
+
+    async function loadNotificationChannels() {
+      const result = await api('/api/notification-channels', { silent: true });
+      state.notificationChannels = Array.isArray(result.data) ? result.data : [];
+      state.notificationEventOptions = Array.isArray(result.events) ? result.events : (state.notificationEventOptions || []);
+      renderNotificationChannels();
+    }
+
+    function renderNotificationChannelEventPicker(selected) {
+      const container = document.getElementById('notificationChannelEvents');
+      if (!container) return;
+      const selectedSet = new Set(selected || []);
+      container.innerHTML = (state.notificationEventOptions || []).map(item => `<label style="display:flex;align-items:center;gap:6px;font-size:13px;">
+        <input type="checkbox" value="${attrEsc(item.value)}"${selectedSet.has(item.value) ? ' checked' : ''} style="width:auto;" />
+        <span>${esc(item.label)}</span>
+      </label>`).join('');
+    }
+
+    function syncNotificationChannelTypeFields() {
+      const type = document.getElementById('notificationChannelType').value;
+      document.getElementById('notificationChannelWebhookFields').classList.toggle('hidden', type !== 'webhook');
+      document.getElementById('notificationChannelEmailFields').classList.toggle('hidden', type !== 'email');
+    }
+
+    function openNotificationChannelModal(channelId = '') {
+      const record = channelId ? (state.notificationChannels || []).find(item => item.id === channelId) : null;
+      const projectSelect = document.getElementById('notificationChannelProject');
+      projectSelect.innerHTML = ['<option value="">全部项目</option>'].concat(
+        (state.projects || []).map(project => `<option value="${attrEsc(project.id)}">${esc(formatProjectDisplay(project))}</option>`)
+      ).join('');
+      document.getElementById('notificationChannelId').value = record?.id || '';
+      document.getElementById('notificationChannelModalTitle').textContent = record ? '编辑通知通道' : '新建通知通道';
+      document.getElementById('notificationChannelName').value = record?.name || '';
+      document.getElementById('notificationChannelType').value = record?.type === 'email' ? 'email' : 'webhook';
+      projectSelect.value = record?.projectId || '';
+      document.getElementById('notificationChannelWebhookUrl').value = record?.webhookUrl || '';
+      document.getElementById('notificationChannelWebhookSecret').value = '';
+      document.getElementById('notificationChannelWebhookSecret').placeholder = record?.hasWebhookSecret ? '已配置，留空表示不修改' : '留空表示不签名';
+      document.getElementById('notificationChannelSmtpHost').value = record?.smtpHost || '';
+      document.getElementById('notificationChannelSmtpPort').value = record?.smtpPort || '';
+      document.getElementById('notificationChannelSmtpSecure').value = record?.smtpSecure ? 'true' : 'false';
+      document.getElementById('notificationChannelSmtpUser').value = record?.smtpUser || '';
+      document.getElementById('notificationChannelSmtpPassword').value = '';
+      document.getElementById('notificationChannelSmtpPassword').placeholder = record?.hasSmtpPassword ? '已配置，留空表示不修改' : '';
+      document.getElementById('notificationChannelFrom').value = record?.fromAddress || '';
+      document.getElementById('notificationChannelTo').value = (record?.toAddresses || []).join(', ');
+      document.getElementById('notificationChannelEnabled').checked = record ? record.enabled !== false : true;
+      document.getElementById('notificationChannelModalMessage').textContent = '';
+      renderNotificationChannelEventPicker(record?.events || []);
+      syncNotificationChannelTypeFields();
+      openModal('notificationChannelModal');
+    }
+
+    async function saveNotificationChannel() {
+      const channelId = document.getElementById('notificationChannelId').value;
+      const message = document.getElementById('notificationChannelModalMessage');
+      const name = document.getElementById('notificationChannelName').value.trim();
+      if (!name) {
+        message.textContent = '请填写通道名称';
+        message.className = 'message error';
+        return;
+      }
+      const type = document.getElementById('notificationChannelType').value;
+      const events = [...document.querySelectorAll('#notificationChannelEvents input:checked')].map(input => input.value);
+      if (!events.length) {
+        message.textContent = '请至少订阅一个事件';
+        message.className = 'message error';
+        return;
+      }
+      const payload = {
+        name,
+        type,
+        projectId: document.getElementById('notificationChannelProject').value,
+        enabled: document.getElementById('notificationChannelEnabled').checked,
+        events
+      };
+      if (type === 'webhook') {
+        payload.webhookUrl = document.getElementById('notificationChannelWebhookUrl').value.trim();
+        const secret = document.getElementById('notificationChannelWebhookSecret').value;
+        if (secret) payload.webhookSecret = secret;
+      } else {
+        payload.smtpHost = document.getElementById('notificationChannelSmtpHost').value.trim();
+        payload.smtpPort = document.getElementById('notificationChannelSmtpPort').value.trim();
+        payload.smtpSecure = document.getElementById('notificationChannelSmtpSecure').value === 'true';
+        payload.smtpUser = document.getElementById('notificationChannelSmtpUser').value.trim();
+        const password = document.getElementById('notificationChannelSmtpPassword').value;
+        if (password) payload.smtpPassword = password;
+        payload.fromAddress = document.getElementById('notificationChannelFrom').value.trim();
+        payload.toAddresses = document.getElementById('notificationChannelTo').value.split(/[,;\s]+/).map(item => item.trim()).filter(Boolean);
+      }
+      const button = document.getElementById('notificationChannelSaveBtn');
+      button.disabled = true;
+      try {
+        await api(channelId ? `/api/notification-channels/${encodeURIComponent(channelId)}` : '/api/notification-channels', {
+          method: channelId ? 'PUT' : 'POST',
+          body: JSON.stringify(payload)
+        });
+        closeModal('notificationChannelModal');
+        await loadNotificationChannels();
+        setMessage('notificationChannelMessage', channelId ? '通道已更新' : '通道已创建');
+      } catch (error) {
+        message.textContent = error.message;
+        message.className = 'message error';
+      } finally {
+        button.disabled = false;
+      }
+    }
+
+    async function openAssetInventory(taskId) {
+      let task = (state.assetInventoryTasks || []).find(item => item.id === taskId);
+      if (!task) return;
+      if (task.status === 'pending') {
+        try {
+          task = await api(`/api/asset-inventory-tasks/${taskId}/start`, { method: 'POST' });
+          await loadBaseData();
+        } catch (error) {
+          showToast(error.message, 'error');
+          return;
+        }
+      }
+      activeInventoryTask = task;
+      const readOnly = task.status === 'completed';
+      document.getElementById('assetInventoryTitle').textContent = `${readOnly ? '查看' : '盘点登记'}：${task.name}`;
+      document.getElementById('assetInventoryMeta').textContent = `项目：${formatProjectDisplayById(task.projectId)} · 共 ${(task.items || []).length} 项`;
+      const resultLabels = { match: '一致', mismatch: '差异', missing: '缺失' };
+      document.getElementById('assetInventoryItems').innerHTML = (task.items || []).map(item => {
+        const disabled = readOnly ? ' disabled' : '';
+        return `<tr data-asset-id="${attrEsc(item.assetId)}">
+          <td>${esc(item.assetName || '-')}</td>
+          <td>${esc(item.expectedStatus || '-')}</td>
+          <td><select class="inventory-status"${disabled}>${['使用中','闲置','维修中','借出','待报废'].map(status => `<option value="${status}"${status === (item.actualStatus || item.expectedStatus) ? ' selected' : ''}>${status}</option>`).join('')}</select></td>
+          <td><input class="inventory-location" value="${attrEsc(item.location || '')}"${disabled} /></td>
+          <td style="text-align:center;"><input type="checkbox" class="inventory-missing"${item.result === 'missing' ? ' checked' : ''}${disabled} /></td>
+          <td><input class="inventory-note" maxlength="200" value="${attrEsc(item.note || '')}"${disabled} /></td>
+          <td>${esc(resultLabels[item.result] || '-')}</td>
+        </tr>`;
+      }).join('');
+      document.getElementById('assetInventorySaveBtn').classList.toggle('hidden', readOnly);
+      document.getElementById('assetInventoryCompleteBtn').classList.toggle('hidden', readOnly);
+      document.getElementById('assetInventoryMessage').textContent = '';
+      openModal('assetInventoryModal');
+    }
+
+    function collectInventoryItems() {
+      return [...document.querySelectorAll('#assetInventoryItems tr[data-asset-id]')].map(row => ({
+        assetId: row.dataset.assetId,
+        actualStatus: row.querySelector('.inventory-status')?.value || '',
+        location: row.querySelector('.inventory-location')?.value || '',
+        missing: row.querySelector('.inventory-missing')?.checked === true,
+        note: row.querySelector('.inventory-note')?.value || ''
+      }));
+    }
+
+    async function saveAssetInventory(complete) {
+      if (!activeInventoryTask) return;
+      const msg = document.getElementById('assetInventoryMessage');
+      try {
+        await api(`/api/asset-inventory-tasks/${activeInventoryTask.id}/items`, {
+          method: 'POST',
+          body: JSON.stringify({ items: collectInventoryItems() })
+        });
+        if (complete) {
+          await api(`/api/asset-inventory-tasks/${activeInventoryTask.id}/complete`, { method: 'POST' });
+        }
+        closeModal('assetInventoryModal');
+        activeInventoryTask = null;
+        showToast(complete ? '盘点已完成' : '盘点进度已保存');
+        await loadBaseData();
+      } catch (error) {
+        msg.textContent = error.message;
+        msg.className = 'message error';
+      }
+    }
+
+    async function createAssetInventory() {
+      const projectId = document.getElementById('assetInventoryProject').value;
+      if (!projectId) { showToast('请选择项目', 'error'); return; }
+      const projectName = document.getElementById('assetInventoryProject').selectedOptions[0]?.textContent || '';
+      const name = window.prompt('请输入盘点任务名称', `${projectName} ${formatLocalDateKey(new Date())} 盘点`);
+      if (!name) return;
+      try {
+        const task = await api('/api/asset-inventory-tasks', {
+          method: 'POST',
+          body: JSON.stringify({ projectId, name })
+        });
+        await loadBaseData();
+        openAssetInventory(task.id);
+      } catch (error) {
+        showToast(error.message, 'error');
+      }
     }
 
     function editAsset(id) {
@@ -9387,6 +10845,12 @@
       const projectSelect = document.getElementById('edProjectId');
       projectSelect.innerHTML = state.projects.map(p => `<option value="${p.id}">${esc(formatProjectDisplay(p))}</option>`).join('');
       projectSelect.value = user.projectId || '';
+      const multiSelect = document.getElementById('edProjectIds');
+      const selectedIds = Array.isArray(user.projectIds) && user.projectIds.length ? user.projectIds : [user.projectId || ''];
+      multiSelect.innerHTML = state.projects.map(p => `<option value="${p.id}">${esc(formatProjectDisplay(p))}</option>`).join('');
+      for (const option of multiSelect.options) {
+        option.selected = selectedIds.includes(option.value) && option.value !== user.projectId;
+      }
       document.getElementById('userEditMessage').textContent = '';
       document.getElementById('userEditMessage').className = 'message';
       document.getElementById('userEditModal').classList.remove('hidden');
@@ -9860,7 +11324,7 @@
       const currentPeriodKey = getCurrentPeriodKey(period);
       const userExecutions = filterByUserProject(state.inspectionExecutions);
       const userPlans = filterByUserProject(state.inspectionPlans);
-      const userProjects = state.user.role === 'admin' ? state.projects : state.projects.filter(item => item.id === state.user.projectId);
+      const userProjects = projectsInUserScope();
       const periodExecutions = userExecutions.filter(item => getPeriodKey(item.executedAt, period) === currentPeriodKey);
       const duePlans = userPlans.filter(item => item.nextDate && getPeriodKey(item.nextDate, period) === currentPeriodKey);
       const executedPlanCount = new Set(periodExecutions.map(item => item.planId)).size;
@@ -10120,6 +11584,7 @@
         api('/api/system/services'),
         api('/api/system/load')
       ]);
+      await loadNotificationChannels().catch(() => {});
       state.systemServices = services;
       state.systemLoad = load;
       state.systemConfig = info.systemConfig || state.systemConfig;
@@ -10183,6 +11648,10 @@
       { key: 'projects', path: '/api/projects' },
       { key: 'users', path: '/api/users' },
       { key: 'assets', path: '/api/assets' },
+      { key: 'assetCheckouts', path: '/api/asset-checkouts' },
+      { key: 'assetInventoryTasks', path: '/api/asset-inventory-tasks' },
+      { key: 'monitorAlerts', path: '/api/monitor/alerts' },
+      { key: 'monitorMaintenanceWindows', path: '/api/monitor/maintenance-windows' },
       { key: 'logs', path: '/api/logs' },
       { key: 'kb', path: '/api/kb' },
       { key: 'documents', path: '/api/documents' },
@@ -10223,6 +11692,7 @@
       state.notificationUnread = 0;
       state.notificationTotalPages = 1;
       state.notificationPage = 1;
+      state.notificationChannels = [];
     }
 
     function withQuery(path, extra) {
@@ -10389,7 +11859,13 @@
       renderProjects();
       renderUsers();
       renderAssets();
+      renderAssetCheckouts();
+      renderAssetInventory();
+      if (state.currentSubtab?.section === 'assets' && state.currentSubtab.subtab === 'monitor') {
+        renderMonitorPanel();
+      }
       resetLogForm();
+      restoreLogDraft();
       fillLogFilterProjectOptions();
       fillLogFilterUserOptions();
       renderLogs();
@@ -10399,7 +11875,9 @@
       resetDocumentForm();
       renderDocuments();
       renderTickets();
+      restoreTicketDraft();
       renderAssetOps();
+      restoreInspectionDraft();
       renderAiInspection();
       toggleInspectionIssueFields();
       renderGovernance();
@@ -10418,6 +11896,7 @@
           }
           state.user = session.user;
         }
+        state.draftRestored = {};
         renderNav();
         showAppView();
         connectWebSocket();
@@ -11862,6 +13341,7 @@
         wechat: document.getElementById('edWechat').value.trim(),
         twoFactorEnforced: document.getElementById('edTwoFactorEnforced').checked,
         projectId: document.getElementById('edProjectId').value,
+        projectIds: Array.from(document.getElementById('edProjectIds').selectedOptions).map(option => option.value),
         startDate: document.getElementById('edStartDate').value,
         endDate: document.getElementById('edEndDate').value
       };
@@ -11980,7 +13460,8 @@
         process: document.getElementById('edLogProcess').value.trim(),
         conclusion: document.getElementById('edLogConclusion').value.trim(),
         durationHours: document.getElementById('edLogDurationHours').value,
-        remark: document.getElementById('edLogRemark').value.trim()
+        remark: document.getElementById('edLogRemark').value.trim(),
+        attachments: state.pendingEdLogAttachments.map(item => ({ ...item }))
       };
       const msg = document.getElementById('logEditMessage');
       if (!data.date) { msg.textContent = '请选择派单时间'; msg.className = 'message error'; return; }
@@ -12226,6 +13707,133 @@
 
     document.getElementById('aiTargetEditModal').addEventListener('click', function(e) { if (e.target === this) { closeModal('aiTargetEditModal'); } });
 
+    document.getElementById('assetDetailActions').addEventListener('click', event => {
+      const button = event.target.closest('button[data-action]');
+      if (!button) return;
+      const assetId = document.getElementById('assetDetailActions').dataset.assetId;
+      if (button.dataset.action === 'asset-lifecycle') {
+        showAssetLifecycle(assetId);
+        return;
+      }
+      openAssetAction(assetId, String(button.dataset.action || '').replace(/^asset-/, ''));
+    });
+    document.getElementById('assetActionModal').addEventListener('click', function(e) { if (e.target === this) closeModal('assetActionModal'); });
+    document.getElementById('assetActionConfirmBtn').addEventListener('click', submitAssetAction);
+
+    document.getElementById('assetCheckoutTable').addEventListener('click', event => {
+      const button = event.target.closest('button[data-action="asset-return"]');
+      if (button) openAssetAction(button.dataset.id, 'return');
+    });
+    document.getElementById('assetInventoryTable').addEventListener('click', event => {
+      const button = event.target.closest('button[data-action="asset-inventory-open"]');
+      if (button) openAssetInventory(button.dataset.id);
+    });
+    document.getElementById('assetInventorySaveBtn').addEventListener('click', () => saveAssetInventory(false));
+    document.getElementById('assetInventoryCompleteBtn').addEventListener('click', () => saveAssetInventory(true));
+    document.getElementById('assetInventoryCreateBtn').addEventListener('click', createAssetInventory);
+    document.getElementById('assetCheckoutRefreshBtn').addEventListener('click', async () => {
+      try {
+        await loadBaseData();
+        showToast('已刷新');
+      } catch (error) {
+        showToast(error.message, 'error');
+      }
+    });
+
+    document.getElementById('monitorAlertStatusFilter').addEventListener('change', renderMonitorAlerts);
+    document.getElementById('monitorAlertRefreshBtn').addEventListener('click', async () => {
+      try {
+        await loadBaseData();
+        renderMonitorPanel();
+        showToast('已刷新');
+      } catch (error) {
+        showToast(error.message, 'error');
+      }
+    });
+    document.getElementById('monitorTrendAsset').addEventListener('change', loadMonitorTrend);
+    document.getElementById('monitorTrendRange').addEventListener('change', loadMonitorTrend);
+    document.getElementById('monitorTrendRefreshBtn').addEventListener('click', loadMonitorTrend);
+    document.getElementById('monitorRunBtn').addEventListener('click', async event => {
+      const button = event.currentTarget;
+      button.disabled = true;
+      try {
+        await api('/api/monitor/run', { method: 'POST' });
+        await loadBaseData();
+        renderMonitorPanel();
+        showToast('采集完成');
+      } catch (error) {
+        showToast(error.message, 'error');
+      } finally {
+        button.disabled = false;
+      }
+    });
+    document.getElementById('monitorAlertTable').addEventListener('click', event => {
+      const button = event.target.closest('button[data-monitor-alert]');
+      if (button) openMonitorAlertAction(button.dataset.id, button.dataset.monitorAlert);
+    });
+    document.getElementById('monitorAlertSaveBtn').addEventListener('click', submitMonitorAlertAction);
+    document.getElementById('monitorAlertModal').addEventListener('click', function(e) { if (e.target === this) closeModal('monitorAlertModal'); });
+    document.getElementById('monitorWindowCreateBtn').addEventListener('click', () => openMonitorWindowModal());
+    document.getElementById('monitorWindowSaveBtn').addEventListener('click', saveMonitorWindow);
+    document.getElementById('monitorWindowModal').addEventListener('click', function(e) { if (e.target === this) closeModal('monitorWindowModal'); });
+    document.getElementById('monitorWindowProject').addEventListener('change', event => {
+      fillMonitorAssetSelect(document.getElementById('monitorWindowAssets'), event.target.value, []);
+    });
+    document.getElementById('monitorWindowTable').addEventListener('click', async event => {
+      const button = event.target.closest('button[data-monitor-window]');
+      if (!button) return;
+      const record = (state.monitorMaintenanceWindows || []).find(item => item.id === button.dataset.id);
+      if (!record) return;
+      if (button.dataset.monitorWindow === 'edit') {
+        openMonitorWindowModal(record.id);
+        return;
+      }
+      if (!await showConfirm(`确认删除维护窗口「${record.name}」吗？`)) return;
+      try {
+        await api(`/api/monitor/maintenance-windows/${encodeURIComponent(record.id)}`, { method: 'DELETE' });
+        await loadBaseData();
+        renderMonitorPanel();
+        showToast('维护窗口已删除');
+      } catch (error) {
+        showToast(error.message, 'error');
+      }
+    });
+    document.getElementById('notificationChannelCreateBtn').addEventListener('click', () => openNotificationChannelModal());
+    document.getElementById('notificationChannelSaveBtn').addEventListener('click', saveNotificationChannel);
+    document.getElementById('notificationChannelType').addEventListener('change', syncNotificationChannelTypeFields);
+    document.getElementById('notificationChannelModal').addEventListener('click', function(e) { if (e.target === this) closeModal('notificationChannelModal'); });
+    document.getElementById('notificationChannelTable').addEventListener('click', async event => {
+      const button = event.target.closest('button[data-notification-channel]');
+      if (!button) return;
+      const record = (state.notificationChannels || []).find(item => item.id === button.dataset.id);
+      if (!record) return;
+      if (button.dataset.notificationChannel === 'edit') {
+        openNotificationChannelModal(record.id);
+        return;
+      }
+      if (button.dataset.notificationChannel === 'test') {
+        button.disabled = true;
+        try {
+          const result = await api(`/api/notification-channels/${encodeURIComponent(record.id)}/test`, { method: 'POST' });
+          setMessage('notificationChannelMessage', result.message || '测试消息已发送');
+        } catch (error) {
+          setMessage('notificationChannelMessage', error.message, 'error');
+        } finally {
+          button.disabled = false;
+          await loadNotificationChannels().catch(() => {});
+        }
+        return;
+      }
+      if (!await showConfirm(`确认删除通知通道「${record.name}」吗？`)) return;
+      try {
+        await api(`/api/notification-channels/${encodeURIComponent(record.id)}`, { method: 'DELETE' });
+        await loadNotificationChannels();
+        setMessage('notificationChannelMessage', '通知通道已删除');
+      } catch (error) {
+        setMessage('notificationChannelMessage', error.message, 'error');
+      }
+    });
+
     document.getElementById('edAiTargetProjectId').addEventListener('change', event => {
       fillEditAiInspectionTargetAssetSelect(event.target.value);
     });
@@ -12361,6 +13969,12 @@
         }
         if (button.dataset.action === 'delete-asset') {
           await removeAsset(button.dataset.id);
+        }
+        if (button.dataset.action === 'asset-lifecycle') {
+          await showAssetLifecycle(button.dataset.id);
+        }
+        if (button.dataset.action === 'asset-label') {
+          printAssetLabels([button.dataset.id]);
         }
       } catch (error) {
         setMessage('assetMessage', error.message, 'error');
@@ -13435,6 +15049,42 @@
         button.textContent = originalText;
       }
     });
+    document.getElementById('saveMonitorThresholdsBtn').addEventListener('click', async event => {
+      const fields = [
+        ['monitorSampleIntervalMinutes', 1, 60, '采样间隔'],
+        ['monitorHistoryRetentionDays', 1, 365, '历史保留天数'],
+        ['monitorConsecutiveFailures', 1, 10, '连续失败次数'],
+        ['monitorCpuThreshold', 1, 100, 'CPU 阈值'],
+        ['monitorMemoryThreshold', 1, 100, '内存阈值'],
+        ['monitorDiskThreshold', 1, 100, '磁盘阈值']
+      ];
+      const payload = {};
+      for (const [key, min, max, label] of fields) {
+        const input = document.getElementById(key);
+        const value = Number(input?.value);
+        if (!Number.isFinite(value) || value < min || value > max) {
+          setMessage('monitorThresholdMessage', `${label}需在 ${min} 到 ${max} 之间`, 'error');
+          input?.focus();
+          return;
+        }
+        payload[key] = Math.round(value);
+      }
+      const button = event.currentTarget;
+      const originalText = button.textContent;
+      button.disabled = true;
+      button.textContent = '保存中...';
+      try {
+        const result = await api('/api/system/settings', { method: 'POST', body: JSON.stringify(payload) });
+        state.systemConfig = result.systemConfig || state.systemConfig;
+        renderSystemSettings();
+        setMessage('monitorThresholdMessage', `已保存：每 ${payload.monitorSampleIntervalMinutes} 分钟采样，连续 ${payload.monitorConsecutiveFailures} 次失败告警`);
+      } catch (error) {
+        setMessage('monitorThresholdMessage', error.message, 'error');
+      } finally {
+        button.disabled = false;
+        button.textContent = originalText;
+      }
+    });
     document.getElementById('uploadHttpsCertBtn').addEventListener('click', async event => {
       const certInput = document.getElementById('httpsCertFile');
       const keyInput = document.getElementById('httpsKeyFile');
@@ -13632,6 +15282,7 @@
 
     document.getElementById('userForm').addEventListener('submit', event => withSubmitLock(event, async () => {
       const data = Object.fromEntries(new FormData(event.target).entries());
+      data.projectIds = Array.from(document.getElementById('userProjectIds').selectedOptions).map(option => option.value);
       data.twoFactorEnforced = document.getElementById('userForm').elements.twoFactorEnforced.checked;
       if (!data.id && !data.password) { setMessage('userMessage', '请输入密码', 'error'); return; }
       if (!data.id && data.password && (data.password.length < 8 || !/[a-zA-Z]/.test(data.password) || !/\d/.test(data.password) || !/[^a-zA-Z0-9]/.test(data.password))) { setMessage('userMessage', '密码至少8位，需包含字母、数字和特殊字符', 'error'); return; }
@@ -13790,6 +15441,15 @@
       showToast(`已导出 ${assets.length} 条资产`);
     });
 
+    document.getElementById('assetBatchLabelBtn').addEventListener('click', () => {
+      const selectedIds = state.selectedAssetIds || [];
+      let assets = filterByUserProject(state.assets);
+      if (state.assetFilterProjectId) assets = assets.filter(item => item.projectId === state.assetFilterProjectId);
+      if (selectedIds.length) assets = assets.filter(item => selectedIds.includes(item.id));
+      if (!assets.length) { showToast('请选择要打印标签的资产'); return; }
+      printAssetLabels(assets.map(item => item.id));
+    });
+
     document.getElementById('assetBatchDeleteBtn').addEventListener('click', async () => {
       const ids = state.selectedAssetIds || [];
       if (!ids.length) { showToast('请先勾选要删除的资产'); return; }
@@ -13878,6 +15538,7 @@
         const path = id ? `/api/inspection-executions/${id}` : '/api/inspection-executions';
         await api(path, { method, body: JSON.stringify(data) });
         event.target.reset();
+        if (!id) { removeDraft('inspection'); setDraftHint('inspectionDraftHint', null); }
         setMessage('inspectionExecutionMessage', id ? '执行记录修改成功' : '执行记录提交成功');
         await reloadAfterSubmit();
         openTabWithSubtab('assetOps', 'inspection');
@@ -13895,6 +15556,7 @@
       try {
         await api(path, { method, body: JSON.stringify(data) });
         resetTicketForm();
+        if (!id) { removeDraft('ticket'); setDraftHint('ticketDraftHint', null); }
         setMessage('ticketMessage', id ? '工单修改成功' : '工单提交成功');
         await reloadAfterSubmit();
         openTabWithSubtab('tickets', 'list');
@@ -13976,11 +15638,14 @@
     document.getElementById('logForm').addEventListener('submit', event => withSubmitLock(event, async () => {
       const data = Object.fromEntries(new FormData(event.target).entries());
       if (data.durationHours !== undefined && Number(data.durationHours) < 0) { setMessage('logMessage', '工单用时不能为负数', 'error'); return; }
+      data.attachments = state.pendingLogAttachments.map(item => ({ ...item }));
       try {
         const confirmed = await confirmLogQualityWarnings(data);
         if (!confirmed) return;
         await api('/api/logs', { method: 'POST', body: JSON.stringify(data) });
         resetLogForm();
+        removeDraft('log');
+        setDraftHint('logDraftHint', null);
         setMessage('logMessage', '日志创建成功');
         state.logs = (await apiCollection('/api/logs')).data;
         renderLogs();
@@ -13991,6 +15656,38 @@
         setMessage('logMessage', error.message, 'error');
       }
     }));
+
+    document.getElementById('logAttachmentInput').addEventListener('change', event => {
+      handleLogAttachmentFiles('', event.target.files).catch(error => showToast(error.message || '图片处理失败', 'error'));
+    });
+
+    document.getElementById('edLogAttachmentInput').addEventListener('change', event => {
+      handleLogAttachmentFiles('ed', event.target.files).catch(error => showToast(error.message || '图片处理失败', 'error'));
+    });
+
+    document.addEventListener('click', event => {
+      const button = event.target.closest('[data-action="remove-log-attachment"]');
+      if (!button) return;
+      const prefix = button.dataset.prefix || '';
+      const index = Number(button.dataset.index);
+      const list = prefix ? state.pendingEdLogAttachments : state.pendingLogAttachments;
+      if (Number.isInteger(index) && index >= 0 && index < list.length) {
+        list.splice(index, 1);
+        renderLogAttachmentPreview(prefix);
+        if (!prefix) scheduleDraftSave('log');
+      }
+    });
+
+    document.addEventListener('click', event => {
+      const button = event.target.closest('[data-action="clear-draft"]');
+      if (!button) return;
+      const type = button.dataset.draft;
+      removeDraft(type);
+      const hints = { log: 'logDraftHint', ticket: 'ticketDraftHint', inspection: 'inspectionDraftHint' };
+      const hint = document.getElementById(hints[type]);
+      if (hint) hint.textContent = '草稿已清除';
+      showToast('本地草稿已清除');
+    });
 
     document.getElementById('kbForm').addEventListener('submit', event => withSubmitLock(event, async () => {
       const data = Object.fromEntries(new FormData(event.target).entries());
@@ -14174,6 +15871,30 @@
       event.preventDefault();
       handler();
     });
+
+    bindDraftPersistence();
+    updateNetworkStatus(navigator.onLine);
+    window.addEventListener('online', () => updateNetworkStatus(true));
+    window.addEventListener('offline', () => updateNetworkStatus(false));
+
+    // PWA 安装：仅在浏览器触发可安装事件后显示按钮，避免不支持的浏览器出现无效入口。
+    window.addEventListener('beforeinstallprompt', event => {
+      event.preventDefault();
+      state.installPromptEvent = event;
+      document.getElementById('pwaInstallBtn')?.classList.remove('hidden');
+    });
+    document.getElementById('pwaInstallBtn')?.addEventListener('click', async () => {
+      if (!state.installPromptEvent) return;
+      state.installPromptEvent.prompt();
+      await state.installPromptEvent.userChoice.catch(() => null);
+      state.installPromptEvent = null;
+      document.getElementById('pwaInstallBtn')?.classList.add('hidden');
+    });
+    if ('serviceWorker' in navigator) {
+      window.addEventListener('load', () => {
+        navigator.serviceWorker.register('/sw.js').catch(() => {});
+      });
+    }
 
     boot();
   </script>

@@ -1193,6 +1193,65 @@ async function main() {
     await page.click('#confirmOkBtn');
     await page.waitForTimeout(1000);
 
+    // === Assets: Monitor Alerts ===
+    logStep('资产监控告警面板');
+    await page.click('button[data-tab="assets"]');
+    await page.click('section[data-tab="assets"] button[data-subtab="monitor"]');
+    await page.waitForSelector('.subtab-panel[data-section="assets"][data-subtab="monitor"]:not(.hidden)', { state: 'visible', timeout: 5000 });
+    await page.waitForSelector('#monitorTrendChart', { state: 'visible', timeout: 5000 });
+    const monitorPanelReady = await page.evaluate(() => ({
+      alertTable: Boolean(document.getElementById('monitorAlertTable')),
+      windowTable: Boolean(document.getElementById('monitorWindowTable')),
+      rangeOptions: Array.from(document.querySelectorAll('#monitorTrendRange option')).map(option => option.value),
+      chartHtml: String(document.getElementById('monitorTrendChart')?.innerHTML || '')
+    }));
+    assert(monitorPanelReady.alertTable && monitorPanelReady.windowTable, '监控面板表格未渲染');
+    assert(['1h', '24h', '7d', '30d'].every(value => monitorPanelReady.rangeOptions.includes(value)), '监控趋势区间选项缺失');
+    assert(monitorPanelReady.chartHtml.length > 0, '监控趋势区域未渲染');
+    await page.click('#monitorWindowCreateBtn');
+    await page.waitForSelector('#monitorWindowModal:not(.hidden)', { state: 'visible', timeout: 5000 });
+    const windowModalReady = await page.evaluate(() => Boolean(document.getElementById('monitorWindowProject')?.options.length));
+    assert(windowModalReady, '维护窗口弹窗缺少项目选项');
+    await page.click('#monitorWindowModal button[data-action="close-modal"]');
+    await page.waitForSelector('#monitorWindowModal.hidden', { state: 'attached', timeout: 5000 });
+
+    // === PWA 与离线草稿 ===
+    logStep('PWA 与离线草稿');
+    const manifestReady = await page.evaluate(async () => {
+      const link = document.querySelector('link[rel="manifest"]');
+      const response = await fetch(link?.href || '/manifest.webmanifest');
+      const manifest = await response.json();
+      const registration = 'serviceWorker' in navigator ? await navigator.serviceWorker.getRegistration('/sw.js') : null;
+      return { ok: response.ok, name: manifest.name, hasIcon: Array.isArray(manifest.icons) && manifest.icons.length > 0, swReady: Boolean(registration) };
+    });
+    assert(manifestReady.ok && Boolean(manifestReady.name), 'PWA 清单加载失败');
+    assert(manifestReady.hasIcon, 'PWA 清单缺少图标');
+    assert(manifestReady.swReady, 'Service Worker 未注册');
+    await page.click('button[data-tab="logs"]');
+    await page.waitForSelector('.subtab-panel[data-section="logs"][data-subtab="form"]:not(.hidden)', { state: 'visible', timeout: 5000 });
+    await page.fill('#logForm textarea[name="event"]', '离线草稿回归内容');
+    await page.waitForTimeout(900);
+    const draftSaved = await page.evaluate(() => {
+      const key = Object.keys(localStorage).find(item => item.startsWith('onsiteOpsDraft:log:'));
+      if (!key) return null;
+      return JSON.parse(localStorage.getItem(key) || 'null');
+    });
+    assert(draftSaved?.fields?.event === '离线草稿回归内容', '日志离线草稿未保存');
+    await page.reload({ waitUntil: 'domcontentloaded' });
+    await page.waitForSelector('button[data-tab="logs"]', { state: 'visible', timeout: 30000 });
+    await page.click('button[data-tab="logs"]');
+    await page.waitForSelector('.subtab-panel[data-section="logs"][data-subtab="form"]:not(.hidden)', { state: 'visible', timeout: 10000 });
+    await page.waitForSelector('#logForm', { state: 'visible', timeout: 10000 });
+    await page.waitForFunction(() => document.querySelector('#logForm textarea[name="event"]')?.value === '离线草稿回归内容', { timeout: 15000 });
+    await page.evaluate(() => {
+      Object.keys(localStorage).filter(item => item.startsWith('onsiteOpsDraft:')).forEach(item => localStorage.removeItem(item));
+    });
+    await page.fill('#logForm textarea[name="event"]', '');
+    await page.waitForTimeout(800);
+    await page.evaluate(() => {
+      Object.keys(localStorage).filter(item => item.startsWith('onsiteOpsDraft:')).forEach(item => localStorage.removeItem(item));
+    });
+
     await cleanupData(page, { targetName, taskTitle, projectName, customerUsername, changeTitle, docTitles: [docTitle1, docTitle2], workReportDates: [reportDate, weeklyReportRangeStart] });
     process.stdout.write('E2E passed\n');
   } finally {

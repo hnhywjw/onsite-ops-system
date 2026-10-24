@@ -66,6 +66,8 @@
 
 - AI 巡检对象、模板、任务、结果。
 - 配置备份计划与备份记录。
+- 资产监控：定时采集 ping/TCP/SNMP 指标，连续阈值触发告警，历史采样按天落盘。
+- 通知外发：站内通知统一按事件组归并，支持 Webhook 与 SMTP 邮件两种通道。
 
 ### 报表与治理域
 
@@ -80,6 +82,15 @@
 - 新增统一周期计算与 `buildWorkloadMetrics()` 统计函数。
 - 工作量看板和工作汇报快照共用同一口径。
 - 审核动作接入审计日志集合。
+
+## v1.2.0 新增架构点
+
+- 资产监控调度：`runAssetMonitorScheduler()` 以 `assetMonitorSchedulerRunning` 互斥，手动采集走 `force:true`，冲突时返回 409。
+- 监控历史：采样写入 `data/monitor-history/<date>.jsonl`，保留 30 天，趋势查询按 5 分钟原始粒度重桶到 5 分钟至 6 小时。
+- 告警状态机：连续 N 次异常（默认 3）触发，维护窗口内标记 `suppressedReason='maintenance'`，静默期内只记事件不再外发。
+- 通知通道：`notificationChannels` 集中存放 Webhook/SMTP 配置，密钥以 `enc:` 前缀加密；投递使用 `setImmediate` 异步执行，失败仅记录 `lastError`。
+- 日志取证附件：图片压缩到长边 1600 后以 dataURL 内联，烧录时间/地点/记录人水印，受单张 3MB、6 张、用户 100MB、项目 1GB 四层配额约束。
+- PWA：`public/sw.js` 采用壳缓存加网络优先导航，跳过 `/api/`、`/ws`、`/downloads/`；离线草稿按用户隔离写入 localStorage，仅恢复不自动重放。
 
 ## 运行时数据流
 
