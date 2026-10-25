@@ -30,83 +30,84 @@
     - 添加 appendAuditLog 审计日志
   - [x] 2.5 实现 POST /api/documents/:id/verify-password 密码验证接口
     - 使用 verifyPassword() 校验密码
-    - 生成 HMAC-SHA256 下载令牌，有效期10分钟
-    - 实现速率限制：连续3次错误锁定5分钟，存储在 runtimeState 中
+    - 生成 HMAC-SHA256 下载令牌，有效期 10 分钟
+    - 实现速率限制：同一资料 + 客户端 IP + 用户连续 3 次错误锁定 5 分钟，状态存于 `runtimeState.loginRateLimits`
   - [x] 2.6 实现 GET /api/documents/:id/download 附件下载接口
     - 校验 token 合法性与时效性
     - 设置 Content-Disposition 为 attachment 触发下载
     - 以流式方式读取文件返回
 
-- [ ] 3. 检查点 - 后端 API 验证
-  - 使用 curl 手动验证各接口基本可用，如有疑问请询问用户
+- [x] 3. 检查点 - 后端 API 验证
+  - 已由 `scripts/smoke.js` 与 `scripts/regression.js` 覆盖，无需手工 curl
 
 - [x] 4. 前端资料管理 UI 结构
-  - [ ] 4.1 在导航栏添加"资料管理"按钮
-    - 插入在 AI智能巡检 按钮之后
+  - [x] 4.1 在导航栏添加"资料管理"按钮
+    - 位于知识库之后、报表管理之前
     - 使用 SVG 文件夹图标
     - 所有登录用户可见，无需 data-admin-only
-  - [ ] 4.2 创建 documents tab-panel 框架
+  - [x] 4.2 创建 documents tab-panel 框架
     - 包含 page-header（标题+副标题）、section-tabs（新增资料/资料列表两个subtab）
-  - [ ] 4.3 创建新增资料表单 HTML
+  - [x] 4.3 创建新增资料表单 HTML
     - 关联项目下拉框、资料类型下拉框（切换时动态显示设备字段或附件字段）
-    - 设备信息字段：品牌、型号、序列号、购买日期、过保日期、管理方式、管理IP、登录账号、登录密码
+    - 设备信息字段：品牌、型号、序列号、购买日期、过保日期、管理方式、管理 IP、管理端口、登录账号、登录密码
     - 附件上传：input type="file"
     - 访问密码输入框（必填，类型password）
-    - 表单提交按钮和取消按钮
+    - 表单提交按钮
     - 消息提示区域
-  - [ ] 4.4 创建资料列表区域 HTML
+  - [x] 4.4 创建资料列表区域 HTML
     - 项目筛选下拉框、类型筛选下拉框、关键字搜索框
-    - 分页表格：名称、类型、项目、创建时间、操作
+    - 分页表格：名称、类型、项目、品牌与规格型号、保修剩余时间、创建时间、操作
     - 分页控件
-  - [ ] 4.5 创建密码验证 Modal HTML
+  - [x] 4.5 创建密码验证 Modal HTML
     - 密码输入框 + 确认/取消按钮
-    - 剩余尝试次数提示
-  - [ ] 4.6 创建编辑资料 Modal HTML
+    - 错误与剩余尝试次数由后端消息回显
+  - [x] 4.6 创建编辑资料 Modal HTML
     - 与新增表单结构一致，预填数据
     - 保存修改/取消按钮
 
 - [x] 5. 前端资料管理 JS 逻辑
-  - [ ] 5.1 在 state 中添加 documents 字段并在 loadBaseData 中加载
+  - [x] 5.1 在 state 中添加 documents 字段并在 loadBaseData 中加载
     - state.documents = []
-    - loadBaseData 中添加 { key: 'documents', path: '/api/documents' }
-  - [ ] 5.2 实现 renderDocuments() 列表渲染函数
+    - `BASE_DATA_ENDPOINTS` 中已加入 { key: 'documents', path: '/api/documents' }
+  - [x] 5.2 实现 renderDocuments() 列表渲染函数
     - 分页、项目筛选、类型筛选、关键字搜索
-    - 管理员显示"修改""删除"按钮，非管理员显示"查看"按钮
+    - 按创建者权限显示"修改""删除"按钮，设备类资料显示"查看"、其余类型显示"下载"
     - 空状态展示
-  - [ ] 5.3 实现资料类型切换逻辑
+  - [x] 5.3 实现资料类型切换逻辑
     - type=device 时显示设备信息字段，隐藏附件
     - type非device时隐藏设备信息字段，显示附件上传
-  - [ ] 5.4 实现表单提交处理（multipart FormData）
+  - [x] 5.4 实现表单提交处理（multipart FormData）
     - 校验必填字段
     - 使用 fetch + FormData 提交
     - 成功后 toast 提示并刷新列表
-  - [ ] 5.5 实现密码验证 Modal 逻辑
+  - [x] 5.5 实现密码验证 Modal 逻辑
     - 点击"查看"或附件操作时弹出
     - POST /api/documents/:id/verify-password
     - 错误时提示剩余次数，锁定状态提示等待时间
     - 成功后展示设备详情或触发下载
-  - [ ] 5.6 实现附件下载逻辑
+  - [x] 5.6 实现附件下载逻辑
     - 密码验证成功后获取 token
     - 创建临时下载链接触发浏览器下载
-  - [ ] 5.7 实现编辑 Modal 逻辑
-    - 打开时预填数据，切换项目时刷新关联资产
+  - [x] 5.7 实现编辑 Modal 逻辑
+    - 打开时预填数据，仅管理员可修改关联项目
+    - 登录密码需再次验证访问密码后才能修改
     - PUT 提交更新
-  - [ ] 5.8 实现删除确认逻辑
+  - [x] 5.8 实现删除确认逻辑
     - showConfirm 确认删除
     - DELETE 后 toast 提示并刷新列表
 
-- [ ] 6. 检查点 - 确保 lint 和 typecheck 通过
+- [x] 6. 检查点 - 确保 lint 和 typecheck 通过
   - 运行 npm run lint && npm run typecheck
 
-- [ ] 7. 测试脚本更新
-  - [ ] 7.1 扩展 scripts/regression.js 添加资料管理回归断言
-    - 新增资料（设备信息）、密码验证、验证锁定、附件上传下载
-    - 修改资料、删除资料
-  - [ ] 7.2 扩展 scripts/e2e.js 添加浏览器级资料管理测试
-    - 新增资料 -> 列表验证 -> 密码验证 -> 查看详情
-  - [ ] 7.3 扩展 scripts/smoke.js 添加 GET /api/documents 冒烟断言
+- [x] 7. 测试脚本更新
+  - [x] 7.1 扩展 scripts/regression.js 添加资料管理回归断言
+    - 新增资料（设备信息）、密码验证、连续错误锁定、附件上传下载
+    - 修改资料、删除资料、客户角色字段脱敏、审计日志
+  - [x] 7.2 扩展 scripts/e2e.js 添加浏览器级资料管理测试
+    - 新增设备资料与合同附件 -> 列表验证 -> 密码验证 -> 查看详情 -> 下载 -> 修改 -> 删除
+  - [x] 7.3 扩展 scripts/smoke.js 添加 GET /api/documents 冒烟断言
     - 管理员登录后读取资料列表
 
-- [ ] 8. 最终验证
+- [x] 8. 最终验证
   - 运行 npm run lint && npm run typecheck && npm run regression
   - 如有错误修复后重新验证

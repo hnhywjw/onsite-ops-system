@@ -2589,6 +2589,20 @@ async function main() {
   });
   assert(verifyAfterUpdate.status === 200, '密码留空后原密码应保持不变');
 
+  // 连续 3 次错误密码应锁定 5 分钟，锁定期间即使密码正确也必须拒绝。
+  for (let attempt = 0; attempt < 3; attempt += 1) {
+    const failedVerify = await request(`/api/documents/${docId1}/verify-password`, {
+      method: 'POST', headers: { cookie, 'Content-Type': 'application/json' },
+      body: JSON.stringify({ password: `WrongDocPass${attempt}` })
+    });
+    assert(failedVerify.status === 401 || failedVerify.status === 429, '错误资料密码未返回预期状态');
+  }
+  const lockedVerify = await request(`/api/documents/${docId1}/verify-password`, {
+    method: 'POST', headers: { cookie, 'Content-Type': 'application/json' },
+    body: JSON.stringify({ password: 'DocPass123' })
+  });
+  assert(lockedVerify.status === 429, '连续错误密码后资料验密未锁定');
+
   const delDoc2 = await request(`/api/documents/${docId2}`, { method: 'DELETE', headers: { cookie } });
   assert(delDoc2.status === 200, '删除资料失败');
   const listAfterDel = await request('/api/documents', { headers: { cookie } });
