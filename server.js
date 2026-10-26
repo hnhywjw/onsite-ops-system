@@ -1452,10 +1452,11 @@ function runMaintenanceTasks(db) {
     const adminUserIds = (db.users || []).filter(item => item.role === 'admin' && canReceiveNotifications(item)).map(item => item.id);
     const projectUserIds = new Map();
     for (const item of db.users || []) {
-      if (!item.projectId) continue;
       if (!canReceiveNotifications(item)) continue;
-      if (!projectUserIds.has(item.projectId)) projectUserIds.set(item.projectId, []);
-      projectUserIds.get(item.projectId).push(item.id);
+      for (const projectId of userProjectIds(item)) {
+        if (!projectUserIds.has(projectId)) projectUserIds.set(projectId, []);
+        if (!projectUserIds.get(projectId).includes(item.id)) projectUserIds.get(projectId).push(item.id);
+      }
     }
     const isReadByAllRecipients = item => {
       const readBy = item.readBy && typeof item.readBy === 'object' ? item.readBy : {};
@@ -6838,7 +6839,7 @@ function backfillNotificationSources(db) {
 }
 
 function getActiveProjectEngineers(db, projectId) {
-  return (db.users || []).filter(item => item.projectId === projectId && item.role === 'engineer' && item.status !== 'disabled' && item.status !== 'rejected');
+  return (db.users || []).filter(item => userHasProject(item, projectId) && item.role === 'engineer' && item.status !== 'disabled' && item.status !== 'rejected');
 }
 
 function getWorkReportReminderSettings(db) {
@@ -8543,9 +8544,8 @@ function normalizeLogText(value = '') {
 }
 
 function validateLogPayload(db, user, body, existingLog = null) {
-  const projectId = user.role === 'admin'
-    ? String(body.projectId !== undefined ? body.projectId : (existingLog?.projectId || '')).trim()
-    : String(user.projectId || '').trim();
+  const requestedProjectId = String(body.projectId !== undefined ? body.projectId : (existingLog?.projectId || '')).trim();
+  const projectId = user.role === 'admin' ? requestedProjectId : resolveWriteProjectId(user, requestedProjectId);
   if (!projectId) return { error: '请选择关联项目' };
   if (!requireExistingProject(projectId, db)) return { error: '关联项目不存在' };
   const assetId = String(body.assetId !== undefined ? body.assetId : (existingLog?.assetId || '')).trim();
@@ -8723,7 +8723,7 @@ function buildWorkloadRows(db, currentUser, filters = {}) {
   const workDays = getInclusiveDayCount(rangeStart, rangeEnd);
   const reportRows = (db.workReports || []).filter(report => {
     if (!isWorkReportInRange(report, rangeStart, rangeEnd)) return false;
-    if (currentUser.role !== 'admin' && report.projectId !== currentUser.projectId) return false;
+    if (currentUser.role !== 'admin' && !userHasProject(currentUser, report.projectId)) return false;
     return true;
   });
   const reportStatsByUser = new Map();
@@ -9262,10 +9262,12 @@ function buildWorkReportOverviewCsv(overview) {
   return `\ufeff${lines.join('\n')}`;
 }
 
-function buildSummary(db, period, userId, projectId = '') {
+function buildSummary(db, period, userId, projectId = '', projectIds = []) {
+  const projectScope = new Set((projectIds || []).map(item => String(item || '').trim()).filter(Boolean));
   const filteredLogs = db.logs.filter(log => {
     if (userId && log.userId !== userId) return false;
-    if (projectId && log.projectId !== projectId) return false;
+    if (projectId && String(log.projectId || '') !== String(projectId)) return false;
+    if (!projectId && projectScope.size && !projectScope.has(String(log.projectId || ''))) return false;
     return true;
   });
   const map = new Map();
@@ -9558,7 +9560,7 @@ function buildOperationalReportData(db, scope, targetId, period, viewer) {
     ? db.projects.find(item => item.id === targetId)
     : db.projects.find(item => item.id === targetUser?.projectId);
   if (!project || (scope === 'user' && !targetUser)) return null;
-  const projectUserIds = (db.users || []).filter(item => item.projectId === project.id).map(item => item.id);
+  const projectUserIds = (db.users || []).filter(item => userHasProject(item, project.id)).map(item => item.id);
   const logs = (db.logs || [])
     .filter(item => scope === 'user' ? item.userId === targetId : item.projectId === project.id)
     .filter(item => getPeriodKey(item.date, period) === currentPeriod)
@@ -9580,7 +9582,7 @@ function buildOperationalReportData(db, scope, targetId, period, viewer) {
     .sort((a, b) => String(b.occurredAt || b.createdAt || '').localeCompare(String(a.occurredAt || a.createdAt || '')));
   const documents = (db.documents || []).filter(item => item.projectId === project.id);
   const spareParts = (db.spareParts || []).filter(item => item.projectId === project.id);
-  const users = (db.users || []).filter(item => item.projectId === project.id);
+  const users = (db.users || []).filter(item => userHasProject(item, project.id));
   const totalHours = Number(logs.reduce((sum, item) => sum + Number(item.durationHours || 0), 0).toFixed(2));
   const sparePartStock = spareParts.reduce((sum, item) => sum + Number(item.quantity ?? item.stock ?? 0), 0);
   const projectStateSummary = `资产 ${assets.length} 项，巡检计划 ${plans.length} 个，资料 ${documents.length} 份，备件 ${spareParts.length} 类 / 库存 ${sparePartStock} 件。`;
@@ -14949,7 +14951,7 @@ const requestHandler = async (req, res) => {
       if (!approver || !canViewProject(approver, projectId) || !['admin', 'engineer'].includes(approver.role)) return json(res, 400, { message: '审批人不存在或无权限审批当前项目' });
       if (approver.id === user.id) return json(res, 400, { message: '不能指定提交人本人为审批人' });
       const customer = requireExistingUser(body.customerId, db);
-      if (!customer || customer.projectId !== projectId || customer.role !== 'customer') return json(res, 400, { message: '甲方客户不存在或不属于当前项目' });
+      if (!customer || !userHasProject(customer, projectId) || customer.role !== 'customer') return json(res, 400, { message: '甲方客户不存在或不属于当前项目' });
       const riskLevel = String(body.riskLevel || '中').trim();
       if (!['低', '中', '高'].includes(riskLevel)) return json(res, 400, { message: '风险等级无效' });
       const item = {
@@ -15046,12 +15048,12 @@ const requestHandler = async (req, res) => {
         }
         if (body.customerId !== undefined) {
           const customer = requireExistingUser(body.customerId, lockDb);
-          if (!customer || customer.projectId !== target.projectId || customer.role !== 'customer') return { status: 400, message: '甲方客户不存在或不属于当前项目' };
+          if (!customer || !userHasProject(customer, target.projectId) || customer.role !== 'customer') return { status: 400, message: '甲方客户不存在或不属于当前项目' };
           target.customerId = customer.id;
           target.customerName = customer.name;
         } else if (changeProjectChanged && target.customerId) {
           const customer = requireExistingUser(target.customerId, lockDb);
-          if (!customer || customer.projectId !== target.projectId || customer.role !== 'customer') {
+          if (!customer || !userHasProject(customer, target.projectId) || customer.role !== 'customer') {
             target.customerId = '';
             target.customerName = '';
           }
@@ -15269,7 +15271,7 @@ const requestHandler = async (req, res) => {
       const assignee = body.assigneeId ? requireExistingUser(body.assigneeId, db) : null;
       if (body.assigneeId) {
         if (!assignee) return json(res, 400, { message: '指派的处理人不存在' });
-        if (user.role !== 'admin' && assignee.projectId !== projectId) {
+        if (user.role !== 'admin' && !userHasProject(assignee, projectId)) {
           return json(res, 400, { message: '处理人不属于当前项目' });
         }
       }
@@ -15349,7 +15351,7 @@ const requestHandler = async (req, res) => {
       if (body.assigneeId !== undefined) {
         const assignee = body.assigneeId ? requireExistingUser(body.assigneeId, db) : null;
         if (body.assigneeId && !assignee) return json(res, 400, { message: '指派的处理人不存在' });
-        if (assignee && user.role !== 'admin' && assignee.projectId !== target.projectId) {
+        if (assignee && user.role !== 'admin' && !userHasProject(assignee, target.projectId)) {
           return json(res, 400, { message: '处理人不属于当前项目' });
         }
         target.assigneeId = assignee?.id || '';
@@ -15388,7 +15390,7 @@ const requestHandler = async (req, res) => {
         if (['已完成', '已关闭'].includes(target.status)) return json(res, 400, { message: '已完成或已关闭的工单不可转派' });
         const assignee = requireExistingUser(String(body.assigneeId || ''), db);
         if (!assignee) return json(res, 400, { message: '请选择有效的转派处理人' });
-        if (user.role !== 'admin' && assignee.projectId !== target.projectId) {
+        if (user.role !== 'admin' && !userHasProject(assignee, target.projectId)) {
           return json(res, 400, { message: '处理人不属于当前项目' });
         }
         target.assigneeId = assignee.id;
@@ -15467,13 +15469,13 @@ const requestHandler = async (req, res) => {
       }
       const primaryUser = requireExistingUser(String(body.primaryUserId || ''), db);
       if (!primaryUser) return json(res, 400, { message: '请选择值班人' });
-      if (user.role !== 'admin' && primaryUser.projectId !== projectId) {
+      if (user.role !== 'admin' && !userHasProject(primaryUser, projectId)) {
         return json(res, 400, { message: '值班人不属于当前项目' });
       }
       if (body.backupUserId) {
         const backupUser = requireExistingUser(String(body.backupUserId), db);
         if (!backupUser) return json(res, 400, { message: '备班人不存在' });
-        if (user.role !== 'admin' && backupUser.projectId !== projectId) {
+        if (user.role !== 'admin' && !userHasProject(backupUser, projectId)) {
           return json(res, 400, { message: '备班人不属于当前项目' });
         }
       }
@@ -15535,7 +15537,7 @@ const requestHandler = async (req, res) => {
       if (body.primaryUserId !== undefined) {
         const primaryUser = requireExistingUser(String(body.primaryUserId || ''), db);
         if (!primaryUser) return json(res, 400, { message: '请选择值班人' });
-        if (user.role !== 'admin' && primaryUser.projectId !== target.projectId) {
+        if (user.role !== 'admin' && !userHasProject(primaryUser, target.projectId)) {
           return json(res, 400, { message: '值班人不属于当前项目' });
         }
         target.primaryUserId = primaryUser.id;
@@ -15544,7 +15546,7 @@ const requestHandler = async (req, res) => {
         if (body.backupUserId) {
           const backupUser = requireExistingUser(String(body.backupUserId), db);
           if (!backupUser) return json(res, 400, { message: '备班人不存在' });
-          if (user.role !== 'admin' && backupUser.projectId !== target.projectId) {
+          if (user.role !== 'admin' && !userHasProject(backupUser, target.projectId)) {
             return json(res, 400, { message: '备班人不属于当前项目' });
           }
         }
@@ -15573,7 +15575,7 @@ const requestHandler = async (req, res) => {
       if (!handoverContent) return json(res, 400, { message: '请填写交接内容' });
       const receivedBy = body.receivedBy ? requireExistingUser(String(body.receivedBy), db) : null;
       if (body.receivedBy && !receivedBy) return json(res, 400, { message: '接班人不存在' });
-      if (receivedBy && user.role !== 'admin' && receivedBy.projectId !== target.projectId) {
+      if (receivedBy && user.role !== 'admin' && !userHasProject(receivedBy, target.projectId)) {
         return json(res, 400, { message: '接班人不属于当前项目' });
       }
       target.handoverContent = handoverContent.slice(0, 4000);
@@ -15637,7 +15639,7 @@ const requestHandler = async (req, res) => {
       if (!approver || !canViewProject(approver, projectId) || !['admin', 'engineer'].includes(approver.role)) return json(res, 400, { message: '审批人不存在或无权限审批当前项目' });
       if (approver.id === user.id) return json(res, 400, { message: '不能指定提交人本人为审批人' });
       const customer = requireExistingUser(body.customerId, db);
-      if (!customer || customer.projectId !== projectId || customer.role !== 'customer') return json(res, 400, { message: '甲方客户不存在或不属于当前项目' });
+      if (!customer || !userHasProject(customer, projectId) || customer.role !== 'customer') return json(res, 400, { message: '甲方客户不存在或不属于当前项目' });
       const relatedId = body.relatedId || '';
       if (body.category === 'change' && relatedId) {
         const changeRecord = (db.changeRecords || []).find(entry => entry.id === relatedId);
@@ -16765,7 +16767,7 @@ const requestHandler = async (req, res) => {
         if (!requireExistingProject(projectId, lockDb)) return { status: 400, message: '关联项目不存在' };
         if (user.role !== 'admin' && targetUserId !== user.id) return { status: 403, message: '仅支持创建本人的工作汇报' };
         // 汇报人须属于所选项目：已绑定项目的人员不能为其项目之外的项目写汇报。
-        if (targetUser.projectId && targetUser.projectId !== projectId) {
+        if (userProjectIds(targetUser).length && !userHasProject(targetUser, projectId)) {
           return { status: 400, message: '汇报人不属于所选项目' };
         }
         const periodMeta = getWorkReportPeriodMeta(reportType, body.anchorDate || body.rangeStart || formatDateKey(new Date()));
@@ -16839,7 +16841,7 @@ const requestHandler = async (req, res) => {
       if (!requireExistingProject(nextProjectId, db)) return json(res, 400, { message: '关联项目不存在' });
       // 与创建保持一致：已绑定项目的汇报人不能把汇报改到其项目之外。
       const reportOwner = requireExistingUser(target.userId, db);
-      if (reportOwner && reportOwner.projectId && reportOwner.projectId !== nextProjectId) {
+      if (reportOwner && userProjectIds(reportOwner).length && !userHasProject(reportOwner, nextProjectId)) {
         return json(res, 400, { message: '汇报人不属于所选项目' });
       }
       const periodMeta = getWorkReportPeriodMeta(nextReportType, body.anchorDate || body.rangeStart || target.rangeStart);
@@ -17385,11 +17387,26 @@ const requestHandler = async (req, res) => {
       if (user.role === 'customer') return json(res, 403, { message: '当前账号无权查看汇总' });
       const period = reqUrl.searchParams.get('period') || 'week';
       const userId = user.role === 'admin' ? reqUrl.searchParams.get('userId') || '' : user.role === 'engineer' ? user.id : '';
-      const projectId = user.role === 'admin' ? reqUrl.searchParams.get('projectId') || '' : resolveWriteProjectId(user, reqUrl.searchParams.get('projectId'));
-      if (user.role !== 'admin' && user.role !== 'engineer' && !projectId) {
-        return json(res, 403, { message: '未绑定项目，无权查看汇总' });
+      const requestedProjectId = String(reqUrl.searchParams.get('projectId') || '').trim();
+      let projectId = '';
+      let projectIds = [];
+      if (user.role === 'admin') {
+        projectId = requestedProjectId;
+      } else {
+        const scopedProjectIds = userProjectIds(user);
+        if (requestedProjectId) {
+          if (!scopedProjectIds.includes(requestedProjectId)) {
+            return json(res, 403, { message: '无权查看该项目汇总' });
+          }
+          projectId = requestedProjectId;
+        } else {
+          projectIds = scopedProjectIds;
+        }
+        if (!projectId && !projectIds.length) {
+          return json(res, 403, { message: '未绑定项目，无权查看汇总' });
+        }
       }
-      return json(res, 200, buildSummary(db, period, userId, projectId));
+      return json(res, 200, buildSummary(db, period, userId, projectId, projectIds));
     }
 
     if (req.method === 'POST' && pathname.startsWith('/api/reports/user/') && pathname.endsWith('/html')) {
@@ -17945,6 +17962,7 @@ wss.on('connection', (ws, request) => {
     ws.userId = user.id;
     ws.role = user.role;
     ws.projectId = user.projectId || '';
+    ws.projectIds = userProjectIds(user);
     ws.sessionToken = getSessionToken(request);
   } catch (_) {
     ws.close();
@@ -17990,6 +18008,7 @@ const wsHeartbeatTimer = setInterval(() => {
       // 角色/项目可能已被管理员调整，广播前同步到最新值。
       ws.role = user.role;
       ws.projectId = user.projectId || '';
+      ws.projectIds = userProjectIds(user);
     }
     if (ws.isAlive === false) {
       ws.terminate();
@@ -18019,7 +18038,7 @@ function broadcastToProject(projectId, payload = {}) {
     try {
       if (ws.readyState !== 1) continue;
       const isAdmin = ws.role === 'admin';
-      const sameProject = Boolean(projectId) && ws.projectId === projectId;
+      const sameProject = Boolean(projectId) && userHasProject({ projectId: ws.projectId, projectIds: ws.projectIds }, projectId);
       if (!isAdmin && !sameProject) continue;
       const body = { type: 'monitor_alert', projectId, ...payload, timestamp: Date.now() };
       if (ws.role === 'customer') {
@@ -18043,7 +18062,7 @@ function sendToScopedWs(message, projectId) {
       if (ws.bufferedAmount > 1024 * 1024) continue;
       const allowAll = !projectId;
       const isAdmin = ws.role === 'admin';
-      const sameProject = Boolean(projectId) && ws.projectId === projectId;
+      const sameProject = Boolean(projectId) && userHasProject({ projectId: ws.projectId, projectIds: ws.projectIds }, projectId);
       if (ws.role === 'customer' && !sameProject) continue;
       if (allowAll || isAdmin || sameProject) ws.send(message);
     } catch (_) {
@@ -18787,9 +18806,9 @@ function broadcastTrafficUpdate(projectId) {
       if (ws.readyState !== 1) continue;
       if (ws.bufferedAmount > 1024 * 1024) continue;
       const isAdmin = ws.role === 'admin';
-      const sameProject = Boolean(projectId) && ws.projectId === projectId;
+      const sameProject = Boolean(projectId) && userHasProject({ projectId: ws.projectId, projectIds: ws.projectIds }, projectId);
       if (!isAdmin && !sameProject) continue;
-      const snapshot = buildTrafficSnapshotForUser({ role: ws.role, projectId: ws.projectId || '' }, db);
+      const snapshot = buildTrafficSnapshotForUser({ role: ws.role, projectId: ws.projectId || '', projectIds: ws.projectIds || [] }, db);
       ws.send(JSON.stringify({ type: 'traffic_update', projectId, rates: snapshot.rates, portStatus: snapshot.portStatus, timestamp: Date.now() }));
     } catch (_) {
       stale.push(ws);

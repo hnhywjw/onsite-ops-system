@@ -2925,6 +2925,40 @@ async function main() {
     body: JSON.stringify({ projectId: otherProject.data.id, reason: '越权调拨' })
   });
   assert(multiCrossTransfer.status === 403, '工程师不应执行跨项目调拨');
+  const multiLogPayload = (logProjectId, date, event) => ({
+    projectId: logProjectId,
+    date,
+    ticketType: '事务工作',
+    event,
+    relatedTarget: '多项目汇总设备',
+    result: '已完成',
+    process: '多项目汇总回归',
+    conclusion: '完成',
+    durationHours: 1
+  });
+  const multiLogPrimary = await request('/api/logs', {
+    method: 'POST', headers: { cookie: multiCookie, 'Content-Type': 'application/json' },
+    body: JSON.stringify(multiLogPayload(projectId, '2098-12-28', '多项目汇总主项目日志'))
+  });
+  const multiLogSecondary = await request('/api/logs', {
+    method: 'POST', headers: { cookie: multiCookie, 'Content-Type': 'application/json' },
+    body: JSON.stringify(multiLogPayload(multiProject.data.id, '2098-12-29', '多项目汇总兼任项目日志'))
+  });
+  assert(multiLogPrimary.status === 201 && multiLogSecondary.status === 201, '多项目工程师创建日志失败');
+  const multiSummaryAll = await request('/api/reports/summary?period=month', { headers: { cookie: multiCookie } });
+  const multiSummaryAllRow = (multiSummaryAll.data || []).find(item => item.period === '2098-12');
+  assert(multiSummaryAll.status === 200 && multiSummaryAllRow && multiSummaryAllRow.totalLogs === 2, '多项目账号汇总应默认覆盖全部授权项目');
+  assert((multiSummaryAllRow.projects || []).length === 2, '多项目账号汇总应包含主项目与兼任项目');
+  const multiSummaryExplicit = await request(`/api/reports/summary?period=month&projectId=${encodeURIComponent(multiProject.data.id)}`, { headers: { cookie: multiCookie } });
+  const multiSummaryExplicitRow = (multiSummaryExplicit.data || []).find(item => item.period === '2098-12');
+  assert(multiSummaryExplicit.status === 200 && multiSummaryExplicitRow && multiSummaryExplicitRow.totalLogs === 1, '显式指定项目时汇总应只统计该项目');
+  const multiSummaryCross = await request(`/api/reports/summary?period=month&projectId=${encodeURIComponent(otherProject.data.id)}`, { headers: { cookie: multiCookie } });
+  assert(multiSummaryCross.status === 403, '多项目账号查询未授权项目汇总应返回 403');
+  const multiLogCleanup = await Promise.all([
+    request(`/api/logs/${multiLogPrimary.data.id}`, { method: 'DELETE', headers: { cookie } }),
+    request(`/api/logs/${multiLogSecondary.data.id}`, { method: 'DELETE', headers: { cookie } })
+  ]);
+  assert(multiLogCleanup.every(item => item.status === 200), '清理多项目汇总日志失败');
 
   // 资产全生命周期：借出 → 归还 → 调拨 → 报废，以及盘点差异。
   const lifecycleAsset = await request('/api/assets', {

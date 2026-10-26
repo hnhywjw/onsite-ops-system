@@ -5446,18 +5446,17 @@
     function fillWorkloadProjectSelect() {
       const select = document.getElementById('workloadProjectId');
       if (!select) return;
-      const projects = state.user?.role === 'admin' ? state.projects : state.projects.filter(item => item.id === state.user?.projectId);
+      const projects = projectsInUserScope();
       const options = ['<option value="">全部项目</option>'].concat(projects.map(item => `<option value="${item.id}">${esc(formatProjectDisplay(item))}</option>`));
       const currentValue = select.value;
       select.innerHTML = options.join('');
       if (currentValue && projects.some(item => item.id === currentValue)) select.value = currentValue;
-      if (state.user?.role !== 'admin' && state.user?.projectId) select.value = state.user.projectId;
     }
 
     function fillWorkReportProjectSelect() {
       const select = document.getElementById('workReportProjectId');
       if (!select) return;
-      const projects = state.user?.role === 'admin' ? state.projects : state.projects.filter(item => item.id === state.user?.projectId);
+      const projects = projectsInUserScope();
       const currentValue = select.value;
       select.innerHTML = projects.map(item => `<option value="${item.id}">${esc(formatProjectDisplay(item))}</option>`).join('');
       if (currentValue && projects.some(item => item.id === currentValue)) select.value = currentValue;
@@ -5467,15 +5466,13 @@
     function fillWorkReportFilterProjectSelect() {
       const select = document.getElementById('workReportFilterProject');
       if (!select) return;
-      const projects = state.user?.role === 'admin' ? state.projects : state.projects.filter(item => item.id === state.user?.projectId);
+      const projects = projectsInUserScope();
       const currentValue = select.value;
       select.innerHTML = ['<option value="">全部项目</option>']
         .concat(projects.map(item => `<option value="${item.id}">${esc(formatProjectDisplay(item))}</option>`))
         .join('');
       if (currentValue && projects.some(item => item.id === currentValue)) {
         select.value = currentValue;
-      } else if (state.user?.role !== 'admin' && state.user?.projectId) {
-        select.value = state.user.projectId;
       }
     }
 
@@ -5485,7 +5482,7 @@
       const projectId = document.getElementById('workReportFilterProject')?.value || '';
       const currentValue = select.value;
       const users = state.user?.role === 'admin'
-        ? state.users.filter(item => item.role !== 'customer' && (!projectId || item.projectId === projectId || item.role === 'admin'))
+        ? state.users.filter(item => item.role !== 'customer' && (!projectId || item.role === 'admin' || userBelongsToProject(item, projectId)))
         : state.users.filter(item => item.id === state.user?.id);
       select.innerHTML = ['<option value="">全部人员</option>']
         .concat(users.map(item => `<option value="${item.id}">${esc(item.name)}</option>`))
@@ -5947,7 +5944,7 @@
     }
 
     function getProjectUsers(projectId) {
-      return state.users.filter(item => !projectId || item.projectId === projectId || item.role === 'admin');
+      return state.users.filter(item => !projectId || item.role === 'admin' || userBelongsToProject(item, projectId));
     }
 
     function getProjectApprovers(projectId) {
@@ -5955,7 +5952,7 @@
     }
 
     function getProjectCustomers(projectId) {
-      return state.users.filter(item => item.projectId === projectId && item.role === 'customer');
+      return state.users.filter(item => item.role === 'customer' && userBelongsToProject(item, projectId));
     }
 
     function roleLabel(role) {
@@ -5998,9 +5995,18 @@
     }
 
     function userProjectIdSet() {
-      const user = state.user || {};
+      return new Set(userProjectIdsOf(state.user));
+    }
+
+    function userProjectIdsOf(user) {
+      if (!user) return [];
       const ids = Array.isArray(user.projectIds) && user.projectIds.length ? user.projectIds : [user.projectId];
-      return new Set(ids.filter(Boolean));
+      return [...new Set(ids.map(item => String(item || '').trim()).filter(Boolean))];
+    }
+
+    function userBelongsToProject(user, projectId) {
+      if (!user || !projectId) return false;
+      return userProjectIdsOf(user).includes(String(projectId));
     }
 
     function projectsInUserScope() {
@@ -7232,7 +7238,7 @@
       const currentValue = select.value;
       const pid = state.logFilterProjectId || '';
       let list = state.users;
-      if (pid) list = list.filter(item => item.projectId === pid);
+      if (pid) list = list.filter(item => userBelongsToProject(item, pid));
       select.innerHTML = '<option value="">全部人员</option>' + list.map(item => `<option value="${item.id}">${esc(item.name)}</option>`).join('');
       if (currentValue && list.some(item => item.id === currentValue)) select.value = currentValue;
     }
@@ -7252,7 +7258,7 @@
       const currentValue = select.value;
       const pid = state.kbFilterProjectId || '';
       let list = state.users;
-      if (pid) list = list.filter(item => item.projectId === pid);
+      if (pid) list = list.filter(item => userBelongsToProject(item, pid));
       select.innerHTML = '<option value="">全部人员</option>' + list.map(item => `<option value="${item.id}">${esc(item.name)}</option>`).join('');
       if (currentValue && list.some(item => item.id === currentValue)) select.value = currentValue;
     }
@@ -7262,7 +7268,9 @@
       if (!select) return;
       const currentValue = select.value;
       const pid = projectId || state.user.projectId;
-      const users = state.user.role === 'admin' ? state.users.filter(item => (!pid || item.projectId === pid) && item.role !== 'customer') : state.users.filter(item => item.projectId === pid && item.role !== 'customer');
+      const users = state.user.role === 'admin'
+        ? state.users.filter(item => item.role !== 'customer' && (!pid || userBelongsToProject(item, pid)))
+        : state.users.filter(item => item.role !== 'customer' && userBelongsToProject(item, pid));
       select.innerHTML = ['<option value="">请选择</option>'].concat(users.map(item => `<option value="${esc(item.name)}">${esc(item.name)}</option>`)).join('');
       if (currentValue && users.some(item => item.name === currentValue)) {
         select.value = currentValue;
@@ -7274,7 +7282,7 @@
       if (!select) return;
       const currentValue = select.value;
       const pid = projectId || state.user.projectId;
-      const list = state.users.filter(item => (!pid || item.projectId === pid) && item.role === 'customer');
+      const list = state.users.filter(item => item.role === 'customer' && (!pid || userBelongsToProject(item, pid)));
       select.innerHTML = ['<option value="">请选择</option>'].concat(list.map(item => `<option value="${esc(item.name)}">${esc(item.name)}</option>`)).join('');
       if (currentValue && list.some(item => item.name === currentValue)) {
         select.value = currentValue;
@@ -7286,7 +7294,7 @@
       if (!select) return;
       const currentValue = select.value;
       const pid = projectId || '';
-      const list = pid ? state.users.filter(item => item.projectId === pid && item.role !== 'customer') : state.users.filter(item => item.role !== 'customer');
+      const list = pid ? state.users.filter(item => userBelongsToProject(item, pid) && item.role !== 'customer') : state.users.filter(item => item.role !== 'customer');
       if (currentValue && state.users.some(item => item.name === currentValue && item.role === 'customer')) {
         const cust = state.users.find(item => item.name === currentValue && item.role === 'customer');
         if (cust && !list.some(item => item.id === cust.id)) list.push(cust);
@@ -7302,7 +7310,7 @@
       if (!select) return;
       const currentValue = select.value;
       const pid = projectId || '';
-      const list = pid ? state.users.filter(item => item.projectId === pid && item.role === 'customer') : [];
+      const list = pid ? state.users.filter(item => userBelongsToProject(item, pid) && item.role === 'customer') : [];
       select.innerHTML = ['<option value="">请选择</option>'].concat(list.map(item => `<option value="${esc(item.name)}">${esc(item.name)}</option>`)).join('');
       if (currentValue && list.some(item => item.name === currentValue)) {
         select.value = currentValue;
@@ -9763,14 +9771,14 @@
       const rows = sourceTickets.slice(start, start + pageSize);
       document.getElementById('ticketTable').innerHTML = rows.map(item => {
         const actions = [];
-        const canOperate = ['admin', 'engineer'].includes(state.user?.role) && (state.user?.role === 'admin' || item.projectId === state.user?.projectId);
+        const canOperate = ['admin', 'engineer'].includes(state.user?.role) && (state.user?.role === 'admin' || userBelongsToProject(state.user, item.projectId));
         if (canOperate && item.status === '待接单') actions.push(`<button class="secondary" data-action="ticket-accept" data-id="${attrEsc(item.id)}" type="button">接单</button>`);
         if (canOperate && item.status === '处理中') {
           actions.push(`<button class="secondary" data-action="ticket-resolve" data-id="${attrEsc(item.id)}" type="button">回单</button>`);
           actions.push(`<button class="secondary" data-action="ticket-transfer" data-id="${attrEsc(item.id)}" type="button">转派</button>`);
         }
         if (canOperate && item.status === '待客户确认') actions.push(`<button class="secondary" data-action="ticket-close" data-id="${attrEsc(item.id)}" type="button">关闭</button>`);
-        if (state.user?.role === 'customer' && item.status === '待客户确认' && item.projectId === state.user?.projectId) {
+        if (state.user?.role === 'customer' && item.status === '待客户确认' && userBelongsToProject(state.user, item.projectId)) {
           actions.push(`<button class="secondary" data-action="ticket-confirm" data-id="${attrEsc(item.id)}" type="button">确认完成</button>`);
         }
         if (canOperate && !['已完成', '已关闭'].includes(item.status)) actions.push(`<button class="secondary" data-action="edit-ticket" data-id="${attrEsc(item.id)}" type="button">编辑</button>`);
@@ -9790,7 +9798,7 @@
       const shiftStart = (state.dutyShiftPage - 1) * shiftPageSize;
       const shiftRows = sourceShifts.slice(shiftStart, shiftStart + shiftPageSize);
       document.getElementById('dutyShiftTable').innerHTML = shiftRows.map(item => {
-        const canOperate = ['admin', 'engineer'].includes(state.user?.role) && (state.user?.role === 'admin' || item.projectId === state.user?.projectId);
+        const canOperate = ['admin', 'engineer'].includes(state.user?.role) && (state.user?.role === 'admin' || userBelongsToProject(state.user, item.projectId));
         const actions = [];
         if (canOperate && item.status !== '已交接') {
           if (item.status === '待开始') actions.push(`<button class="secondary" data-action="duty-start" data-id="${attrEsc(item.id)}" type="button">开始值班</button>`);
