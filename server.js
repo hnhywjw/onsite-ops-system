@@ -14709,9 +14709,11 @@ const requestHandler = async (req, res) => {
           if (quantityValue !== target.quantity) inventoryAdjusted = true;
           target.quantity = quantityValue;
         }
+        let safeStockChanged = false;
         if (body.safeStock !== undefined) {
           const safeStockValue = body.safeStock === '' ? 0 : Number(body.safeStock);
           if (!Number.isFinite(safeStockValue) || safeStockValue < 0) return { status: 400, message: '安全库存必须为非负数' };
+          safeStockChanged = safeStockValue !== target.safeStock;
           target.safeStock = safeStockValue;
         }
         if (body.unit !== undefined) target.unit = body.unit;
@@ -14749,6 +14751,10 @@ const requestHandler = async (req, res) => {
           });
         }
         appendAuditLog(lockDb, user, 'update', 'sparePart', sparePartId, `修改备件 ${target.name}`, target.projectId);
+        // 编辑库存或安全库存同样可能跌破阈值，补发提醒，避免只有出入库路径才会触发预警。
+        if ((inventoryAdjusted || safeStockChanged) && target.quantity <= target.safeStock) {
+          createNotification(lockDb, target.projectId, '备件库存提醒', `${target.name} 当前库存 ${target.quantity}，已达到安全阈值`, 'warning', 'inventory', 'sparePart', target.id);
+        }
         await writeDb(lockDb);
         return { status: 200, item: target };
       });

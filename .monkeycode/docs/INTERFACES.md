@@ -138,7 +138,6 @@
 ### 报表与工作汇报
 
 - `GET /api/reports/summary`
-- `GET /api/reports/drilldown`
 - `GET /api/work-reports`
   - 支持 `status`、`reportType`、`projectId`、`userId` 筛选。
 - `POST /api/work-reports`

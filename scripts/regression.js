@@ -3866,6 +3866,16 @@ async function main() {
   });
   assert(p2Spare.status === 201, '创建 P2 备件失败');
   const p2SpareId = p2Spare.data.id;
+  const p2SpareNotificationsBefore = await listProjectNotifications(cookie, p2ProjectId);
+  assert(p2SpareNotificationsBefore.some(item => item.category === 'inventory' && item.sourceId === p2SpareId), '创建低库存备件应产生库存提醒');
+  const p2SpareStockDrop = await request(`/api/spare-parts/${p2SpareId}`, {
+    method: 'PUT', headers: { cookie, 'Content-Type': 'application/json' },
+    body: JSON.stringify({ safeStock: 2 })
+  });
+  assert(p2SpareStockDrop.status === 200 && p2SpareStockDrop.data.quantity === 1 && p2SpareStockDrop.data.safeStock === 2, '修改备件安全库存失败');
+  const p2SpareNotificationsAfter = await listProjectNotifications(cookie, p2ProjectId);
+  assert(p2SpareNotificationsAfter.filter(item => item.category === 'inventory' && item.sourceId === p2SpareId).length
+    >= p2SpareNotificationsBefore.filter(item => item.category === 'inventory' && item.sourceId === p2SpareId).length + 1, '编辑备件跌破安全库存应补发库存提醒');
   const p2Purchase = await request('/api/spare-part-purchases', {
     method: 'POST', headers: { cookie: p2EngineerCookie, 'Content-Type': 'application/json' },
     body: JSON.stringify({ sparePartId: p2SpareId, vendorId: p2VendorId, quantity: 3, unitPrice: 500 })
