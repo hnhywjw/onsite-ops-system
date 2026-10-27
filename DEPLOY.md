@@ -66,7 +66,7 @@
 |------|------|------|
 | 3000 | HTTP | 应用服务（页面 + API） |
 | 3443 | HTTPS | 可选，内置 HTTPS 登录专用 |
-| 3306 | TCP | MySQL 数据库 |
+| 3306 | TCP | MySQL 数据库（仅容器内网络访问） |
 
 ---
 
@@ -80,33 +80,42 @@ cd /opt/onsite-ops-system
 tar -xzf onsite-ops-system-prod-YYYYMMDD.tar.gz
 ```
 
-### 3.2 修改数据库密码
+### 3.2 准备生产环境变量
 
-编辑 `docker-compose.yml`，将以下值替换为你自己的强密码：
-
-```yaml
-# mysql 服务
-MYSQL_ROOT_PASSWORD: Alpass@2026       # 改为你自己的 root 密码
-MYSQL_PASSWORD: Alpass@2026           # 改为你自己的应用密码
-
-# onsite-ops-system 服务
-MYSQL_PASSWORD: Alpass@2026           # 与上方保持一致
+```bash
+cp .env.production.example .env.production
 ```
+
+编辑 `.env.production`，替换以下必填项；缺项时 Compose 会直接报错并拒绝启动：
+
+```text
+MYSQL_ROOT_PASSWORD=替换为强 root 密码
+MYSQL_PASSWORD=替换为强应用密码
+INITIAL_ADMIN_PASSWORD=替换为管理员初始密码
+INITIAL_ENGINEER_PASSWORD=替换为工程师初始密码
+INITIAL_ADMIN_SECURITY_ANSWER=替换为管理员安全问题答案
+INITIAL_ENGINEER_SECURITY_ANSWER=替换为工程师安全问题答案
+ENCRYPTION_KEY=替换为至少 32 位随机字符串
+UPGRADE_SIGNING_KEY=替换为至少 32 位随机字符串
+DOCUMENT_TOKEN_SECRET=替换为至少 32 位随机字符串
+```
+
+密钥可用 `openssl rand -base64 32` 生成。`MYSQL_ROOT_PASSWORD`、`MYSQL_PASSWORD` 与三个密钥在生产环境缺失或强度不足时，服务会拒绝启动。
 
 ### 3.3 启动服务
 
 ```bash
-docker compose up -d --build
+docker compose --env-file .env.production up -d --build
 ```
 
 ### 3.4 查看状态
 
 ```bash
 # 服务状态
-docker compose ps
+docker compose --env-file .env.production ps
 
 # 实时日志
-docker compose logs -f
+docker compose --env-file .env.production logs -f
 
 # 健康检查
 curl http://localhost:3000/api/health
@@ -115,7 +124,7 @@ curl http://localhost:3000/api/health
 ### 3.5 停止服务
 
 ```bash
-docker compose down
+docker compose --env-file .env.production down
 ```
 
 ---
@@ -173,7 +182,13 @@ MYSQL_PASSWORD=Alpass@2026
 MYSQL_DATABASE=onsite_ops_system
 ALLOW_FILE_DB_FALLBACK=false
 HTTPS_PORT=3443
+INITIAL_ADMIN_PASSWORD=Alpass@2026
+INITIAL_ENGINEER_PASSWORD=Engineer123!
+INITIAL_ADMIN_SECURITY_ANSWER=请替换为管理员安全问题答案
+INITIAL_ENGINEER_SECURITY_ANSWER=请替换为工程师安全问题答案
 ENCRYPTION_KEY=your-32-byte-random-key-here
+UPGRADE_SIGNING_KEY=your-32-byte-random-key-here
+DOCUMENT_TOKEN_SECRET=your-32-byte-random-key-here
 SESSION_MAX_AGE_SECONDS=604800
 WS_HEARTBEAT_INTERVAL_MS=30000
 BACKUP_RETENTION_DAYS=30

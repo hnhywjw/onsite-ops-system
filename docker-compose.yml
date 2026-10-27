@@ -2,12 +2,10 @@ services:
   mysql:
     image: mysql:8.4
     environment:
-      MYSQL_ROOT_PASSWORD: ${MYSQL_ROOT_PASSWORD:-root_password}
+      MYSQL_ROOT_PASSWORD: ${MYSQL_ROOT_PASSWORD:?请在 .env.production 中设置 MYSQL_ROOT_PASSWORD}
       MYSQL_DATABASE: ${MYSQL_DATABASE:-onsite_ops_system}
       MYSQL_USER: ${MYSQL_USER:-onsite_ops}
-      MYSQL_PASSWORD: ${MYSQL_PASSWORD:-onsite_ops_password}
-    ports:
-      - "3306:3306"
+      MYSQL_PASSWORD: ${MYSQL_PASSWORD:?请在 .env.production 中设置 MYSQL_PASSWORD}
     volumes:
       - mysql-data:/var/lib/mysql
     healthcheck:
@@ -31,9 +29,18 @@ services:
       MYSQL_HOST: mysql
       MYSQL_PORT: "3306"
       MYSQL_USER: ${MYSQL_USER:-onsite_ops}
-      MYSQL_PASSWORD: ${MYSQL_PASSWORD:-onsite_ops_password}
+      MYSQL_PASSWORD: ${MYSQL_PASSWORD:?请在 .env.production 中设置 MYSQL_PASSWORD}
       MYSQL_DATABASE: onsite_ops_system
       ALLOW_FILE_DB_FALLBACK: "false"
+      INITIAL_ADMIN_PASSWORD: ${INITIAL_ADMIN_PASSWORD:?请在 .env.production 中设置 INITIAL_ADMIN_PASSWORD}
+      INITIAL_ENGINEER_PASSWORD: ${INITIAL_ENGINEER_PASSWORD:?请在 .env.production 中设置 INITIAL_ENGINEER_PASSWORD}
+      INITIAL_ADMIN_SECURITY_QUESTION: ${INITIAL_ADMIN_SECURITY_QUESTION:-管理员安全问题}
+      INITIAL_ADMIN_SECURITY_ANSWER: ${INITIAL_ADMIN_SECURITY_ANSWER:?请在 .env.production 中设置 INITIAL_ADMIN_SECURITY_ANSWER}
+      INITIAL_ENGINEER_SECURITY_QUESTION: ${INITIAL_ENGINEER_SECURITY_QUESTION:-工程师安全问题}
+      INITIAL_ENGINEER_SECURITY_ANSWER: ${INITIAL_ENGINEER_SECURITY_ANSWER:?请在 .env.production 中设置 INITIAL_ENGINEER_SECURITY_ANSWER}
+      ENCRYPTION_KEY: ${ENCRYPTION_KEY:?请在 .env.production 中设置 ENCRYPTION_KEY}
+      DOCUMENT_TOKEN_SECRET: ${DOCUMENT_TOKEN_SECRET:?请在 .env.production 中设置 DOCUMENT_TOKEN_SECRET}
+      UPGRADE_SIGNING_KEY: ${UPGRADE_SIGNING_KEY:?请在 .env.production 中设置 UPGRADE_SIGNING_KEY}
     volumes:
       - ./data:/app/data
     depends_on:
