@@ -102,6 +102,7 @@
 - 全局搜索：`buildGlobalSearchResults()` 复用各列表的可见范围判断，客户角色不参与合同与备件检索，关键字少于 2 个字符直接拒绝。
 - 审计导出：`/api/audit-logs/export` 复用列表过滤条件，CSV 走 `quoteCsvValue()` 中和公式注入；JSON 返回 `exportedAt`、`exportedBy`、`filters`、`total`、`data`。
 - 服务报告：`GET /api/reports/service/:projectId` 由 `buildServiceReportHtml()` 生成可打印 HTML，按项目与周期聚合日志、工单、巡检与资产数据。
+- 报告签收：`reportSignoffs` 在发起时由 `buildServiceReportSnapshot()` 冻结快照并以 `snapshotHash` 校验；客户签收或退回后状态与意见留存，`signoffId` 可回放冻结报告，形成交付闭环。
 - 客户日志可见性：项目级 `customerLogVisible` 开关默认关闭，开启后客户只能读取服务日志中的安全字段。
 
 ## 运行时数据流
@@ -116,5 +117,6 @@
 
 - 后端是单文件单体，新增能力优先沿用既有模式，减少横向拆分。
 - 客户角色可见性受限，报表模块不展示工作汇报录入和审核入口。
+- 服务报告签收由运维方（`admin`/`engineer`）发起，只有 `customer` 能签收或退回；同周期已签收禁止重复发起。
 - 已锁定工作汇报禁止再次编辑。
 - 生产模式要求强密码与密钥校验。

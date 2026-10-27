@@ -29,6 +29,7 @@
 - `monitorMaintenanceWindows`
 - `auditLogs`
 - `workReports`
+- `reportSignoffs`
 - `aiInspectionTargets`
 - `aiInspectionTemplates`
 - `aiInspectionTasks`
@@ -198,6 +199,15 @@
   - 返回 `total`、`counts`、`data`；结果按调用者项目范围过滤，客户不参与合同与备件搜索。
 - `GET /api/reports/service/:projectId`
   - 参数 `period=week|month|year`，返回可直接打印的 HTML 服务报告。
+  - 传 `signoffId` 时改为渲染该签收记录冻结的快照，不再按当前数据实时生成，作为客户验收证据。
+- `GET /api/report-signoffs`
+  - 返回调用者项目范围内的签收记录；可用 `projectId` 过滤。
+- `POST /api/reports/service/:projectId/signoff`
+  - `admin`/`engineer` 发起客户签收，冻结当前报告快照并记录 `snapshotHash`。
+  - 同周期已签收返回 409；存在待签收记录时复用并刷新快照。
+- `POST /api/report-signoffs/:id/sign`、`POST /api/report-signoffs/:id/return`
+  - 仅 `customer` 可操作，状态须为 `pending`，否则 409；可附带 `comment`。
+  - 处理结果写入审计日志并产生 `report-signoff` 事件通知。
 
 ## 通知事件
 
@@ -211,6 +221,7 @@ inventory          备件盘点
 project-expiry     项目到期
 maintenance-expiry 维保到期
 work-report        工作汇报
+report-signoff     服务报告签收
 duty-handover      值班交接
 config-backup      配置备份
 manual             手动通知
@@ -248,6 +259,29 @@ createdAt: string
 updatedAt: string
 ```
 
+## reportSignoffs 数据模型
+
+```text
+id: string
+projectId: string
+period: day | week | month | year | custom
+periodKey: string
+rangeStart: string
+rangeEnd: string
+status: pending | signed | returned
+snapshot: object
+snapshotHash: string
+issuedBy: string
+issuedByName: string
+issuedAt: string
+signedBy: string
+signedByName: string
+signedAt: string
+comment: string
+createdAt: string
+updatedAt: string
+```
+
 ## 关键权限规则
 
 - `admin`
@@ -257,6 +291,7 @@ updatedAt: string
   - 可处理所属项目的工单与值班排班；删除工单仅限本人创建。
 - `customer`
   - 可见报表基础内容，隐藏工作汇报录入与审核入口。
+  - 可在报表页查看本项目签收记录，并对 `pending` 服务报告执行签收或退回。
   - 工单列表仅返回进度、处理结论与 SLA 字段，处理描述等内部信息不返回。
   - 仅可确认本项目的待客户确认工单。
 

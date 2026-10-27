@@ -1523,6 +1523,45 @@ async function main() {
     const serviceReport = await browserRequest(page, serviceReportUrl);
     assert(serviceReport.status === 200 && String(serviceReport.data).includes('服务报告'), '服务报告页面加载失败');
 
+    logStep('服务报告客户签收');
+    await page.click('#serviceReportSignoffBtn');
+    await page.waitForSelector('#confirmModal:not(.hidden)', { state: 'visible', timeout: 5000 });
+    await page.click('#confirmOkBtn');
+    await page.waitForFunction(() => {
+      const message = document.getElementById('reportSignoffMessage');
+      return message && /已发起客户签收/.test(message.textContent || '');
+    }, null, { timeout: 30000 });
+    await page.waitForFunction(() => {
+      const row = document.querySelector('#reportSignoffTable tr');
+      return row && (row.textContent || '').includes('待客户签收');
+    }, null, { timeout: 30000 });
+
+    await logout(page);
+    await login(page, customerUsername, customerPassword);
+    await page.evaluate(() => openTabWithSubtab('reports', 'export'));
+    await page.waitForSelector('.subtab-panel[data-section="reports"][data-subtab="export"]:not(.hidden)', { timeout: 5000 });
+    await page.waitForFunction(projectId => {
+      const select = document.getElementById('serviceReportProject');
+      return select && Array.from(select.options).some(option => option.value === projectId);
+    }, createdProject.id, { timeout: 15000 });
+    await page.selectOption('#serviceReportProject', createdProject.id);
+    await page.waitForSelector('#reportSignoffTable button[data-action="submit-report-signoff"][data-decision="sign"]', { state: 'visible', timeout: 15000 });
+    await page.click('#reportSignoffTable button[data-action="submit-report-signoff"][data-decision="sign"]');
+    await page.waitForSelector('#reportSignoffModal:not(.hidden)', { state: 'visible', timeout: 5000 });
+    await page.fill('#reportSignoffComment', 'E2E 验收通过');
+    await page.click('#reportSignoffSubmitBtn');
+    await page.waitForSelector('#reportSignoffModal.hidden', { state: 'attached', timeout: 30000 });
+    await page.waitForFunction(() => {
+      const message = document.getElementById('reportSignoffMessage');
+      return message && /服务报告已签收/.test(message.textContent || '');
+    }, null, { timeout: 30000 });
+    await page.waitForFunction(() => {
+      const row = document.querySelector('#reportSignoffTable tr');
+      return row && (row.textContent || '').includes('客户已签收') && (row.textContent || '').includes('E2E 验收通过');
+    }, null, { timeout: 30000 });
+
+    await logout(page);
+    await login(page, 'admin', 'Admin123!');
     await page.evaluate(() => openTabWithSubtab('system', 'auditLog'));
     await page.waitForSelector('.subtab-panel[data-section="system"][data-subtab="auditLog"]:not(.hidden)', { timeout: 5000 });
     const auditExportPath = path.join(downloadDir, `audit-logs-${suffix}.json`);

@@ -64,7 +64,7 @@ const dbConfig = {
   password: process.env.MYSQL_PASSWORD || 'onsite_ops_password',
   database: process.env.MYSQL_DATABASE || 'onsite_ops_system'
 };
-const dbCollectionKeys = ['users', 'projects', 'contracts', 'contractSettlements', 'assets', 'assetRelations', 'assetLifecycles', 'assetCheckouts', 'assetInventoryTasks', 'topologyLayouts', 'logs', 'inspectionPlans', 'inspectionExecutions', 'spareParts', 'sparePartMovements', 'sparePartVendors', 'sparePartPurchases', 'sparePartInventoryTasks', 'changeRecords', 'incidentRecords', 'tickets', 'dutyShifts', 'approvals', 'notifications', 'notificationChannels', 'monitorAlerts', 'monitorMaintenanceWindows', 'auditLogs', 'upgradeLogs', 'knowledgeBase', 'kbRevisions', 'documents', 'workReports', 'aiInspectionTargets', 'aiInspectionTemplates', 'aiInspectionTasks', 'aiInspectionResults', 'configBackupPlans', 'configBackupRecords', 'sessions', 'systemConfig', 'runtimeState'];
+const dbCollectionKeys = ['users', 'projects', 'contracts', 'contractSettlements', 'assets', 'assetRelations', 'assetLifecycles', 'assetCheckouts', 'assetInventoryTasks', 'topologyLayouts', 'logs', 'inspectionPlans', 'inspectionExecutions', 'spareParts', 'sparePartMovements', 'sparePartVendors', 'sparePartPurchases', 'sparePartInventoryTasks', 'changeRecords', 'incidentRecords', 'tickets', 'dutyShifts', 'approvals', 'notifications', 'notificationChannels', 'monitorAlerts', 'monitorMaintenanceWindows', 'auditLogs', 'upgradeLogs', 'knowledgeBase', 'kbRevisions', 'documents', 'workReports', 'reportSignoffs', 'aiInspectionTargets', 'aiInspectionTemplates', 'aiInspectionTasks', 'aiInspectionResults', 'configBackupPlans', 'configBackupRecords', 'sessions', 'systemConfig', 'runtimeState'];
 const objectCollectionKeys = ['topologyLayouts', 'systemConfig', 'runtimeState'];
 const OBJECT_ROOT_ID = '__root__';
 
@@ -213,6 +213,7 @@ const notificationEventOptions = [
   { value: 'project-expiry', label: '项目到期' },
   { value: 'maintenance-expiry', label: '维保到期' },
   { value: 'work-report', label: '工作汇报提醒' },
+  { value: 'report-signoff', label: '服务报告签收' },
   { value: 'duty-handover', label: '值班交接' },
   { value: 'config-backup', label: '配置备份' },
   { value: 'manual', label: '手动通知' }
@@ -240,6 +241,7 @@ const notificationEventGroups = {
   'work-log-hours-high': 'work-report',
   'work-log-streak-missing': 'work-report',
   'project-report-inactive': 'work-report',
+  'report-signoff': 'report-signoff',
   'duty-handover': 'duty-handover',
   'config-backup': 'config-backup',
   'monitor-alert': 'monitor-alert',
@@ -1049,6 +1051,7 @@ function seed() {
     auditLogs: [],
     upgradeLogs: [],
     workReports: [],
+    reportSignoffs: [],
     sessions: [],
     systemConfig: {
       webIdleLogoutMinutes: defaultWebIdleLogoutMinutes,
@@ -4262,6 +4265,27 @@ function normalizeDb(raw = {}) {
       createdAt: item.createdAt || now(),
       updatedAt: item.updatedAt || now()
     })),
+    // 服务报告签收：发起时冻结当期报告快照，客户签收或退回后状态与意见一并留存，形成交付闭环。
+    reportSignoffs: (raw.reportSignoffs || []).map(item => ({
+      id: item.id || id('reportSignoff'),
+      projectId: item.projectId || '',
+      period: ['day', 'week', 'month', 'year', 'custom'].includes(item.period) ? item.period : 'month',
+      periodKey: String(item.periodKey || '').trim(),
+      rangeStart: String(item.rangeStart || '').slice(0, 10),
+      rangeEnd: String(item.rangeEnd || '').slice(0, 10),
+      status: ['pending', 'signed', 'returned'].includes(item.status) ? item.status : 'pending',
+      snapshot: item.snapshot && typeof item.snapshot === 'object' && !Array.isArray(item.snapshot) ? item.snapshot : null,
+      snapshotHash: String(item.snapshotHash || '').trim(),
+      issuedBy: item.issuedBy || '',
+      issuedByName: item.issuedByName || '',
+      issuedAt: item.issuedAt || '',
+      signedBy: item.signedBy || '',
+      signedByName: item.signedByName || '',
+      signedAt: item.signedAt || '',
+      comment: item.comment || '',
+      createdAt: item.createdAt || now(),
+      updatedAt: item.updatedAt || item.createdAt || now()
+    })),
     aiInspectionTargets: (raw.aiInspectionTargets || []).map(item => ({
       id: item.id || id('aiTarget'),
       projectId: item.projectId || '',
@@ -4766,6 +4790,8 @@ function sanitizeImportedData(db) {
 
   clearRef(db.workReports, ['projectId'], projectIds);
   clearRef(db.workReports, ['userId', 'reviewedBy'], userIds);
+  clearRef(db.reportSignoffs, ['projectId'], projectIds);
+  clearRef(db.reportSignoffs, ['issuedBy', 'signedBy'], userIds);
 
   clearRef(db.aiInspectionTargets, ['projectId'], projectIds);
   clearRef(db.aiInspectionTargets, ['assetId'], assetIds);
@@ -8339,6 +8365,18 @@ function getDateRangeFromPeriod(period, anchorDate = '', rangeStart = '', rangeE
       label: `${dateToKey(start)} 至 ${dateToKey(end)}`
     };
   }
+  if (period === 'year') {
+    const year = baseDate.getUTCFullYear();
+    const start = new Date(Date.UTC(year, 0, 1));
+    const end = new Date(Date.UTC(year, 11, 31));
+    return {
+      period,
+      periodKey: String(year),
+      rangeStart: dateToKey(start),
+      rangeEnd: dateToKey(end),
+      label: `${dateToKey(start)} 至 ${dateToKey(end)}`
+    };
+  }
   const start = new Date(Date.UTC(baseDate.getUTCFullYear(), baseDate.getUTCMonth(), 1));
   const end = endOfMonth(baseDate);
   return {
@@ -8371,6 +8409,7 @@ function getPreviousDateRange(range) {
   if (!currentStart) return null;
   if (range.period === 'day') return getDateRangeFromPeriod('day', dateToKey(addDays(currentStart, -1)));
   if (range.period === 'week') return getDateRangeFromPeriod('week', dateToKey(addDays(currentStart, -7)));
+  if (range.period === 'year') return getDateRangeFromPeriod('year', dateToKey(addDays(currentStart, -1)));
   return getDateRangeFromPeriod('month', dateToKey(addDays(currentStart, -1)));
 }
 
@@ -9987,16 +10026,15 @@ function buildProjectPptxBuffer(db, projectId, period, viewer) {
   return report ? buildDetailedPptxBufferFromReport(report) : null;
 }
 
-function buildServiceReportHtml(db, projectId, filters, viewer) {
+function buildServiceReportSnapshot(db, projectId, filters = {}) {
   const project = (db.projects || []).find(item => item.id === projectId);
   if (!project) return null;
-  const range = getDateRangeFromPeriod(filters.period, '', filters.startDate, filters.endDate)
+  const range = getDateRangeFromPeriod(filters.period, filters.anchorDate, filters.startDate, filters.endDate)
     || getDateRangeFromPeriod('month');
   const inRange = value => {
     const key = String(value || '').slice(0, 10);
     return key && key >= range.rangeStart && key <= range.rangeEnd;
   };
-  const isCustomer = viewer && viewer.role === 'customer';
   const logs = (db.logs || [])
     .filter(item => item.projectId === projectId && inRange(item.date || item.createdAt))
     .sort((a, b) => String(a.date || '').localeCompare(String(b.date || '')));
@@ -10007,8 +10045,93 @@ function buildServiceReportHtml(db, projectId, filters, viewer) {
     .filter(item => item.projectId === projectId && inRange(item.createdAt))
     .sort((a, b) => String(b.createdAt || '').localeCompare(String(a.createdAt || '')));
   const totalHours = Number(logs.reduce((sum, item) => sum + Number(item.durationHours || 0), 0).toFixed(2));
-  const rows = (items, colspan, mapper) => items.map(mapper).join('') || `<tr><td colspan="${colspan}">本周期无记录</td></tr>`;
   const planTitle = planId => (db.inspectionPlans || []).find(item => item.id === planId)?.title || '-';
+  return {
+    project: {
+      id: project.id,
+      name: project.name || '',
+      customerName: project.customerName || '',
+      projectStartDate: project.projectStartDate || '',
+      projectEndDate: project.projectEndDate || ''
+    },
+    range: {
+      period: range.period,
+      periodKey: range.periodKey,
+      rangeStart: range.rangeStart,
+      rangeEnd: range.rangeEnd,
+      label: range.label
+    },
+    metrics: {
+      logCount: logs.length,
+      totalHours,
+      inspectionCount: executions.length,
+      ticketCount: tickets.length
+    },
+    logs: logs.map(item => ({
+      date: item.date || '',
+      event: item.event || item.title || '',
+      relatedTarget: item.relatedTarget || '',
+      process: item.process || '',
+      result: item.result || '',
+      durationHours: Number(item.durationHours || 0)
+    })),
+    inspections: executions.map(item => ({
+      executedAt: item.executedAt || '',
+      planTitle: planTitle(item.planId),
+      result: item.result || '',
+      issue: item.issue || '',
+      suggestion: item.suggestion || '',
+      executor: item.executor || ''
+    })),
+    tickets: tickets.map(item => ({
+      ticketNo: item.ticketNo || '',
+      title: item.title || '',
+      priority: item.priority || '',
+      status: item.status || '',
+      updatedAt: item.closedAt || item.updatedAt || item.createdAt || ''
+    })),
+    generatedAt: now()
+  };
+}
+
+function reportSignoffStatusLabel(status) {
+  return ({ pending: '待客户签收', signed: '客户已签收', returned: '客户已退回' })[status] || '待客户签收';
+}
+
+function buildReportSignoffHash(snapshot) {
+  return crypto.createHash('sha256').update(JSON.stringify(canonicalizeJson(snapshot))).digest('hex');
+}
+
+function presentReportSignoff(item, includeSnapshot = false) {
+  if (!item) return null;
+  const { snapshot, ...rest } = item;
+  const metrics = snapshot && snapshot.metrics ? snapshot.metrics : {};
+  return {
+    ...rest,
+    statusLabel: reportSignoffStatusLabel(item.status),
+    metrics: {
+      logCount: Number(metrics.logCount || 0),
+      totalHours: Number(metrics.totalHours || 0),
+      inspectionCount: Number(metrics.inspectionCount || 0),
+      ticketCount: Number(metrics.ticketCount || 0)
+    },
+    hasSnapshot: Boolean(snapshot),
+    ...(includeSnapshot ? { snapshot } : {})
+  };
+}
+
+function buildServiceReportHtml(db, projectId, filters, viewer, signoff = null) {
+  const snapshot = signoff && signoff.snapshot ? signoff.snapshot : buildServiceReportSnapshot(db, projectId, filters);
+  if (!snapshot) return null;
+  const project = snapshot.project || {};
+  const range = snapshot.range || {};
+  const isCustomer = viewer && viewer.role === 'customer';
+  const logs = Array.isArray(snapshot.logs) ? snapshot.logs : [];
+  const executions = Array.isArray(snapshot.inspections) ? snapshot.inspections : [];
+  const tickets = Array.isArray(snapshot.tickets) ? snapshot.tickets : [];
+  const metrics = snapshot.metrics || {};
+  const totalHours = Number(metrics.totalHours || 0);
+  const rows = (items, colspan, mapper) => items.map(mapper).join('') || `<tr><td colspan="${colspan}">本周期无记录</td></tr>`;
   const logRows = rows(logs, 6, item => `<tr>
     <td>${escapeHtml(item.date || '-')}</td>
     <td>${escapeHtml(item.event || item.title || '-')}</td>
@@ -10019,7 +10142,7 @@ function buildServiceReportHtml(db, projectId, filters, viewer) {
   </tr>`);
   const inspectionRows = rows(executions, isCustomer ? 5 : 6, item => `<tr>
     <td>${escapeHtml(item.executedAt || '-')}</td>
-    <td>${escapeHtml(planTitle(item.planId))}</td>
+    <td>${escapeHtml(item.planTitle || '-')}</td>
     <td>${escapeHtml(item.result || '-')}</td>
     <td>${escapeHtml(item.issue || '-')}</td>
     <td>${escapeHtml(item.suggestion || '-')}</td>
@@ -10030,8 +10153,16 @@ function buildServiceReportHtml(db, projectId, filters, viewer) {
     <td>${escapeHtml(item.title || '-')}</td>
     <td>${escapeHtml(item.priority || '-')}</td>
     <td>${escapeHtml(item.status || '-')}</td>
-    <td>${escapeHtml(item.closedAt || item.updatedAt || item.createdAt || '-')}</td>
+    <td>${escapeHtml(item.updatedAt || '-')}</td>
   </tr>`);
+  const signoffStatus = signoff ? reportSignoffStatusLabel(signoff.status) : '未发起签收';
+  const signoffDetailRows = signoff ? [
+    `<tr><th style="width:120px;">签收状态</th><td>${escapeHtml(signoffStatus)}</td></tr>`,
+    `<tr><th>发起人</th><td>${escapeHtml(signoff.issuedByName || '-')} ${escapeHtml(signoff.issuedAt || '')}</td></tr>`,
+    signoff.signedAt ? `<tr><th>签收时间</th><td>${escapeHtml(signoff.signedByName || '-')} ${escapeHtml(signoff.signedAt || '')}</td></tr>` : '',
+    signoff.comment ? `<tr><th>客户意见</th><td>${escapeHtml(signoff.comment)}</td></tr>` : '',
+    signoff.snapshotHash ? `<tr><th>快照校验</th><td style="word-break:break-all;font-size:11px;color:#64748b;">${escapeHtml(signoff.snapshotHash)}</td></tr>` : ''
+  ].join('') : '';
   return `<!DOCTYPE html>
 <html lang="zh-CN">
 <head>
@@ -10057,6 +10188,11 @@ function buildServiceReportHtml(db, projectId, filters, viewer) {
     th { background: #eff6ff; font-weight: 600; }
     .sign { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 40px; margin-top: 36px; font-size: 13px; color: #475569; }
     .sign div { border-top: 1px solid #cbd5e1; padding-top: 10px; }
+    .signoff { margin-top: 28px; }
+    .signoff .badge { display:inline-block; border-radius:999px; padding:3px 10px; font-size:12px; background:#e0e7ff; color:#3730a3; }
+    .signoff .badge.signed { background:#dcfce7; color:#166534; }
+    .signoff .badge.returned { background:#fee2e2; color:#991b1b; }
+    .signoff table { font-size:12px; }
     .toolbar { position: fixed; top: 16px; right: 16px; display: flex; gap: 8px; }
     .toolbar button { border: 0; border-radius: 8px; padding: 9px 16px; cursor: pointer; background: #2563eb; color: #fff; font-size: 13px; }
     .toolbar button.ghost { background: #e2e8f0; color: #0f172a; }
@@ -10091,10 +10227,10 @@ function buildServiceReportHtml(db, projectId, filters, viewer) {
       </div>
     </div>
     <div class="stats">
-      <div class="stat"><span>服务记录</span><strong>${logs.length}</strong></div>
+      <div class="stat"><span>服务记录</span><strong>${Number(metrics.logCount || 0)}</strong></div>
       <div class="stat"><span>累计工时</span><strong>${totalHours}</strong></div>
-      <div class="stat"><span>巡检执行</span><strong>${executions.length}</strong></div>
-      <div class="stat"><span>工单数量</span><strong>${tickets.length}</strong></div>
+      <div class="stat"><span>巡检执行</span><strong>${Number(metrics.inspectionCount || 0)}</strong></div>
+      <div class="stat"><span>工单数量</span><strong>${Number(metrics.ticketCount || 0)}</strong></div>
     </div>
     <h2>服务过程记录</h2>
     <table>
@@ -10111,9 +10247,14 @@ function buildServiceReportHtml(db, projectId, filters, viewer) {
       <thead><tr><th style="width:150px;">工单号</th><th>标题</th><th style="width:70px;">优先级</th><th style="width:90px;">状态</th><th style="width:160px;">更新时间</th></tr></thead>
       <tbody>${ticketRows}</tbody>
     </table>
+    <div class="signoff">
+      <h2>客户签收</h2>
+      <div style="margin-bottom:10px;"><span class="badge ${escapeHtml(signoff ? signoff.status : '')}">${escapeHtml(signoffStatus)}</span></div>
+      ${signoffDetailRows ? `<table><tbody>${signoffDetailRows}</tbody></table>` : '<div class="muted" style="font-size:12px;">本报告尚未发起客户签收。</div>'}
+    </div>
     <div class="sign">
       <div>运维服务方确认：____________________</div>
-      <div>客户方确认：____________________</div>
+      <div>客户方确认：${signoff && signoff.status === 'signed' ? escapeHtml(signoff.signedByName || '____________________') : '____________________'}</div>
     </div>
   </div>
 </body>
@@ -11946,7 +12087,7 @@ const requestHandler = async (req, res) => {
       // 通知属于过程性提醒，不构成业务关联；随项目删除级联清理，避免历史通知长期阻断项目删除。
       db.notifications = (db.notifications || []).filter(item => item.projectId !== projectId);
       // users 不参与按 projectId 过滤：多项目账号只解除该项目归属，账号本身保留。
-      const projectRelationCollections = ['contracts','contractSettlements','assets','assetLifecycles','assetCheckouts','assetInventoryTasks','logs','workReports','knowledgeBase','kbRevisions','documents','inspectionPlans','inspectionExecutions','spareParts','sparePartMovements','sparePartVendors','sparePartPurchases','sparePartInventoryTasks','changeRecords','incidentRecords','tickets','dutyShifts','approvals','notifications','notificationChannels','monitorAlerts','monitorMaintenanceWindows','aiInspectionTargets','aiInspectionTemplates','aiInspectionTasks','aiInspectionResults','configBackupPlans','configBackupRecords'];
+      const projectRelationCollections = ['contracts','contractSettlements','assets','assetLifecycles','assetCheckouts','assetInventoryTasks','logs','workReports','reportSignoffs','knowledgeBase','kbRevisions','documents','inspectionPlans','inspectionExecutions','spareParts','sparePartMovements','sparePartVendors','sparePartPurchases','sparePartInventoryTasks','changeRecords','incidentRecords','tickets','dutyShifts','approvals','notifications','notificationChannels','monitorAlerts','monitorMaintenanceWindows','aiInspectionTargets','aiInspectionTemplates','aiInspectionTasks','aiInspectionResults','configBackupPlans','configBackupRecords'];
       const force = String(reqUrl.searchParams.get('force') || '') === '1';
       if (force) {
         // 管理员强制删除：先级联清理该项目下的全部业务数据与人员，再删除项目，便于清理历史残留项目。
@@ -17664,6 +17805,15 @@ const requestHandler = async (req, res) => {
       if (!user) return;
       const projectId = pathname.split('/')[4];
       if (!canViewProject(user, projectId)) return json(res, 403, { message: '无权查看该项目服务报告' });
+      const signoffId = String(reqUrl.searchParams.get('signoffId') || '').trim();
+      if (signoffId) {
+        const signoff = (db.reportSignoffs || []).find(item => item.id === signoffId && item.projectId === projectId);
+        if (!signoff) return json(res, 404, { message: '签收记录不存在' });
+        const frozen = buildServiceReportHtml(db, projectId, {}, user, signoff);
+        if (!frozen) return json(res, 404, { message: '项目不存在' });
+        res.writeHead(200, buildSecurityHeaders({ 'Content-Type': 'text/html; charset=utf-8' }));
+        return res.end(frozen);
+      }
       const period = String(reqUrl.searchParams.get('period') || 'month');
       const startDate = String(reqUrl.searchParams.get('startDate') || '');
       const endDate = String(reqUrl.searchParams.get('endDate') || '');
@@ -17671,6 +17821,113 @@ const requestHandler = async (req, res) => {
       if (!content) return json(res, 404, { message: '项目不存在' });
       res.writeHead(200, buildSecurityHeaders({ 'Content-Type': 'text/html; charset=utf-8' }));
       return res.end(content);
+    }
+
+    if (req.method === 'GET' && pathname === '/api/report-signoffs') {
+      const user = requireAuth(req, res, db);
+      if (!user) return;
+      const projectId = String(reqUrl.searchParams.get('projectId') || '').trim();
+      if (projectId && !canViewProject(user, projectId)) return json(res, 403, { message: '无权查看该项目签收记录' });
+      const list = filterByProjectScope(db.reportSignoffs || [], user, item => item.projectId)
+        .filter(item => !projectId || item.projectId === projectId)
+        .sort((a, b) => String(b.rangeStart).localeCompare(String(a.rangeStart)) || String(b.createdAt).localeCompare(String(a.createdAt)))
+        .map(item => presentReportSignoff(item));
+      return json(res, 200, { data: list, total: list.length });
+    }
+
+    if (req.method === 'POST' && pathname.match(/^\/api\/reports\/service\/[^/]+\/signoff$/)) {
+      const user = requireEditor(req, res, db);
+      if (!user) return;
+      const projectId = pathname.split('/')[4];
+      if (!canViewProject(user, projectId)) return json(res, 403, { message: '无权发起该项目服务报告签收' });
+      const body = await readBody(req);
+      const period = String(body.period || 'month').trim();
+      const anchorDate = String(body.anchorDate || '').trim().slice(0, 10);
+      const startDate = String(body.startDate || '').trim();
+      const endDate = String(body.endDate || '').trim();
+      // 同周期签收唯一性依赖「检查 + 写入」原子执行，并发发起时不能各自建出 pending 记录。
+      const outcome = await withDbMutationLock(async () => {
+        const lockDb = await readDb();
+        const project = requireExistingProject(projectId, lockDb);
+        if (!project) return { status: 404, message: '项目不存在' };
+        const range = getDateRangeFromPeriod(period, anchorDate, startDate, endDate);
+        if (!range) return { status: 400, message: '无效的报告周期' };
+        const snapshot = buildServiceReportSnapshot(lockDb, projectId, { period, anchorDate, startDate, endDate });
+        if (!snapshot) return { status: 404, message: '项目不存在' };
+        lockDb.reportSignoffs = lockDb.reportSignoffs || [];
+        const signed = lockDb.reportSignoffs.find(item => item.projectId === projectId && item.periodKey === range.periodKey && item.status === 'signed');
+        if (signed) return { status: 409, message: '该周期报告已由客户签收，不能重复发起' };
+        const pending = lockDb.reportSignoffs.find(item => item.projectId === projectId && item.periodKey === range.periodKey && item.status === 'pending');
+        const target = pending || {
+          id: id('reportSignoff'),
+          projectId,
+          periodKey: range.periodKey,
+          status: 'pending',
+          createdAt: now()
+        };
+        Object.assign(target, {
+          period: range.period,
+          rangeStart: range.rangeStart,
+          rangeEnd: range.rangeEnd,
+          snapshot: canonicalizeJson(snapshot),
+          snapshotHash: buildReportSignoffHash(snapshot),
+          issuedBy: user.id,
+          issuedByName: user.name || user.username || '',
+          issuedAt: now(),
+          signedBy: '',
+          signedByName: '',
+          signedAt: '',
+          comment: '',
+          updatedAt: now()
+        });
+        if (!pending) lockDb.reportSignoffs.unshift(target);
+        appendAuditLog(lockDb, user, pending ? 'update' : 'create', 'reportSignoff', target.id, `${pending ? '重新发起' : '发起'}服务报告签收（${range.label}）`, projectId);
+        if (!pending) {
+          createNotification(lockDb, projectId, '服务报告待签收', `服务报告（${range.label}）已发起签收，请客户确认。`, 'info', 'report-signoff', 'reportSignoff', target.id);
+        }
+        await writeDb(lockDb);
+        return { status: pending ? 200 : 201, body: presentReportSignoff(target) };
+      });
+      return json(res, outcome.status, outcome.body || { message: outcome.message });
+    }
+
+    if (req.method === 'POST' && pathname.match(/^\/api\/report-signoffs\/[^/]+\/(sign|return)$/)) {
+      const user = requireAuth(req, res, db);
+      if (!user) return;
+      const signoffId = pathname.split('/')[3];
+      const action = pathname.split('/')[4];
+      if (user.role !== 'customer') return json(res, 403, { message: '仅客户账号可签收或退回服务报告' });
+      const body = await readBody(req);
+      const comment = String(body.comment || '').trim().slice(0, 1000);
+      // 状态校验与写入放在同一临界区，避免重复点击并发写回两份签收结果。
+      const outcome = await withDbMutationLock(async () => {
+        const lockDb = await readDb();
+        const signoff = (lockDb.reportSignoffs || []).find(item => item.id === signoffId);
+        if (!signoff) return { status: 404, message: '签收记录不存在' };
+        if (!canViewProject(user, signoff.projectId)) return { status: 403, message: '无权处理该签收记录' };
+        if (signoff.status !== 'pending') return { status: 409, message: `该报告当前状态为${reportSignoffStatusLabel(signoff.status)}，无法重复处理` };
+        signoff.status = action === 'sign' ? 'signed' : 'returned';
+        signoff.signedBy = user.id;
+        signoff.signedByName = user.name || user.username || '';
+        signoff.signedAt = now();
+        signoff.comment = comment;
+        signoff.updatedAt = now();
+        const label = action === 'sign' ? '签收' : '退回';
+        appendAuditLog(lockDb, user, action === 'sign' ? 'sign' : 'return', 'reportSignoff', signoff.id, `客户${label}服务报告（${signoff.rangeStart} 至 ${signoff.rangeEnd}）`, signoff.projectId);
+        createNotification(
+          lockDb,
+          signoff.projectId,
+          action === 'sign' ? '服务报告已签收' : '服务报告已退回',
+          `客户 ${signoff.signedByName || user.username} ${label}了服务报告（${signoff.rangeStart} 至 ${signoff.rangeEnd}）${comment ? `：${comment}` : ''}`,
+          action === 'sign' ? 'info' : 'warning',
+          'report-signoff',
+          'reportSignoff',
+          signoff.id
+        );
+        await writeDb(lockDb);
+        return { status: 200, body: presentReportSignoff(signoff) };
+      });
+      return json(res, outcome.status, outcome.body || { message: outcome.message });
     }
 
     if (req.method === 'POST' && pathname.startsWith('/api/reports/project/') && pathname.endsWith('/pptx')) {

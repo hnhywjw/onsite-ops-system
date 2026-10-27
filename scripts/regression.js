@@ -4019,6 +4019,54 @@ async function main() {
   const p2ServiceReport = await request(`/api/reports/service/${encodeURIComponent(p2ProjectId)}?period=month`, { headers: { cookie } });
   assert(p2ServiceReport.status === 200 && String(p2ServiceReport.headers['content-type'] || '').includes('text/html'), '服务报告生成失败');
   assert(typeof p2ServiceReport.data === 'string' && p2ServiceReport.data.includes('服务报告') && p2ServiceReport.data.includes('P2客户'), '服务报告内容不完整');
+  const p2Signoff = await request(`/api/reports/service/${encodeURIComponent(p2ProjectId)}/signoff`, {
+    method: 'POST', headers: { cookie: p2EngineerCookie, 'Content-Type': 'application/json' },
+    body: JSON.stringify({ period: 'month' })
+  });
+  assert(p2Signoff.status === 201 && p2Signoff.data.status === 'pending' && p2Signoff.data.snapshotHash, '发起服务报告签收失败');
+  const p2SignoffSnapshot = await request(`/api/reports/service/${encodeURIComponent(p2ProjectId)}?signoffId=${encodeURIComponent(p2Signoff.data.id)}`, { headers: { cookie: p2CustomerCookie } });
+  assert(p2SignoffSnapshot.status === 200 && typeof p2SignoffSnapshot.data === 'string' && p2SignoffSnapshot.data.includes('待客户签收'), '客户查看冻结签收快照失败');
+  assert(p2SignoffSnapshot.data.includes(p2Signoff.data.snapshotHash), '签收快照应展示校验哈希');
+  const p2SignoffCustomerList = await request('/api/report-signoffs?all=1', { headers: { cookie: p2CustomerCookie } });
+  assert(p2SignoffCustomerList.status === 200 && (p2SignoffCustomerList.data.data || []).some(item => item.id === p2Signoff.data.id), '客户应能看到本项目签收记录');
+  const p2SignoffByEngineer = await request(`/api/report-signoffs/${encodeURIComponent(p2Signoff.data.id)}/sign`, {
+    method: 'POST', headers: { cookie: p2EngineerCookie, 'Content-Type': 'application/json' },
+    body: JSON.stringify({ comment: '越权签收' })
+  });
+  assert(p2SignoffByEngineer.status === 403, '运维人员不应代替客户签收');
+  const p2SignoffSigned = await request(`/api/report-signoffs/${encodeURIComponent(p2Signoff.data.id)}/sign`, {
+    method: 'POST', headers: { cookie: p2CustomerCookie, 'Content-Type': 'application/json' },
+    body: JSON.stringify({ comment: '验收通过' })
+  });
+  assert(p2SignoffSigned.status === 200 && p2SignoffSigned.data.status === 'signed' && p2SignoffSigned.data.comment === '验收通过', '客户签收服务报告失败');
+  const p2SignoffSignAgain = await request(`/api/report-signoffs/${encodeURIComponent(p2Signoff.data.id)}/sign`, {
+    method: 'POST', headers: { cookie: p2CustomerCookie, 'Content-Type': 'application/json' },
+    body: JSON.stringify({})
+  });
+  assert(p2SignoffSignAgain.status === 409, '已签收报告不应重复签收');
+  const p2SignoffReissueSigned = await request(`/api/reports/service/${encodeURIComponent(p2ProjectId)}/signoff`, {
+    method: 'POST', headers: { cookie: p2EngineerCookie, 'Content-Type': 'application/json' },
+    body: JSON.stringify({ period: 'month' })
+  });
+  assert(p2SignoffReissueSigned.status === 409, '已签收周期不应重复发起签收');
+  const p2SignoffReturnedIssue = await request(`/api/reports/service/${encodeURIComponent(p2ProjectId)}/signoff`, {
+    method: 'POST', headers: { cookie: p2EngineerCookie, 'Content-Type': 'application/json' },
+    body: JSON.stringify({ period: 'week' })
+  });
+  assert(p2SignoffReturnedIssue.status === 201, '发起周报签收失败');
+  const p2SignoffReturned = await request(`/api/report-signoffs/${encodeURIComponent(p2SignoffReturnedIssue.data.id)}/return`, {
+    method: 'POST', headers: { cookie: p2CustomerCookie, 'Content-Type': 'application/json' },
+    body: JSON.stringify({ comment: '数据需补充' })
+  });
+  assert(p2SignoffReturned.status === 200 && p2SignoffReturned.data.status === 'returned' && p2SignoffReturned.data.comment === '数据需补充', '客户退回服务报告失败');
+  const p2SignoffReissued = await request(`/api/reports/service/${encodeURIComponent(p2ProjectId)}/signoff`, {
+    method: 'POST', headers: { cookie: p2EngineerCookie, 'Content-Type': 'application/json' },
+    body: JSON.stringify({ period: 'week' })
+  });
+  assert(p2SignoffReissued.status === 201 && p2SignoffReissued.data.status === 'pending' && p2SignoffReissued.data.id !== p2SignoffReturnedIssue.data.id, '退回后应新建签收记录并保留原退回历史');
+  const p2SignoffList = await request(`/api/report-signoffs?all=1&projectId=${encodeURIComponent(p2ProjectId)}`, { headers: { cookie } });
+  const p2SignoffReturnedRow = (p2SignoffList.data.data || []).find(item => item.id === p2SignoffReturnedIssue.data.id);
+  assert(p2SignoffReturnedRow && p2SignoffReturnedRow.status === 'returned' && p2SignoffReturnedRow.comment === '数据需补充', '退回记录应保留客户意见');
 
   const p2Log = await request('/api/logs', {
     method: 'POST', headers: { cookie: p2EngineerCookie, 'Content-Type': 'application/json' },

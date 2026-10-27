@@ -2225,6 +2225,22 @@
     </div>
   </div>
 
+  <div id="reportSignoffModal" class="modal-overlay hidden">
+    <div class="modal-box" style="max-width:460px;">
+      <h3 id="reportSignoffModalTitle">客户签收</h3>
+      <div id="reportSignoffModalMeta" class="muted" style="margin-bottom:10px;font-size:13px;"></div>
+      <label style="display:grid;gap:6px;">
+        <span id="reportSignoffCommentLabel">客户意见（选填）</span>
+        <textarea id="reportSignoffComment" rows="4" placeholder="可填写验收意见" style="width:100%;resize:vertical;"></textarea>
+      </label>
+      <div id="reportSignoffModalMessage" style="margin:8px 0;font-size:13px;"></div>
+      <div class="btn-row">
+        <button class="secondary" data-action="close-modal" data-modal="reportSignoffModal">取消</button>
+        <button class="primary" id="reportSignoffSubmitBtn" type="button">确认签收</button>
+      </div>
+    </div>
+  </div>
+
   <section id="appView" class="layout hidden">
     <div id="globalErrorToast" class="toast-error hidden" style="position:fixed;top:12px;right:12px;z-index:9999;max-width:400px;padding:12px 16px;border-radius:8px;background:#dc2626;color:#fff;box-shadow:0 4px 16px rgba(0,0,0,.24);font-size:14px;line-height:1.4;"></div>
     <div id="toastContainer" style="position:fixed;top:12px;right:12px;z-index:9998;display:flex;flex-direction:column;gap:8px;pointer-events:none;"></div>
@@ -3933,8 +3949,19 @@
               <option value="year">本年</option>
             </select>
             <button class="primary" id="serviceReportOpenBtn" type="button">生成服务报告</button>
+            <button class="secondary" id="serviceReportSignoffBtn" type="button" data-editor-only="true">发起客户签收</button>
           </div>
           <div class="muted" style="font-size:12px;">报告页内置打印样式，可直接使用浏览器「打印 / 另存为 PDF」。</div>
+        </div>
+        <div class="card" style="margin-bottom:16px;">
+          <h3 style="margin-top:0;">报告签收记录</h3>
+          <div id="reportSignoffMessage"></div>
+          <div class="table-wrap">
+            <table>
+              <thead><tr><th>报告周期</th><th>状态</th><th>发起人</th><th>客户签收/退回</th><th>客户意见</th><th>操作</th></tr></thead>
+              <tbody id="reportSignoffTable"></tbody>
+            </table>
+          </div>
         </div>
         <div class="card">
           <h3 style="margin-top:0;">现有报表导出</h3>
@@ -4619,7 +4646,8 @@
       searchTimer: null,
       searchResults: null,
       searchSeq: 0,
-      selectedWorkReportId: ''
+      selectedWorkReportId: '',
+      pendingReportSignoff: null
     };
 
     const els = {
@@ -12442,6 +12470,7 @@
       if (editorCard) editorCard.classList.toggle('hidden', state.user?.role === 'customer');
       const overviewCard = document.getElementById('workReportOverviewCard');
       if (overviewCard) overviewCard.classList.toggle('hidden', state.user?.role !== 'admin');
+      document.getElementById('serviceReportSignoffBtn')?.classList.toggle('hidden', !canEditData());
       if (state.user?.role !== 'customer') {
         await refreshWorkloadBoard();
       }
@@ -12450,6 +12479,7 @@
         await refreshWorkReportOverview();
       }
       renderLegacyReports();
+      renderReportSignoffs();
     }
 
     function fillServiceReportProjectSelect() {
@@ -12459,6 +12489,43 @@
       const list = projectsInUserScope();
       select.innerHTML = list.map(item => `<option value="${attrEsc(item.id)}">${esc(formatProjectDisplay(item))}</option>`).join('') || '<option value="">暂无项目</option>';
       if (currentValue && list.some(item => item.id === currentValue)) select.value = currentValue;
+      renderReportSignoffs();
+    }
+
+    function reportSignoffStatusBadge(status, label) {
+      const style = status === 'signed'
+        ? 'background:#d1fae5;color:#065f46;'
+        : status === 'returned'
+          ? 'background:#fee2e2;color:#991b1b;'
+          : 'background:#fef3c7;color:#92400e;';
+      return `<span class="badge" style="${style}">${esc(label || '待客户签收')}</span>`;
+    }
+
+    function renderReportSignoffs() {
+      const table = document.getElementById('reportSignoffTable');
+      if (!table) return;
+      const projectId = document.getElementById('serviceReportProject')?.value || '';
+      const isCustomer = state.user?.role === 'customer';
+      const rows = filterByUserProject(state.reportSignoffs || [])
+        .filter(item => !projectId || item.projectId === projectId)
+        .sort((a, b) => String(b.rangeStart).localeCompare(String(a.rangeStart)));
+      table.innerHTML = rows.map(item => {
+        const canSign = isCustomer && item.status === 'pending';
+        const actions = [
+          `<button class="secondary" type="button" data-action="view-report-signoff" data-id="${attrEsc(item.id)}">查看快照</button>`,
+          canSign ? `<button class="primary" type="button" data-action="submit-report-signoff" data-id="${attrEsc(item.id)}" data-decision="sign">签收</button>` : '',
+          canSign ? `<button class="secondary" type="button" data-action="submit-report-signoff" data-id="${attrEsc(item.id)}" data-decision="return">退回</button>` : '',
+          canEditData() && item.status !== 'signed' ? `<button class="secondary" type="button" data-action="reissue-report-signoff" data-id="${attrEsc(item.id)}">重新发起</button>` : ''
+        ].filter(Boolean).join(' ');
+        return `<tr>
+          <td>${esc(item.rangeStart || '-')} 至 ${esc(item.rangeEnd || '-')}<div class="muted" style="font-size:11px;">${esc(formatProjectDisplayById(item.projectId))}</div></td>
+          <td>${reportSignoffStatusBadge(item.status, item.statusLabel)}</td>
+          <td>${esc(item.issuedByName || '-')}<div class="muted" style="font-size:11px;">${esc(item.issuedAt || '')}</div></td>
+          <td>${item.signedAt ? `${esc(item.signedByName || '-')}<div class="muted" style="font-size:11px;">${esc(item.signedAt)}</div>` : '-'}</td>
+          <td>${esc(item.comment || '-')}</td>
+          <td><div class="toolbar">${actions}</div></td>
+        </tr>`;
+      }).join('') || '<tr><td colspan="6">暂无签收记录</td></tr>';
     }
 
     function formatAppVersion(version) {
@@ -12588,6 +12655,7 @@
       { key: 'kb', path: '/api/kb' },
       { key: 'documents', path: '/api/documents' },
       { key: 'workReports', path: '/api/work-reports' },
+      { key: 'reportSignoffs', path: '/api/report-signoffs' },
       { key: 'inspectionPlans', path: '/api/inspection-plans' },
       { key: 'inspectionExecutions', path: '/api/inspection-executions' },
       { key: 'spareParts', path: '/api/spare-parts' },
@@ -15637,6 +15705,94 @@
       }
       const period = document.getElementById('serviceReportPeriod').value;
       window.open(`/api/reports/service/${encodeURIComponent(projectId)}?period=${encodeURIComponent(period)}`, '_blank', 'noopener');
+    });
+    document.getElementById('serviceReportProject').addEventListener('change', renderReportSignoffs);
+    document.getElementById('serviceReportSignoffBtn').addEventListener('click', async event => {
+      const projectId = document.getElementById('serviceReportProject').value;
+      if (!projectId) {
+        showGlobalError('请选择项目后再发起签收');
+        return;
+      }
+      const button = event.currentTarget;
+      const period = document.getElementById('serviceReportPeriod').value;
+      const confirmed = await showConfirm('发起后将以当前报告数据生成冻结快照并通知客户签收，确认继续？');
+      if (!confirmed) return;
+      button.disabled = true;
+      try {
+        await api(`/api/reports/service/${encodeURIComponent(projectId)}/signoff`, {
+          method: 'POST',
+          body: JSON.stringify({ period })
+        });
+        state.reportSignoffs = (await apiCollection('/api/report-signoffs', { silent: true })).data;
+        renderReportSignoffs();
+        setMessage('reportSignoffMessage', '已发起客户签收');
+      } catch (error) {
+        setMessage('reportSignoffMessage', error.message, 'error');
+      } finally {
+        button.disabled = false;
+      }
+    });
+    document.getElementById('reportSignoffTable').addEventListener('click', async event => {
+      const button = event.target.closest('button[data-action]');
+      if (!button) return;
+      const record = (state.reportSignoffs || []).find(item => item.id === button.dataset.id);
+      if (!record) return;
+      if (button.dataset.action === 'view-report-signoff') {
+        window.open(`/api/reports/service/${encodeURIComponent(record.projectId)}?signoffId=${encodeURIComponent(record.id)}`, '_blank', 'noopener');
+        return;
+      }
+      if (button.dataset.action === 'submit-report-signoff') {
+        state.pendingReportSignoff = { id: record.id, decision: button.dataset.decision };
+        document.getElementById('reportSignoffModalTitle').textContent = button.dataset.decision === 'sign' ? '签收服务报告' : '退回服务报告';
+        document.getElementById('reportSignoffModalMeta').textContent = `${record.rangeStart || '-'} 至 ${record.rangeEnd || '-'}`;
+        document.getElementById('reportSignoffCommentLabel').textContent = button.dataset.decision === 'sign' ? '客户意见（选填）' : '退回原因';
+        document.getElementById('reportSignoffComment').value = '';
+        document.getElementById('reportSignoffSubmitBtn').textContent = button.dataset.decision === 'sign' ? '确认签收' : '确认退回';
+        document.getElementById('reportSignoffModalMessage').textContent = '';
+        openModal('reportSignoffModal');
+        return;
+      }
+      if (button.dataset.action === 'reissue-report-signoff') {
+        const confirmed = await showConfirm('重新发起将以当前报告数据刷新冻结快照，确认继续？');
+        if (!confirmed) return;
+        try {
+          await api(`/api/reports/service/${encodeURIComponent(record.projectId)}/signoff`, {
+            method: 'POST',
+            body: JSON.stringify({ period: record.period, anchorDate: record.rangeStart, startDate: record.rangeStart, endDate: record.rangeEnd })
+          });
+          state.reportSignoffs = (await apiCollection('/api/report-signoffs', { silent: true })).data;
+          renderReportSignoffs();
+          setMessage('reportSignoffMessage', '已重新发起客户签收');
+        } catch (error) {
+          setMessage('reportSignoffMessage', error.message, 'error');
+        }
+      }
+    });
+    document.getElementById('reportSignoffSubmitBtn').addEventListener('click', async event => {
+      const pending = state.pendingReportSignoff;
+      if (!pending) return;
+      const comment = document.getElementById('reportSignoffComment').value.trim();
+      if (pending.decision === 'return' && !comment) {
+        setMessage('reportSignoffModalMessage', '请填写退回原因', 'error');
+        return;
+      }
+      const button = event.currentTarget;
+      button.disabled = true;
+      try {
+        await api(`/api/report-signoffs/${encodeURIComponent(pending.id)}/${pending.decision === 'sign' ? 'sign' : 'return'}`, {
+          method: 'POST',
+          body: JSON.stringify({ comment })
+        });
+        closeModal('reportSignoffModal');
+        state.pendingReportSignoff = null;
+        state.reportSignoffs = (await apiCollection('/api/report-signoffs', { silent: true })).data;
+        renderReportSignoffs();
+        setMessage('reportSignoffMessage', pending.decision === 'sign' ? '服务报告已签收' : '服务报告已退回');
+      } catch (error) {
+        setMessage('reportSignoffModalMessage', error.message, 'error');
+      } finally {
+        button.disabled = false;
+      }
     });
     document.getElementById('reportDimension').addEventListener('change', refreshReports);
     document.getElementById('reportPeriod').addEventListener('change', refreshReports);
