@@ -2936,24 +2936,55 @@ async function main() {
     conclusion: '完成',
     durationHours: 1
   });
+  const multiLogDate = formatDateKey(new Date());
+  const multiLogPeriod = multiLogDate.slice(0, 7);
   const multiLogPrimary = await request('/api/logs', {
     method: 'POST', headers: { cookie: multiCookie, 'Content-Type': 'application/json' },
-    body: JSON.stringify(multiLogPayload(projectId, '2098-12-28', '多项目汇总主项目日志'))
+    body: JSON.stringify(multiLogPayload(projectId, multiLogDate, '多项目汇总主项目日志'))
   });
   const multiLogSecondary = await request('/api/logs', {
     method: 'POST', headers: { cookie: multiCookie, 'Content-Type': 'application/json' },
-    body: JSON.stringify(multiLogPayload(multiProject.data.id, '2098-12-29', '多项目汇总兼任项目日志'))
+    body: JSON.stringify(multiLogPayload(multiProject.data.id, multiLogDate, '多项目汇总兼任项目日志'))
   });
   assert(multiLogPrimary.status === 201 && multiLogSecondary.status === 201, '多项目工程师创建日志失败');
   const multiSummaryAll = await request('/api/reports/summary?period=month', { headers: { cookie: multiCookie } });
-  const multiSummaryAllRow = (multiSummaryAll.data || []).find(item => item.period === '2098-12');
+  const multiSummaryAllRow = (multiSummaryAll.data || []).find(item => item.period === multiLogPeriod);
   assert(multiSummaryAll.status === 200 && multiSummaryAllRow && multiSummaryAllRow.totalLogs === 2, '多项目账号汇总应默认覆盖全部授权项目');
   assert((multiSummaryAllRow.projects || []).length === 2, '多项目账号汇总应包含主项目与兼任项目');
   const multiSummaryExplicit = await request(`/api/reports/summary?period=month&projectId=${encodeURIComponent(multiProject.data.id)}`, { headers: { cookie: multiCookie } });
-  const multiSummaryExplicitRow = (multiSummaryExplicit.data || []).find(item => item.period === '2098-12');
+  const multiSummaryExplicitRow = (multiSummaryExplicit.data || []).find(item => item.period === multiLogPeriod);
   assert(multiSummaryExplicit.status === 200 && multiSummaryExplicitRow && multiSummaryExplicitRow.totalLogs === 1, '显式指定项目时汇总应只统计该项目');
   const multiSummaryCross = await request(`/api/reports/summary?period=month&projectId=${encodeURIComponent(otherProject.data.id)}`, { headers: { cookie: multiCookie } });
   assert(multiSummaryCross.status === 403, '多项目账号查询未授权项目汇总应返回 403');
+  const multiUserReport = await request(`/api/reports/user/${encodeURIComponent(multiUser.data.id)}/html?period=month`, {
+    method: 'POST', headers: { cookie, 'Content-Type': 'application/json' },
+    body: '{}'
+  });
+  assert(multiUserReport.status === 200, `管理员导出多项目人员报表失败: ${multiUserReport.status} ${JSON.stringify(multiUserReport.data)}`);
+  const multiUserReportHtml = String(multiUserReport.data || '');
+  assert(multiUserReportHtml.includes('按项目分组概览'), '多项目人员报表应包含按项目分组概览');
+  assert(multiUserReportHtml.includes('多项目汇总主项目日志') && multiUserReportHtml.includes('多项目汇总兼任项目日志'), '管理员人员报表应合并全部授权项目');
+  const multiUserReportPptx = await fetch(base + `/api/reports/user/${encodeURIComponent(multiUser.data.id)}/pptx?period=month`, {
+    method: 'POST', headers: withCsrf({ cookie }, 'POST')
+  });
+  const multiUserReportPptxBuffer = Buffer.from(await multiUserReportPptx.arrayBuffer());
+  assert(multiUserReportPptx.status === 200 && multiUserReportPptxBuffer.length > 10000 && multiUserReportPptxBuffer.subarray(0, 2).toString() === 'PK', '多项目人员报表 PPTX 导出失败');
+  assert(multiUserReportPptxBuffer.includes(Buffer.from('按项目分组概览', 'utf8')), '多项目人员报表 PPTX 应包含按项目分组概览页');
+  const multiSelfReport = await request(`/api/reports/user/${encodeURIComponent(multiUser.data.id)}/html?period=month`, {
+    method: 'POST', headers: { cookie: multiCookie, 'Content-Type': 'application/json' },
+    body: '{}'
+  });
+  assert(multiSelfReport.status === 200 && String(multiSelfReport.data || '').includes('按项目分组概览'), '工程师应能查看本人多项目分组报表');
+  const multiProjectReport = await request(`/api/reports/project/${encodeURIComponent(multiProject.data.id)}/html?period=month`, {
+    method: 'POST', headers: { cookie: multiCookie, 'Content-Type': 'application/json' },
+    body: '{}'
+  });
+  assert(multiProjectReport.status === 200, '多项目工程师应能查看授权项目的项目报表');
+  const multiCrossReport = await request(`/api/reports/user/${encodeURIComponent(approverId)}/html?period=month`, {
+    method: 'POST', headers: { cookie: multiCookie, 'Content-Type': 'application/json' },
+    body: '{}'
+  });
+  assert(multiCrossReport.status === 403, '工程师不应查看他人人员报表');
   const multiLogCleanup = await Promise.all([
     request(`/api/logs/${multiLogPrimary.data.id}`, { method: 'DELETE', headers: { cookie } }),
     request(`/api/logs/${multiLogSecondary.data.id}`, { method: 'DELETE', headers: { cookie } })

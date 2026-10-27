@@ -5326,22 +5326,28 @@
       return Boolean(value) && value >= rangeStart && value <= rangeEnd;
     }
 
-    function buildFrontEndMetrics({ userId = '', projectId = '', rangeStart, rangeEnd }) {
-      const logs = state.logs.filter(item => (!userId || item.userId === userId) && (!projectId || item.projectId === projectId) && isDateInRange(item.date, rangeStart, rangeEnd));
+    function buildFrontEndMetrics({ userId = '', projectId = '', projectIds = null, rangeStart, rangeEnd }) {
+      const projectScope = Array.isArray(projectIds) && projectIds.length ? new Set(projectIds) : null;
+      const inProject = item => projectScope
+        ? projectScope.has(item.projectId)
+        : (!projectId || item.projectId === projectId);
+      const logs = state.logs.filter(item => (!userId || item.userId === userId) && inProject(item) && isDateInRange(item.date, rangeStart, rangeEnd));
       return {
         logCount: logs.length,
         totalHours: Number(logs.reduce((sum, item) => sum + Number(item.durationHours || 0), 0).toFixed(2)),
-        inspectionCount: state.inspectionExecutions.filter(item => (!userId || item.createdBy === userId) && (!projectId || item.projectId === projectId) && isDateInRange(item.executedAt, rangeStart, rangeEnd)).length,
-        incidentCount: state.incidents.filter(item => (!userId || item.createdBy === userId) && (!projectId || item.projectId === projectId) && isDateInRange(item.occurredAt || item.createdAt, rangeStart, rangeEnd)).length,
-        changeCount: state.changeRecords.filter(item => (!userId || item.createdBy === userId) && (!projectId || item.projectId === projectId) && isDateInRange(item.createdAt, rangeStart, rangeEnd)).length,
-        knowledgeCount: state.kb.filter(item => (!userId || item.createdBy === userId) && (!projectId || item.projectId === projectId) && isDateInRange(item.createdAt, rangeStart, rangeEnd)).length
+        inspectionCount: state.inspectionExecutions.filter(item => (!userId || item.createdBy === userId) && inProject(item) && isDateInRange(item.executedAt, rangeStart, rangeEnd)).length,
+        incidentCount: state.incidents.filter(item => (!userId || item.createdBy === userId) && inProject(item) && isDateInRange(item.occurredAt || item.createdAt, rangeStart, rangeEnd)).length,
+        changeCount: state.changeRecords.filter(item => (!userId || item.createdBy === userId) && inProject(item) && isDateInRange(item.createdAt, rangeStart, rangeEnd)).length,
+        knowledgeCount: state.kb.filter(item => (!userId || item.createdBy === userId) && inProject(item) && isDateInRange(item.createdAt, rangeStart, rangeEnd)).length
       };
     }
 
-    function buildOperationalStateSummary(projectId) {
-      const assets = state.assets.filter(item => item.projectId === projectId).length;
-      const documents = state.documents.filter(item => item.projectId === projectId).length;
-      const spareParts = state.spareParts.filter(item => item.projectId === projectId);
+    function buildOperationalStateSummary(projectId, projectIds = null) {
+      const projectScope = Array.isArray(projectIds) && projectIds.length ? new Set(projectIds) : null;
+      const inProject = item => projectScope ? projectScope.has(item.projectId) : item.projectId === projectId;
+      const assets = state.assets.filter(inProject).length;
+      const documents = state.documents.filter(inProject).length;
+      const spareParts = state.spareParts.filter(inProject);
       const spareKinds = spareParts.length;
       return `资产 ${assets} 项，资料 ${documents} 份，备件 ${spareKinds} 类`;
     }
@@ -5369,24 +5375,26 @@
     function buildUserReportRows(period) {
       if (state.user.role === 'customer') return [];
       const range = getCurrentDateRange(period);
-      // 个人报表按用户所属项目统计，未绑定项目（如管理员账号）无法生成，避免展示点击后必然失败的入口。
-      const projectIds = new Set((state.projects || []).map(item => item.id));
+      // 管理员按人员合并全部授权项目；运维人员只展示本人授权项目内的数据。
+      const visibleProjectIds = new Set(projectsInUserScope().map(item => item.id));
       const targetUsers = (state.user.role === 'admin'
         ? state.users
         : state.users.filter(item => item.id === state.user.id))
-        .filter(item => item.projectId && projectIds.has(item.projectId));
+        .map(user => ({ user, projectIds: userProjectIdsOf(user).filter(projectId => visibleProjectIds.has(projectId)) }))
+        .filter(item => item.projectIds.length);
       return targetUsers.map(user => {
-        const metrics = buildFrontEndMetrics({ userId: user.id, projectId: user.projectId, rangeStart: range.rangeStart, rangeEnd: range.rangeEnd });
+        const metrics = buildFrontEndMetrics({ userId: user.user.id, projectIds: user.projectIds, rangeStart: range.rangeStart, rangeEnd: range.rangeEnd });
+        const projectNames = user.projectIds.map(projectId => formatProjectDisplayById(projectId)).filter(name => name && name !== '-');
         return {
-          id: user.id,
-          name: user.name,
-          related: formatProjectDisplayById(user.projectId),
-          totalLogs: buildOperationalStateSummary(user.projectId),
+          id: user.user.id,
+          name: user.user.name,
+          related: projectNames.join('、') || '-',
+          totalLogs: buildOperationalStateSummary('', user.projectIds),
           totalHours: buildOperationalOutputSummary(metrics),
           metric3: `${metrics.totalHours} 小时`,
           metric4: `${metrics.knowledgeCount} 条`,
-          href: `/api/reports/user/${user.id}/pptx?period=${period}`,
-          htmlHref: `/api/reports/user/${user.id}/html?period=${period}`,
+          href: `/api/reports/user/${user.user.id}/pptx?period=${period}`,
+          htmlHref: `/api/reports/user/${user.user.id}/html?period=${period}`,
           actionLabel: '下载PPTX'
         };
       });

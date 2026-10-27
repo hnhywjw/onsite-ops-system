@@ -2376,23 +2376,40 @@ function sanitizeChangeRecordForViewer(item, viewer) {
 // 报表导出复用各列表接口的客户脱敏规则，避免因绕过工具接口而泄露内部字段。
 function sanitizeOperationalReportForViewer(report, viewer) {
   if (!report || !viewer || viewer.role !== 'customer') return report;
+  const sanitizeAssetList = items => (items || []).map(item => sanitizeAssetForApi(item, viewer));
+  const sanitizePlanList = items => (items || []).map(item => sanitizeInspectionPlanForViewer(item, viewer));
+  const sanitizeExecutionList = items => (items || []).map(item => sanitizeInspectionExecutionForViewer(item, viewer));
+  const sanitizeChangeList = items => (items || []).map(item => sanitizeChangeRecordForViewer(item, viewer));
+  const sanitizeIncidentList = items => (items || []).map(item => ({ ...item, description: '', resolution: '' }));
+  const sanitizeKbList = items => (items || []).map(item => ({
+    id: item.id,
+    title: item.title,
+    category: item.category || '',
+    tags: item.tags || '',
+    projectId: item.projectId,
+    createdAt: item.createdAt,
+    createdBy: item.createdBy
+  }));
   return {
     ...report,
     logs: [],
     spareParts: [],
-    assets: (report.assets || []).map(item => sanitizeAssetForApi(item, viewer)),
-    plans: (report.plans || []).map(item => sanitizeInspectionPlanForViewer(item, viewer)),
-    executions: (report.executions || []).map(item => sanitizeInspectionExecutionForViewer(item, viewer)),
-    changes: (report.changes || []).map(item => sanitizeChangeRecordForViewer(item, viewer)),
-    incidents: (report.incidents || []).map(item => ({ ...item, description: '', resolution: '' })),
-    kb: (report.kb || []).map(item => ({
-      id: item.id,
-      title: item.title,
-      category: item.category || '',
-      tags: item.tags || '',
-      projectId: item.projectId,
-      createdAt: item.createdAt,
-      createdBy: item.createdBy
+    assets: sanitizeAssetList(report.assets),
+    plans: sanitizePlanList(report.plans),
+    executions: sanitizeExecutionList(report.executions),
+    changes: sanitizeChangeList(report.changes),
+    incidents: sanitizeIncidentList(report.incidents),
+    kb: sanitizeKbList(report.kb),
+    projectGroups: (report.projectGroups || []).map(group => ({
+      ...group,
+      logs: [],
+      spareParts: [],
+      assets: sanitizeAssetList(group.assets),
+      plans: sanitizePlanList(group.plans),
+      executions: sanitizeExecutionList(group.executions),
+      changes: sanitizeChangeList(group.changes),
+      incidents: sanitizeIncidentList(group.incidents),
+      kb: sanitizeKbList(group.kb)
     }))
   };
 }
@@ -9555,71 +9572,149 @@ function truncateText(value, maxLength = 90) {
 function buildOperationalReportData(db, scope, targetId, period, viewer) {
   const currentPeriod = getPeriodKey(formatDateKey(new Date()), period);
   const periodLabel = ({ week: '每周', month: '每月', year: '每年' }[period] || period);
-  const targetUser = scope === 'user' ? db.users.find(item => item.id === targetId) : null;
-  const project = scope === 'project'
-    ? db.projects.find(item => item.id === targetId)
-    : db.projects.find(item => item.id === targetUser?.projectId);
-  if (!project || (scope === 'user' && !targetUser)) return null;
-  const projectUserIds = (db.users || []).filter(item => userHasProject(item, project.id)).map(item => item.id);
-  const logs = (db.logs || [])
-    .filter(item => scope === 'user' ? item.userId === targetId : item.projectId === project.id)
-    .filter(item => getPeriodKey(item.date, period) === currentPeriod)
-    .sort((a, b) => String(b.date || '').localeCompare(String(a.date || '')));
-  const assets = (db.assets || []).filter(item => item.projectId === project.id);
-  const kb = (db.knowledgeBase || []).filter(item => scope === 'user' ? item.createdBy === targetId : item.projectId === project.id || projectUserIds.includes(item.createdBy));
-  const plans = (db.inspectionPlans || []).filter(item => item.projectId === project.id);
-  const executions = (db.inspectionExecutions || [])
-    .filter(item => item.projectId === project.id)
-    .filter(item => getPeriodKey(item.executedAt, period) === currentPeriod)
-    .sort((a, b) => String(b.executedAt || '').localeCompare(String(a.executedAt || '')));
-  const changes = (db.changeRecords || [])
-    .filter(item => item.projectId === project.id)
-    .filter(item => getPeriodKey(item.createdAt, period) === currentPeriod)
-    .sort((a, b) => String(b.createdAt || '').localeCompare(String(a.createdAt || '')));
-  const incidents = (db.incidentRecords || [])
-    .filter(item => item.projectId === project.id)
-    .filter(item => getPeriodKey(item.occurredAt || item.createdAt, period) === currentPeriod)
-    .sort((a, b) => String(b.occurredAt || b.createdAt || '').localeCompare(String(a.occurredAt || a.createdAt || '')));
-  const documents = (db.documents || []).filter(item => item.projectId === project.id);
-  const spareParts = (db.spareParts || []).filter(item => item.projectId === project.id);
-  const users = (db.users || []).filter(item => userHasProject(item, project.id));
-  const totalHours = Number(logs.reduce((sum, item) => sum + Number(item.durationHours || 0), 0).toFixed(2));
-  const sparePartStock = spareParts.reduce((sum, item) => sum + Number(item.quantity ?? item.stock ?? 0), 0);
-  const projectStateSummary = `资产 ${assets.length} 项，巡检计划 ${plans.length} 个，资料 ${documents.length} 份，备件 ${spareParts.length} 类 / 库存 ${sparePartStock} 件。`;
-  const periodOutputSummary = `本周期产出日志 ${logs.length} 条、工时 ${totalHours} 小时、巡检 ${executions.length} 次、变更 ${changes.length} 条、故障 ${incidents.length} 条、知识 ${kb.length} 条。`;
+  const isUserReport = scope === 'user';
+  const targetUser = isUserReport ? (db.users || []).find(item => item.id === targetId) : null;
+  if (isUserReport && !targetUser) return null;
+  // 个人报表覆盖人员的项目集；非管理员只能查看本人项目集内的数据。
+  const viewerProjectIds = viewer && viewer.role !== 'admin' ? new Set(userProjectIds(viewer)) : null;
+  const scopedProjects = isUserReport
+    ? userProjectIds(targetUser)
+      .map(projectId => (db.projects || []).find(item => item.id === projectId))
+      .filter(Boolean)
+      .filter(project => !viewerProjectIds || viewerProjectIds.has(project.id))
+    : [(db.projects || []).find(item => item.id === targetId)].filter(Boolean);
+  if (!scopedProjects.length) return null;
+  const primaryProject = scopedProjects.find(item => item.id === targetUser?.projectId) || scopedProjects[0];
+  const projectLabelOf = project => `${project.customerName || '-'} / ${project.name || '-'}`;
+  const inPeriod = value => getPeriodKey(value, period) === currentPeriod;
+  const users = (db.users || []).filter(user => scopedProjects.some(project => userHasProject(user, project.id)));
+  const projectUserIdsOf = projectId => users.filter(user => userHasProject(user, projectId)).map(user => user.id);
+  const projectGroups = scopedProjects.map(project => {
+    const logs = (db.logs || [])
+      .filter(item => item.projectId === project.id)
+      .filter(item => !isUserReport || item.userId === targetId)
+      .filter(item => inPeriod(item.date))
+      .sort((a, b) => String(b.date || '').localeCompare(String(a.date || '')));
+    const assets = (db.assets || []).filter(item => item.projectId === project.id);
+    const projectUserIds = projectUserIdsOf(project.id);
+    const kb = (db.knowledgeBase || []).filter(item => isUserReport
+      ? item.createdBy === targetId && item.projectId === project.id
+      : item.projectId === project.id || projectUserIds.includes(item.createdBy));
+    const plans = (db.inspectionPlans || []).filter(item => item.projectId === project.id);
+    const executions = (db.inspectionExecutions || [])
+      .filter(item => item.projectId === project.id)
+      .filter(item => inPeriod(item.executedAt))
+      .sort((a, b) => String(b.executedAt || '').localeCompare(String(a.executedAt || '')));
+    const changes = (db.changeRecords || [])
+      .filter(item => item.projectId === project.id)
+      .filter(item => inPeriod(item.createdAt))
+      .sort((a, b) => String(b.createdAt || '').localeCompare(String(a.createdAt || '')));
+    const incidents = (db.incidentRecords || [])
+      .filter(item => item.projectId === project.id)
+      .filter(item => inPeriod(item.occurredAt || item.createdAt))
+      .sort((a, b) => String(b.occurredAt || b.createdAt || '').localeCompare(String(a.occurredAt || a.createdAt || '')));
+    const documents = (db.documents || []).filter(item => item.projectId === project.id);
+    const spareParts = (db.spareParts || []).filter(item => item.projectId === project.id);
+    const totalHours = Number(logs.reduce((sum, item) => sum + Number(item.durationHours || 0), 0).toFixed(2));
+    const sparePartStock = spareParts.reduce((sum, item) => sum + Number(item.quantity ?? item.stock ?? 0), 0);
+    return {
+      project,
+      projectLabel: projectLabelOf(project),
+      logs,
+      assets,
+      kb,
+      plans,
+      executions,
+      changes,
+      incidents,
+      documents,
+      spareParts,
+      totalHours,
+      sparePartStock,
+      abnormalInspectionCount: executions.filter(item => item.result === '异常').length,
+      normalInspectionCount: executions.filter(item => item.result === '正常').length,
+      openIncidentCount: incidents.filter(item => item.status !== '已关闭' && item.status !== '已解决').length,
+      projectStateSummary: `资产 ${assets.length} 项，巡检计划 ${plans.length} 个，资料 ${documents.length} 份，备件 ${spareParts.length} 类 / 库存 ${sparePartStock} 件。`,
+      periodOutputSummary: `本周期产出日志 ${logs.length} 条、工时 ${totalHours} 小时、巡检 ${executions.length} 次、变更 ${changes.length} 条、故障 ${incidents.length} 条、知识 ${kb.length} 条。`
+    };
+  });
+  const allLogs = projectGroups.flatMap(group => group.logs);
+  const allAssets = projectGroups.flatMap(group => group.assets);
+  const allKb = projectGroups.flatMap(group => group.kb);
+  const allPlans = projectGroups.flatMap(group => group.plans);
+  const allExecutions = projectGroups.flatMap(group => group.executions);
+  const allChanges = projectGroups.flatMap(group => group.changes);
+  const allIncidents = projectGroups.flatMap(group => group.incidents);
+  const allDocuments = projectGroups.flatMap(group => group.documents);
+  const allSpareParts = projectGroups.flatMap(group => group.spareParts);
+  const totalHours = Number(allLogs.reduce((sum, item) => sum + Number(item.durationHours || 0), 0).toFixed(2));
+  const sparePartStock = allSpareParts.reduce((sum, item) => sum + Number(item.quantity ?? item.stock ?? 0), 0);
   const report = sanitizeOperationalReportForViewer({
     scope,
     targetUser,
-    project,
+    project: primaryProject,
+    projects: scopedProjects,
+    projectGroups,
     users,
     period,
     periodLabel,
     currentPeriod,
-    title: scope === 'user' ? `${targetUser.name} 驻场运维完整报表` : `${project.customerName || '-'} / ${project.name || '-'} 运维完整报表`,
-    projectName: `${project.customerName || '-'} / ${project.name || '-'}`,
-    ownerName: scope === 'user' ? targetUser.name : project.name,
-    logs,
-    assets,
-    kb,
-    plans,
-    executions,
-    changes,
-    incidents,
-    documents,
-    spareParts,
+    title: isUserReport ? `${targetUser.name} 驻场运维完整报表` : `${primaryProject.customerName || '-'} / ${primaryProject.name || '-'} 运维完整报表`,
+    projectName: scopedProjects.map(projectLabelOf).join('、'),
+    coverProjectName: scopedProjects.length > 1 ? `负责 ${scopedProjects.length} 个项目` : projectLabelOf(primaryProject),
+    ownerName: isUserReport ? targetUser.name : primaryProject.name,
+    logs: allLogs,
+    assets: allAssets,
+    kb: allKb,
+    plans: allPlans,
+    executions: allExecutions,
+    changes: allChanges,
+    incidents: allIncidents,
+    documents: allDocuments,
+    spareParts: allSpareParts,
     totalHours,
     sparePartStock,
-    abnormalInspectionCount: executions.filter(item => item.result === '异常').length,
-    normalInspectionCount: executions.filter(item => item.result === '正常').length,
-    openIncidentCount: incidents.filter(item => item.status !== '已关闭' && item.status !== '已解决').length,
-    projectStateSummary,
-    periodOutputSummary
+    abnormalInspectionCount: allExecutions.filter(item => item.result === '异常').length,
+    normalInspectionCount: allExecutions.filter(item => item.result === '正常').length,
+    openIncidentCount: allIncidents.filter(item => item.status !== '已关闭' && item.status !== '已解决').length,
+    projectStateSummary: `资产 ${allAssets.length} 项，巡检计划 ${allPlans.length} 个，资料 ${allDocuments.length} 份，备件 ${allSpareParts.length} 类 / 库存 ${sparePartStock} 件。`,
+    periodOutputSummary: `本周期产出日志 ${allLogs.length} 条、工时 ${totalHours} 小时、巡检 ${allExecutions.length} 次、变更 ${allChanges.length} 条、故障 ${allIncidents.length} 条、知识 ${allKb.length} 条。`
   }, viewer);
-  // 摘要按脱敏后的集合重新统计，避免通过数量泄露客户不可见的数据。
-  const visibleSparePartStock = (report.spareParts || []).reduce((sum, item) => sum + Number(item.quantity ?? item.stock ?? 0), 0);
-  report.totalHours = Number((report.logs || []).reduce((sum, item) => sum + Number(item.durationHours || 0), 0).toFixed(2));
-  report.projectStateSummary = `资产 ${report.assets.length} 项，巡检计划 ${report.plans.length} 个，资料 ${report.documents.length} 份，备件 ${report.spareParts.length} 类 / 库存 ${visibleSparePartStock} 件。`;
-  report.periodOutputSummary = `本周期产出日志 ${report.logs.length} 条、工时 ${report.totalHours} 小时、巡检 ${report.executions.length} 次、变更 ${report.changes.length} 条、故障 ${report.incidents.length} 条、知识 ${report.kb.length} 条。`;
+  // 摘要与分组都按脱敏后的集合重新统计，避免通过数量泄露客户不可见的数据。
+  const summarizeState = group => {
+    const stock = (group.spareParts || []).reduce((sum, item) => sum + Number(item.quantity ?? item.stock ?? 0), 0);
+    return `资产 ${(group.assets || []).length} 项，巡检计划 ${(group.plans || []).length} 个，资料 ${(group.documents || []).length} 份，备件 ${(group.spareParts || []).length} 类 / 库存 ${stock} 件。`;
+  };
+  const summarizeOutput = group => {
+    const hours = Number((group.logs || []).reduce((sum, item) => sum + Number(item.durationHours || 0), 0).toFixed(2));
+    return { hours, text: `本周期产出日志 ${(group.logs || []).length} 条、工时 ${hours} 小时、巡检 ${(group.executions || []).length} 次、变更 ${(group.changes || []).length} 条、故障 ${(group.incidents || []).length} 条、知识 ${(group.kb || []).length} 条。` };
+  };
+  report.projectGroups = (report.projectGroups || []).map(group => {
+    const output = summarizeOutput(group);
+    return {
+      ...group,
+      totalHours: output.hours,
+      projectStateSummary: summarizeState(group),
+      periodOutputSummary: output.text
+    };
+  });
+  report.logs = report.projectGroups.flatMap(group => group.logs);
+  report.assets = report.projectGroups.flatMap(group => group.assets);
+  report.kb = report.projectGroups.flatMap(group => group.kb);
+  report.plans = report.projectGroups.flatMap(group => group.plans);
+  report.executions = report.projectGroups.flatMap(group => group.executions);
+  report.changes = report.projectGroups.flatMap(group => group.changes);
+  report.incidents = report.projectGroups.flatMap(group => group.incidents);
+  report.documents = report.projectGroups.flatMap(group => group.documents);
+  report.spareParts = report.projectGroups.flatMap(group => group.spareParts);
+  const output = summarizeOutput(report);
+  report.totalHours = output.hours;
+  report.sparePartStock = report.spareParts.reduce((sum, item) => sum + Number(item.quantity ?? item.stock ?? 0), 0);
+  report.abnormalInspectionCount = report.executions.filter(item => item.result === '异常').length;
+  report.normalInspectionCount = report.executions.filter(item => item.result === '正常').length;
+  report.openIncidentCount = report.incidents.filter(item => item.status !== '已关闭' && item.status !== '已解决').length;
+  report.projectStateSummary = summarizeState(report);
+  report.periodOutputSummary = output.text;
   return report;
 }
 
@@ -9637,7 +9732,7 @@ function createReportCoverSlide(report) {
     createShape({ id: 2, x: 0, y: 0, cx: emu(13.333), cy: emu(7.5), fill: 'F8FAFC', name: 'Background' }),
     createShape({ id: 3, x: emu(0.7), y: emu(0.65), cx: emu(11.9), cy: emu(5.35), fill: 'FFFFFF', line: 'E2E8F0', preset: 'roundRect' }),
     createShape({ id: 5, x: emu(1.15), y: emu(1.12), cx: emu(10.6), cy: emu(0.7), textLines: [report.title], textOptions: { size: 2800, color: '0F172A', bold: true } }),
-    createShape({ id: 6, x: emu(1.15), y: emu(2.05), cx: emu(9.8), cy: emu(0.28), textLines: [`项目：${report.projectName}`], textOptions: { size: 1400, color: '475569' } }),
+    createShape({ id: 6, x: emu(1.15), y: emu(2.05), cx: emu(9.8), cy: emu(0.28), textLines: [`项目：${report.coverProjectName || report.projectName}`], textOptions: { size: 1400, color: '475569' } }),
     createShape({ id: 7, x: emu(1.15), y: emu(2.48), cx: emu(9.8), cy: emu(0.28), textLines: [`统计周期：${report.periodLabel}（${report.currentPeriod}）`], textOptions: { size: 1400, color: '475569' } }),
     createShape({ id: 8, x: emu(1.15), y: emu(3.35), cx: emu(10.8), cy: emu(0.65), textLines: ['覆盖运维日志、资产台账、巡检执行、变更故障、知识文档与备件库存，适合客户汇报与内部复盘。'], textOptions: { size: 1650, color: '0F172A' } }),
     createShape({ id: 9, x: emu(1.15), y: emu(4.55), cx: emu(4.0), cy: emu(0.34), fill: 'EFF6FF', line: 'BFDBFE', preset: 'roundRect', textLines: ['驻场运维管理系统'], textOptions: { size: 1300, color: '1D4ED8', bold: true, align: 'ctr' } }),
@@ -9658,7 +9753,7 @@ function createReportOverviewSlide(report) {
     ['巡检执行', `${report.executions.length} 次`, '0891B2'],
     ['变更故障', `${report.changes.length + report.incidents.length} 条`, 'DC2626']
   ];
-  const shapes = createReportHeaderShapes('运维综合总览', `${report.projectName} · ${report.periodLabel} · ${report.currentPeriod}`);
+  const shapes = createReportHeaderShapes('运维综合总览', `${report.coverProjectName || report.projectName} · ${report.periodLabel} · ${report.currentPeriod}`);
   shapes.push(createShape({ id: 10, x: emu(0.7), y: emu(1.15), cx: emu(5.7), cy: emu(0.28), textLines: ['项目现状'], textOptions: { size: 1600, color: '0F172A', bold: true } }));
   shapes.push(createShape({ id: 11, x: emu(6.75), y: emu(1.15), cx: emu(5.7), cy: emu(0.28), textLines: ['周期产出'], textOptions: { size: 1600, color: '0F172A', bold: true } }));
   projectStateMetrics.forEach((metric, index) => {
@@ -9688,6 +9783,28 @@ function createReportOverviewSlide(report) {
   shapes.push(createShape({ id: 92, x: emu(6.75), y: emu(4.35), cx: emu(5.85), cy: emu(1.45), fill: 'EFF6FF', line: 'BFDBFE', preset: 'roundRect' }));
   shapes.push(createShape({ id: 93, x: emu(7.05), y: emu(4.62), cx: emu(5.1), cy: emu(0.82), textLines: [report.periodOutputSummary], textOptions: { size: 1450, color: '0F172A' } }));
   return createBaseSlide(shapes);
+}
+
+function createReportProjectGroupSlide(report) {
+  const groups = report.projectGroups || [];
+  const rows = groups.map(group => [
+    group.projectLabel || '-',
+    `${(group.assets || []).length}`,
+    `${(group.plans || []).length}`,
+    `${(group.documents || []).length}`,
+    `${(group.spareParts || []).length}`,
+    `${(group.logs || []).length}`,
+    `${Number(group.totalHours || 0)}h`
+  ]);
+  return createReportListSlide('按项目分组概览', `${report.ownerName} · ${report.periodLabel} · ${report.currentPeriod}`, rows, [
+    { label: '项目', width: 3.3, max: 30 },
+    { label: '资产', width: 1.0, max: 8 },
+    { label: '巡检计划', width: 1.25, max: 10 },
+    { label: '资料', width: 1.0, max: 8 },
+    { label: '备件', width: 1.0, max: 8 },
+    { label: '日志', width: 1.0, max: 8 },
+    { label: '工时', width: 1.2, max: 10 }
+  ]);
 }
 
 function createReportListSlide(title, subtitle, rows, columns) {
@@ -9720,38 +9837,91 @@ function createReportListSlide(title, subtitle, rows, columns) {
 }
 
 function buildDetailedPptxBufferFromReport(report) {
+  const reportProjects = report.projects || (report.project ? [report.project] : []);
+  const projectLabel = projectId => {
+    const project = reportProjects.find(item => item.id === projectId);
+    return project ? `${project.customerName || '-'} / ${project.name || '-'}` : '-';
+  };
+  const showProjectColumn = report.scope === 'user' && (report.projectGroups || []).length > 1;
+  const withProject = (rows, projectIds, projectHeader, otherColumns) => {
+    if (!showProjectColumn) return { rows, columns: otherColumns };
+    return {
+      rows: rows.map((row, index) => [projectLabel(projectIds[index]), ...row]),
+      columns: [{ label: projectHeader, width: 2.0, max: 20 }, ...otherColumns]
+    };
+  };
   const slides = [
     createReportCoverSlide(report),
     createReportOverviewSlide(report),
-    createReportListSlide('周期产出 / 运维日志', '事件、人员、位置、处理过程与结论', report.logs.map(item => [
-      item.date || '-', item.event || '-', item.relatedTarget || item.location || '-', item.conclusion || '-', `${Number(item.durationHours || 0)}h`, item.process || '-'
-    ]), [
-      { label: '日期', width: 1.15, max: 12 }, { label: '事件', width: 2.0, max: 18 }, { label: '资产/位置', width: 1.7, max: 16 }, { label: '结论', width: 2.0, max: 20 }, { label: '工时', width: 0.75, max: 8 }, { label: '处理过程', width: 4.0, max: 40 }
-    ]),
-    createReportListSlide('项目现状 / 资产台账', '设备类型、品牌型号、位置、维保与状态', report.assets.map(item => [
-      item.name || '-', item.type || '-', [item.brand, item.model].filter(Boolean).join(' / ') || '-', item.installationLocation || item.location || '-', item.maintainExpiryDate || '-', item.status || '-'
-    ]), [
-      { label: '名称', width: 2.0, max: 18 }, { label: '类型', width: 1.2, max: 10 }, { label: '品牌型号', width: 2.2, max: 22 }, { label: '位置', width: 2.0, max: 18 }, { label: '维保到期', width: 1.3, max: 12 }, { label: '状态', width: 1.2, max: 10 }
-    ]),
-    createReportListSlide('项目现状 / 巡检计划', '周期计划、执行结果、异常说明和整改建议', report.plans.map(plan => {
-      const exec = report.executions.find(item => item.planId === plan.id);
-      return [plan.title || '-', plan.cycle || '-', plan.nextDate || '-', exec?.executedAt || '-', exec?.result || '-', exec?.issue || exec?.suggestion || '-'];
-    }), [
-      { label: '计划', width: 2.1, max: 18 }, { label: '周期', width: 0.9, max: 8 }, { label: '下次巡检', width: 1.25, max: 12 }, { label: '执行时间', width: 1.45, max: 16 }, { label: '结果', width: 0.9, max: 8 }, { label: '异常/建议', width: 4.4, max: 42 }
-    ]),
-    createReportListSlide('周期产出 / 变更与故障', '变更审批、故障处理与当前状态', [
-      ...report.changes.map(item => ['变更', item.title || '-', item.riskLevel || '-', item.status || '-', item.createdAt || '-', item.content || '-']),
-      ...report.incidents.map(item => ['故障', item.title || '-', item.faultType || item.severity || '-', item.status || '-', item.occurredAt || item.createdAt || '-', item.resolution || '-'])
-    ], [
-      { label: '类型', width: 0.85, max: 8 }, { label: '标题', width: 2.2, max: 22 }, { label: '级别/类型', width: 1.2, max: 12 }, { label: '状态', width: 1.1, max: 10 }, { label: '时间', width: 1.5, max: 16 }, { label: '说明', width: 4.1, max: 42 }
-    ]),
-    createReportListSlide('项目现状 / 资料与备件', '项目资料、备件库存与知识沉淀', [
-      ...report.kb.map(item => ['知识库', item.title || '-', item.keywords || '-', item.solution || '-', item.createdAt || '-']),
-      ...report.documents.map(item => ['资料', item.title || '-', item.type || '-', item.attachmentName || '-', item.createdAt || '-']),
-      ...report.spareParts.map(item => ['备件', item.name || '-', item.model || '-', `库存 ${item.quantity ?? 0}`, item.createdAt || '-'])
-    ], [
-      { label: '类别', width: 1.0, max: 8 }, { label: '名称', width: 2.35, max: 22 }, { label: '关键字段', width: 2.1, max: 20 }, { label: '状态/内容', width: 3.4, max: 38 }, { label: '创建时间', width: 2.0, max: 16 }
-    ])
+    ...((report.projectGroups || []).length > 1 ? [createReportProjectGroupSlide(report)] : []),
+    (() => {
+      const table = withProject(
+        report.logs.map(item => [item.date || '-', item.event || '-', item.relatedTarget || item.location || '-', item.conclusion || '-', `${Number(item.durationHours || 0)}h`, item.process || '-']),
+        report.logs.map(item => item.projectId),
+        '项目',
+        showProjectColumn
+          ? [{ label: '日期', width: 1.0, max: 12 }, { label: '事件', width: 1.7, max: 18 }, { label: '资产/位置', width: 1.4, max: 16 }, { label: '结论', width: 1.7, max: 20 }, { label: '工时', width: 0.65, max: 8 }, { label: '处理过程', width: 3.0, max: 40 }]
+          : [{ label: '日期', width: 1.15, max: 12 }, { label: '事件', width: 2.0, max: 18 }, { label: '资产/位置', width: 1.7, max: 16 }, { label: '结论', width: 2.0, max: 20 }, { label: '工时', width: 0.75, max: 8 }, { label: '处理过程', width: 4.0, max: 40 }]
+      );
+      return createReportListSlide('周期产出 / 运维日志', '事件、人员、位置、处理过程与结论', table.rows, table.columns);
+    })(),
+    (() => {
+      const table = withProject(
+        report.assets.map(item => [item.name || '-', item.type || '-', [item.brand, item.model].filter(Boolean).join(' / ') || '-', item.installationLocation || item.location || '-', item.maintainExpiryDate || '-', item.status || '-']),
+        report.assets.map(item => item.projectId),
+        '项目',
+        showProjectColumn
+          ? [{ label: '名称', width: 1.75, max: 18 }, { label: '类型', width: 1.0, max: 10 }, { label: '品牌型号', width: 1.9, max: 22 }, { label: '位置', width: 1.6, max: 18 }, { label: '维保到期', width: 1.15, max: 12 }, { label: '状态', width: 1.0, max: 10 }]
+          : [{ label: '名称', width: 2.0, max: 18 }, { label: '类型', width: 1.2, max: 10 }, { label: '品牌型号', width: 2.2, max: 22 }, { label: '位置', width: 2.0, max: 18 }, { label: '维保到期', width: 1.3, max: 12 }, { label: '状态', width: 1.2, max: 10 }]
+      );
+      return createReportListSlide('项目现状 / 资产台账', '设备类型、品牌型号、位置、维保与状态', table.rows, table.columns);
+    })(),
+    (() => {
+      const planRows = report.plans.map(plan => {
+        const exec = report.executions.find(item => item.planId === plan.id);
+        return { projectId: plan.projectId, cells: [plan.title || '-', plan.cycle || '-', plan.nextDate || '-', exec?.executedAt || '-', exec?.result || '-', exec?.issue || exec?.suggestion || '-'] };
+      });
+      const table = withProject(
+        planRows.map(item => item.cells),
+        planRows.map(item => item.projectId),
+        '项目',
+        showProjectColumn
+          ? [{ label: '计划', width: 1.8, max: 18 }, { label: '周期', width: 0.8, max: 8 }, { label: '下次巡检', width: 1.1, max: 12 }, { label: '执行时间', width: 1.3, max: 16 }, { label: '结果', width: 0.8, max: 8 }, { label: '异常/建议', width: 3.6, max: 42 }]
+          : [{ label: '计划', width: 2.1, max: 18 }, { label: '周期', width: 0.9, max: 8 }, { label: '下次巡检', width: 1.25, max: 12 }, { label: '执行时间', width: 1.45, max: 16 }, { label: '结果', width: 0.9, max: 8 }, { label: '异常/建议', width: 4.4, max: 42 }]
+      );
+      return createReportListSlide('项目现状 / 巡检计划', '周期计划、执行结果、异常说明和整改建议', table.rows, table.columns);
+    })(),
+    (() => {
+      const combined = [
+        ...report.changes.map(item => ({ projectId: item.projectId, cells: ['变更', item.title || '-', item.riskLevel || '-', item.status || '-', item.createdAt || '-', item.content || '-'] })),
+        ...report.incidents.map(item => ({ projectId: item.projectId, cells: ['故障', item.title || '-', item.faultType || item.severity || '-', item.status || '-', item.occurredAt || item.createdAt || '-', item.resolution || '-'] }))
+      ];
+      const table = withProject(
+        combined.map(item => item.cells),
+        combined.map(item => item.projectId),
+        '项目',
+        showProjectColumn
+          ? [{ label: '类型', width: 0.8, max: 8 }, { label: '标题', width: 1.9, max: 22 }, { label: '级别/类型', width: 1.0, max: 12 }, { label: '状态', width: 0.9, max: 10 }, { label: '时间', width: 1.3, max: 16 }, { label: '说明', width: 3.4, max: 42 }]
+          : [{ label: '类型', width: 0.85, max: 8 }, { label: '标题', width: 2.2, max: 22 }, { label: '级别/类型', width: 1.2, max: 12 }, { label: '状态', width: 1.1, max: 10 }, { label: '时间', width: 1.5, max: 16 }, { label: '说明', width: 4.1, max: 42 }]
+      );
+      return createReportListSlide('周期产出 / 变更与故障', '变更审批、故障处理与当前状态', table.rows, table.columns);
+    })(),
+    (() => {
+      const combined = [
+        ...report.kb.map(item => ({ projectId: item.projectId, cells: ['知识库', item.title || '-', item.keywords || '-', item.solution || '-', item.createdAt || '-'] })),
+        ...report.documents.map(item => ({ projectId: item.projectId, cells: ['资料', item.title || '-', item.type || '-', item.attachmentName || '-', item.createdAt || '-'] })),
+        ...report.spareParts.map(item => ({ projectId: item.projectId, cells: ['备件', item.name || '-', item.model || '-', `库存 ${item.quantity ?? 0}`, item.createdAt || '-'] }))
+      ];
+      const table = withProject(
+        combined.map(item => item.cells),
+        combined.map(item => item.projectId),
+        '项目',
+        showProjectColumn
+          ? [{ label: '类别', width: 0.9, max: 8 }, { label: '名称', width: 2.0, max: 22 }, { label: '关键字段', width: 1.8, max: 20 }, { label: '状态/内容', width: 2.9, max: 38 }, { label: '创建时间', width: 1.6, max: 16 }]
+          : [{ label: '类别', width: 1.0, max: 8 }, { label: '名称', width: 2.35, max: 22 }, { label: '关键字段', width: 2.1, max: 20 }, { label: '状态/内容', width: 3.4, max: 38 }, { label: '创建时间', width: 2.0, max: 16 }]
+      );
+      return createReportListSlide('项目现状 / 资料与备件', '项目资料、备件库存与知识沉淀', table.rows, table.columns);
+    })()
   ];
   const template = readPptxTemplate();
   const entries = Object.entries(template).map(([name, entry]) => ({
@@ -9955,6 +10125,24 @@ function buildOperationalReportHtml(db, scope, targetId, period, viewer) {
   if (!report) return null;
   const tableRows = (items, emptyColspan, mapper) => items.map(mapper).join('') || `<tr><td colspan="${emptyColspan}">暂无数据</td></tr>`;
   const reportTitle = report.title;
+  const reportProjects = report.projects || (report.project ? [report.project] : []);
+  const projectLabelOf = projectId => {
+    const project = reportProjects.find(item => item.id === projectId);
+    return project ? `${project.customerName || '-'} / ${project.name || '-'}` : '-';
+  };
+  const showProjectColumn = report.scope === 'user' && (report.projectGroups || []).length > 1;
+  const projectHeader = showProjectColumn ? '<th>项目</th>' : '';
+  const projectCell = projectId => showProjectColumn ? `<td>${escapeHtml(projectLabelOf(projectId))}</td>` : '';
+  const projectColumnSpan = showProjectColumn ? 1 : 0;
+  const projectGroupRows = (report.projectGroups || []).map(group => `<tr>
+    <td>${escapeHtml(group.projectLabel || '-')}</td>
+    <td>${(group.assets || []).length}</td>
+    <td>${(group.plans || []).length}</td>
+    <td>${(group.documents || []).length}</td>
+    <td>${(group.spareParts || []).length}</td>
+    <td>${(group.logs || []).length}</td>
+    <td>${Number(group.totalHours || 0)}</td>
+  </tr>`).join('');
   const renderSectionTitle = (group, title, tone) => `<div class="section-title ${tone}"><span class="section-group">${escapeHtml(group)}</span><span class="section-name">${escapeHtml(title)}</span></div>`;
   return `<!DOCTYPE html>
 <html lang="zh-CN">
@@ -10000,7 +10188,7 @@ function buildOperationalReportHtml(db, scope, targetId, period, viewer) {
 <body>
   <div class="card">
     <div class="title">${escapeHtml(reportTitle)}</div>
-    <div class="muted">项目：${escapeHtml(report.project.customerName || '-')} / ${escapeHtml(report.project.name || '-')}</div>
+    <div class="muted">项目：${escapeHtml(report.coverProjectName || projectLabelOf(report.project.id))}</div>
     <div class="muted">统计周期：${escapeHtml(report.periodLabel)}（${escapeHtml(report.currentPeriod)}）</div>
     <div class="muted">生成时间：${escapeHtml(now())}</div>
     <div class="stats">
@@ -10017,18 +10205,20 @@ function buildOperationalReportHtml(db, scope, targetId, period, viewer) {
   <div class="card"><h2>项目基本信息</h2><table><tbody>
     <tr><th>客户/项目</th><td>${escapeHtml(report.project.customerName || '-')} / ${escapeHtml(report.project.name || '-')}</td><th>项目周期</th><td>${escapeHtml(report.project.projectStartDate || '-')} 至 ${escapeHtml(report.project.projectEndDate || '-')}</td></tr>
     <tr><th>统计对象</th><td>${escapeHtml(report.scope === 'user' ? report.targetUser.name : '项目整体')}</td><th>项目人员</th><td>${escapeHtml(report.users.map(item => item.name).join('、') || '-')}</td></tr>
+    ${reportProjects.length > 1 ? `<tr><th>覆盖项目</th><td colspan="3">${escapeHtml(reportProjects.map(project => `${project.customerName || '-'} / ${project.name || '-'}`).join('、'))}</td></tr>` : ''}
   </tbody></table></div>
   <div class="summary-grid">
     <div class="summary-panel state"><h2>项目现状摘要</h2><div class="muted">${escapeHtml(report.projectStateSummary)}</div></div>
     <div class="summary-panel output"><h2>周期产出摘要</h2><div class="muted">${escapeHtml(report.periodOutputSummary)}</div></div>
   </div>
-  <div class="card tone-state">${renderSectionTitle('项目现状', '资产台账', 'tone-state')}<table><thead><tr><th>名称</th><th>类型</th><th>品牌型号</th><th>位置</th><th>维保到期</th><th>状态</th></tr></thead><tbody>${tableRows(report.assets, 6, item => `<tr><td>${escapeHtml(item.name || '-')}</td><td>${escapeHtml(item.type || '-')}</td><td>${escapeHtml([item.brand, item.model].filter(Boolean).join(' / ') || '-')}</td><td>${escapeHtml(item.installationLocation || item.location || '-')}</td><td>${escapeHtml(item.maintainExpiryDate || '-')}</td><td>${escapeHtml(item.status || '-')}</td></tr>`)}</tbody></table></div>
-  <div class="card tone-state">${renderSectionTitle('项目现状', '巡检计划', 'tone-state')}<table><thead><tr><th>计划名称</th><th>周期</th><th>下次巡检</th><th>计划状态</th><th>本周期执行时间</th><th>执行结果</th><th>异常说明</th><th>整改建议</th></tr></thead><tbody>${tableRows(report.plans, 8, plan => { const exec = report.executions.find(item => item.planId === plan.id); return `<tr><td>${escapeHtml(plan.title || '-')}</td><td>${escapeHtml(plan.cycle || '-')}</td><td>${escapeHtml(plan.nextDate || '-')}</td><td>${escapeHtml(plan.status || '-')}</td><td>${escapeHtml(exec?.executedAt || '-')}</td><td>${escapeHtml(exec?.result || '-')}</td><td>${escapeHtml(exec?.issue || '-')}</td><td>${escapeHtml(exec?.suggestion || '-')}</td></tr>`; })}</tbody></table></div>
-  <div class="card tone-state">${renderSectionTitle('项目现状', '资料与备件', 'tone-state')}<table><thead><tr><th>类别</th><th>名称</th><th>关键字段</th><th>状态/数量</th><th>创建时间</th></tr></thead><tbody>${tableRows([...report.documents.map(item => ({ kind: '资料文档', name: item.title, key: item.type, status: item.attachmentName || '-', createdAt: item.createdAt })), ...report.spareParts.map(item => ({ kind: '备件', name: item.name, key: item.model || item.spec || '-', status: item.quantity ?? item.stock ?? '-', createdAt: item.createdAt }))], 5, item => `<tr><td>${escapeHtml(item.kind)}</td><td>${escapeHtml(item.name || '-')}</td><td>${escapeHtml(item.key || '-')}</td><td>${escapeHtml(item.status || '-')}</td><td>${escapeHtml(item.createdAt || '-')}</td></tr>`)}</tbody></table></div>
-  <div class="card tone-output">${renderSectionTitle('周期产出', '运维日志', 'tone-output')}<table><thead><tr><th>日期</th><th>事件</th><th>人员</th><th>资产/位置</th><th>处理过程</th><th>结论</th><th>工时</th></tr></thead><tbody>${tableRows(report.logs, 7, item => `<tr><td>${escapeHtml(item.date || '-')}</td><td>${escapeHtml(item.event || '-')}</td><td>${escapeHtml((db.users || []).find(user => user.id === item.userId)?.name || '-')}</td><td>${escapeHtml(item.relatedTarget || item.location || '-')}</td><td>${escapeHtml(item.process || '-')}</td><td>${escapeHtml(item.conclusion || '-')}</td><td>${escapeHtml(item.durationHours || 0)}</td></tr>`)}</tbody></table></div>
-  <div class="card tone-output">${renderSectionTitle('周期产出', '巡检执行', 'tone-output')}<table><thead><tr><th>执行时间</th><th>计划名称</th><th>执行结果</th><th>执行人</th><th>异常说明</th><th>整改建议</th></tr></thead><tbody>${tableRows(report.executions, 6, item => `<tr><td>${escapeHtml(item.executedAt || '-')}</td><td>${escapeHtml(report.plans.find(plan => plan.id === item.planId)?.title || '-')}</td><td>${escapeHtml(item.result || '-')}</td><td>${escapeHtml(item.executor || '-')}</td><td>${escapeHtml(item.issue || '-')}</td><td>${escapeHtml(item.suggestion || '-')}</td></tr>`)}</tbody></table></div>
-  <div class="card tone-output">${renderSectionTitle('周期产出', '变更与故障', 'tone-output')}<table><thead><tr><th>类型</th><th>标题</th><th>级别/类型</th><th>状态</th><th>时间</th><th>说明</th></tr></thead><tbody>${tableRows([...report.changes.map(item => ({ kind: '变更', title: item.title, type: item.riskLevel, status: item.status, time: item.createdAt, note: item.content })), ...report.incidents.map(item => ({ kind: '故障', title: item.title, type: item.faultType || item.severity, status: item.status, time: item.occurredAt || item.createdAt, note: item.resolution }))], 6, item => `<tr><td>${escapeHtml(item.kind)}</td><td>${escapeHtml(item.title || '-')}</td><td>${escapeHtml(item.type || '-')}</td><td>${escapeHtml(item.status || '-')}</td><td>${escapeHtml(item.time || '-')}</td><td>${escapeHtml(item.note || '-')}</td></tr>`)}</tbody></table></div>
-  <div class="card tone-output">${renderSectionTitle('周期产出', '知识沉淀', 'tone-output')}<table><thead><tr><th>名称</th><th>关键词</th><th>问题描述</th><th>解决方案</th><th>创建时间</th></tr></thead><tbody>${tableRows(report.kb, 5, item => `<tr><td>${escapeHtml(item.title || '-')}</td><td>${escapeHtml(item.keywords || '-')}</td><td>${escapeHtml(item.problem || '-')}</td><td>${escapeHtml(item.solution || '-')}</td><td>${escapeHtml(item.createdAt || '-')}</td></tr>`)}</tbody></table></div>
+  ${reportProjects.length > 1 ? `<div class="card tone-state">${renderSectionTitle('项目现状', '按项目分组概览', 'tone-state')}<table><thead><tr><th>项目</th><th>资产</th><th>巡检计划</th><th>资料</th><th>备件</th><th>日志</th><th>工时</th></tr></thead><tbody>${projectGroupRows || '<tr><td colspan="7">暂无数据</td></tr>'}</tbody></table></div>` : ''}
+  <div class="card tone-state">${renderSectionTitle('项目现状', '资产台账', 'tone-state')}<table><thead><tr>${projectHeader}<th>名称</th><th>类型</th><th>品牌型号</th><th>位置</th><th>维保到期</th><th>状态</th></tr></thead><tbody>${tableRows(report.assets, 6 + projectColumnSpan, item => `<tr>${projectCell(item.projectId)}<td>${escapeHtml(item.name || '-')}</td><td>${escapeHtml(item.type || '-')}</td><td>${escapeHtml([item.brand, item.model].filter(Boolean).join(' / ') || '-')}</td><td>${escapeHtml(item.installationLocation || item.location || '-')}</td><td>${escapeHtml(item.maintainExpiryDate || '-')}</td><td>${escapeHtml(item.status || '-')}</td></tr>`)}</tbody></table></div>
+  <div class="card tone-state">${renderSectionTitle('项目现状', '巡检计划', 'tone-state')}<table><thead><tr>${projectHeader}<th>计划名称</th><th>周期</th><th>下次巡检</th><th>计划状态</th><th>本周期执行时间</th><th>执行结果</th><th>异常说明</th><th>整改建议</th></tr></thead><tbody>${tableRows(report.plans, 8 + projectColumnSpan, plan => { const exec = report.executions.find(item => item.planId === plan.id); return `<tr>${projectCell(plan.projectId)}<td>${escapeHtml(plan.title || '-')}</td><td>${escapeHtml(plan.cycle || '-')}</td><td>${escapeHtml(plan.nextDate || '-')}</td><td>${escapeHtml(plan.status || '-')}</td><td>${escapeHtml(exec?.executedAt || '-')}</td><td>${escapeHtml(exec?.result || '-')}</td><td>${escapeHtml(exec?.issue || '-')}</td><td>${escapeHtml(exec?.suggestion || '-')}</td></tr>`; })}</tbody></table></div>
+  <div class="card tone-state">${renderSectionTitle('项目现状', '资料与备件', 'tone-state')}<table><thead><tr>${projectHeader}<th>类别</th><th>名称</th><th>关键字段</th><th>状态/数量</th><th>创建时间</th></tr></thead><tbody>${tableRows([...report.documents.map(item => ({ projectId: item.projectId, kind: '资料文档', name: item.title, key: item.type, status: item.attachmentName || '-', createdAt: item.createdAt })), ...report.spareParts.map(item => ({ projectId: item.projectId, kind: '备件', name: item.name, key: item.model || item.spec || '-', status: item.quantity ?? item.stock ?? '-', createdAt: item.createdAt }))], 5 + projectColumnSpan, item => `<tr>${projectCell(item.projectId)}<td>${escapeHtml(item.kind)}</td><td>${escapeHtml(item.name || '-')}</td><td>${escapeHtml(item.key || '-')}</td><td>${escapeHtml(item.status || '-')}</td><td>${escapeHtml(item.createdAt || '-')}</td></tr>`)}</tbody></table></div>
+  <div class="card tone-output">${renderSectionTitle('周期产出', '运维日志', 'tone-output')}<table><thead><tr>${projectHeader}<th>日期</th><th>事件</th><th>人员</th><th>资产/位置</th><th>处理过程</th><th>结论</th><th>工时</th></tr></thead><tbody>${tableRows(report.logs, 7 + projectColumnSpan, item => `<tr>${projectCell(item.projectId)}<td>${escapeHtml(item.date || '-')}</td><td>${escapeHtml(item.event || '-')}</td><td>${escapeHtml((db.users || []).find(user => user.id === item.userId)?.name || '-')}</td><td>${escapeHtml(item.relatedTarget || item.location || '-')}</td><td>${escapeHtml(item.process || '-')}</td><td>${escapeHtml(item.conclusion || '-')}</td><td>${escapeHtml(item.durationHours || 0)}</td></tr>`)}</tbody></table></div>
+  <div class="card tone-output">${renderSectionTitle('周期产出', '巡检执行', 'tone-output')}<table><thead><tr>${projectHeader}<th>执行时间</th><th>计划名称</th><th>执行结果</th><th>执行人</th><th>异常说明</th><th>整改建议</th></tr></thead><tbody>${tableRows(report.executions, 6 + projectColumnSpan, item => `<tr>${projectCell(item.projectId)}<td>${escapeHtml(item.executedAt || '-')}</td><td>${escapeHtml(report.plans.find(plan => plan.id === item.planId)?.title || '-')}</td><td>${escapeHtml(item.result || '-')}</td><td>${escapeHtml(item.executor || '-')}</td><td>${escapeHtml(item.issue || '-')}</td><td>${escapeHtml(item.suggestion || '-')}</td></tr>`)}</tbody></table></div>
+  <div class="card tone-output">${renderSectionTitle('周期产出', '变更与故障', 'tone-output')}<table><thead><tr>${projectHeader}<th>类型</th><th>标题</th><th>级别/类型</th><th>状态</th><th>时间</th><th>说明</th></tr></thead><tbody>${tableRows([...report.changes.map(item => ({ projectId: item.projectId, kind: '变更', title: item.title, type: item.riskLevel, status: item.status, time: item.createdAt, note: item.content })), ...report.incidents.map(item => ({ projectId: item.projectId, kind: '故障', title: item.title, type: item.faultType || item.severity, status: item.status, time: item.occurredAt || item.createdAt, note: item.resolution }))], 6 + projectColumnSpan, item => `<tr>${projectCell(item.projectId)}<td>${escapeHtml(item.kind)}</td><td>${escapeHtml(item.title || '-')}</td><td>${escapeHtml(item.type || '-')}</td><td>${escapeHtml(item.status || '-')}</td><td>${escapeHtml(item.time || '-')}</td><td>${escapeHtml(item.note || '-')}</td></tr>`)}</tbody></table></div>
+  <div class="card tone-output">${renderSectionTitle('周期产出', '知识沉淀', 'tone-output')}<table><thead><tr>${projectHeader}<th>名称</th><th>关键词</th><th>问题描述</th><th>解决方案</th><th>创建时间</th></tr></thead><tbody>${tableRows(report.kb, 5 + projectColumnSpan, item => `<tr>${projectCell(item.projectId)}<td>${escapeHtml(item.title || '-')}</td><td>${escapeHtml(item.keywords || '-')}</td><td>${escapeHtml(item.problem || '-')}</td><td>${escapeHtml(item.solution || '-')}</td><td>${escapeHtml(item.createdAt || '-')}</td></tr>`)}</tbody></table></div>
 </body>
 </html>`;
 }
