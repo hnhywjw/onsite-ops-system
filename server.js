@@ -3272,12 +3272,17 @@ function requestPinnedUrl(url, pinned, options = {}) {
     const isHttps = url.protocol === 'https:';
     const transport = isHttps ? https : http;
     const maxBytes = options.maxBytes || 1024 * 1024;
+    const body = options.body == null ? null : (Buffer.isBuffer(options.body) ? options.body : Buffer.from(String(options.body)));
+    const headers = { ...(options.headers || {}) };
+    if (body && !Object.keys(headers).some(key => key.toLowerCase() === 'content-length')) {
+      headers['Content-Length'] = String(body.length);
+    }
     const req = transport.request({
       hostname: url.hostname,
       port: url.port || (isHttps ? 443 : 80),
       path: `${url.pathname}${url.search}`,
       method: options.method || 'GET',
-      headers: options.headers || {},
+      headers,
       lookup: pinnedLookup(pinned),
       timeout: options.timeoutMs || 10000
     }, res => {
@@ -3296,7 +3301,7 @@ function requestPinnedUrl(url, pinned, options = {}) {
     });
     req.on('timeout', () => req.destroy(new Error('request timeout')));
     req.on('error', reject);
-    req.end();
+    req.end(body || undefined);
   });
 }
 
@@ -6581,15 +6586,16 @@ async function deliverToChannel(channel, notification) {
 }
 
 // Webhook 目标同样按监控目标策略校验，避免把内网探测能力通过通道配置变成任意出站请求。
-async function assertOutboundUrlAllowed(rawUrl) {
+async function resolveOutboundUrl(rawUrl) {
   const parsed = new URL(String(rawUrl || ''));
   if (!['http:', 'https:'].includes(parsed.protocol)) throw new Error('仅支持 http(s) 地址');
   const verdict = await resolveMonitorTargetAddress(parsed.hostname);
   if (!verdict.ok) throw new Error(verdict.message);
+  return { url: parsed, pinned: { address: verdict.address, family: net.isIP(verdict.address) } };
 }
 
 async function deliverWebhookNotification(channel, notification) {
-  await assertOutboundUrlAllowed(channel.webhookUrl);
+  const { url, pinned } = await resolveOutboundUrl(channel.webhookUrl);
   const payload = {
     msgtype: 'text',
     text: {
@@ -6610,22 +6616,19 @@ async function deliverWebhookNotification(channel, notification) {
     headers['X-Onsite-Signature'] = crypto.createHmac('sha256', secret).update(bodyText).digest('hex');
     headers['X-Onsite-Timestamp'] = String(Date.now());
   }
-  const controller = new AbortController();
-  const timer = setTimeout(() => controller.abort(), 5000);
-  try {
-    const response = await fetch(channel.webhookUrl, {
-      method: 'POST',
-      headers,
-      body: bodyText,
-      redirect: 'manual',
-      signal: controller.signal
-    });
-    const preview = (await response.text()).slice(0, 200);
-    if (!response.ok) throw new Error(`Webhook 返回 ${response.status} ${preview}`.trim());
-    return { ok: true };
-  } finally {
-    clearTimeout(timer);
+  // 使用已校验的 DNS 结果建连，避免校验后域名重新解析造成 SSRF/DNS rebinding。
+  const response = await requestPinnedUrl(url, pinned, {
+    method: 'POST',
+    headers,
+    body: bodyText,
+    timeoutMs: 5000,
+    maxBytes: 4096
+  });
+  const preview = response.text.slice(0, 200);
+  if (response.status < 200 || response.status >= 300) {
+    throw new Error(`Webhook 返回 ${response.status} ${preview}`.trim());
   }
+  return { ok: true };
 }
 
 // 最小 SMTP 客户端：仅发送纯文本通知，支持隐式 TLS、STARTTLS 与 AUTH LOGIN/PLAIN。
@@ -6698,11 +6701,13 @@ function encodeSmtpHeader(value) {
   return /^[\x20-\x7E]*$/.test(text) ? text : `=?UTF-8?B?${Buffer.from(text, 'utf8').toString('base64')}?=`;
 }
 
-function connectSmtpSocket(host, port, secure) {
+function connectSmtpSocket(host, port, secure, address) {
   return new Promise((resolve, reject) => {
+    // address 来自校验阶段解析结果，连接时固定使用，避免再次解析导致 DNS rebinding。
+    const servername = net.isIP(host) ? undefined : host;
     const socket = secure
-      ? tls.connect({ host, port, servername: host, rejectUnauthorized: true })
-      : net.connect({ host, port });
+      ? tls.connect({ host: address, port, servername, rejectUnauthorized: true })
+      : net.connect({ host: address, port });
     const timer = setTimeout(() => {
       socket.destroy();
       reject(new Error('SMTP 连接超时'));
@@ -6726,7 +6731,7 @@ async function deliverEmailNotification(channel, notification) {
   const port = Number(channel.smtpPort || (channel.smtpSecure ? 465 : 587));
   const verdict = await resolveMonitorTargetAddress(channel.smtpHost);
   if (!verdict.ok) throw new Error(verdict.message);
-  let socket = await connectSmtpSocket(channel.smtpHost, port, channel.smtpSecure === true);
+  let socket = await connectSmtpSocket(channel.smtpHost, port, channel.smtpSecure === true, verdict.address);
   let reader = createSmtpReader(socket);
   const timeout = setTimeout(() => socket.destroy(new Error('SMTP 会话超时')), 20000);
   try {
@@ -6738,7 +6743,8 @@ async function deliverEmailNotification(channel, notification) {
       await smtpCommand(socket, reader, 'STARTTLS', [220]);
       reader.dispose();
       const upgraded = await new Promise((resolve, reject) => {
-        const secureSocket = tls.connect({ socket, servername: channel.smtpHost, rejectUnauthorized: true }, () => resolve(secureSocket));
+        const servername = net.isIP(channel.smtpHost) ? undefined : channel.smtpHost;
+        const secureSocket = tls.connect({ socket, servername, rejectUnauthorized: true }, () => resolve(secureSocket));
         secureSocket.once('error', reject);
       });
       socket = upgraded;
