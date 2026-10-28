@@ -103,6 +103,10 @@
 - 审计导出：`/api/audit-logs/export` 复用列表过滤条件，CSV 走 `quoteCsvValue()` 中和公式注入；JSON 返回 `exportedAt`、`exportedBy`、`filters`、`total`、`data`。
 - 服务报告：`GET /api/reports/service/:projectId` 由 `buildServiceReportHtml()` 生成可打印 HTML，按项目与周期聚合日志、工单、巡检与资产数据。
 - 报告签收：`reportSignoffs` 在发起时由 `buildServiceReportSnapshot()` 冻结快照并以 `snapshotHash` 校验；客户签收或退回后状态与意见留存，`signoffId` 可回放冻结报告，形成交付闭环。
+- 报表分析层：`buildOperationalReportData()` 统一产出 `ticketMetrics`、`incidentMetrics`、`inspectionMetrics`、`inventoryMetrics`、`trend`、`insights`、`risks`；PPT 与 HTML 共用同一口径，避免两套报表数值不一致。
+- 趋势分桶：`buildReportTrend()` 按周期自适应，日报/周报按天、月报按周、年报按月，输出日志数、工时、新增工单与新增故障。
+- SLA 口径：工单达标率只统计已闭环工单（`closedAt`/`updatedAt` 不晚于 `slaDeadline`）；未闭环超时单独计入风险，避免把处理中工单误判为达标。
+- 服务报告分析：`buildServiceReportSnapshot()` 冻结指标、结论、故障与低库存统计，签收后回放仍保持当时口径。
 - 客户日志可见性：项目级 `customerLogVisible` 开关默认关闭，开启后客户只能读取服务日志中的安全字段。
 
 ## 运行时数据流

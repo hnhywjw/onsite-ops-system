@@ -139,6 +139,13 @@
 ### 报表与工作汇报
 
 - `GET /api/reports/summary`
+- `POST /api/reports/user/:id/html`、`POST /api/reports/user/:id/pptx`
+  - 参数 `period=week|month|year`；按人员聚合其项目集。
+  - 报表维度：资产、巡检计划/执行、资料、备件、日志与工时、变更、故障、工单、知识。
+  - 分析层：关键结论、风险与待办、周期趋势分桶、工单 SLA 达标率、故障闭环率、巡检异常与低库存统计。
+- `POST /api/reports/project/:id/html`、`POST /api/reports/project/:id/pptx`
+  - 参数与统计维度同上，范围为单个项目。
+  - PPT 在封面、总览之外增加关键结论、周期趋势、工单与 SLA 页；HTML 增加结论、风险、趋势、故障闭环与低库存分区。
 - `GET /api/work-reports`
   - 支持 `status`、`reportType`、`projectId`、`userId` 筛选。
 - `POST /api/work-reports`
@@ -199,6 +206,7 @@
   - 返回 `total`、`counts`、`data`；结果按调用者项目范围过滤，客户不参与合同与备件搜索。
 - `GET /api/reports/service/:projectId`
   - 参数 `period=week|month|year`，返回可直接打印的 HTML 服务报告。
+  - 报告包含服务结论摘要、工单 SLA 达标率、故障闭环、巡检异常、低库存与分类分布。
   - 传 `signoffId` 时改为渲染该签收记录冻结的快照，不再按当前数据实时生成，作为客户验收证据。
 - `GET /api/report-signoffs`
   - 返回调用者项目范围内的签收记录；可用 `projectId` 过滤。

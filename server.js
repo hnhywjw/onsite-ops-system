@@ -2397,6 +2397,7 @@ function sanitizeOperationalReportForViewer(report, viewer) {
     ...report,
     logs: [],
     spareParts: [],
+    tickets: (report.tickets || []).map(item => sanitizeTicketForViewer(item, viewer)),
     assets: sanitizeAssetList(report.assets),
     plans: sanitizePlanList(report.plans),
     executions: sanitizeExecutionList(report.executions),
@@ -2407,6 +2408,7 @@ function sanitizeOperationalReportForViewer(report, viewer) {
       ...group,
       logs: [],
       spareParts: [],
+      tickets: (group.tickets || []).map(item => sanitizeTicketForViewer(item, viewer)),
       assets: sanitizeAssetList(group.assets),
       plans: sanitizePlanList(group.plans),
       executions: sanitizeExecutionList(group.executions),
@@ -9608,6 +9610,188 @@ function truncateText(value, maxLength = 90) {
   return text.length > maxLength ? `${text.slice(0, maxLength)}...` : text || '-';
 }
 
+function countReportValues(items, keyOf, options = []) {
+  const counts = {};
+  (items || []).forEach(item => {
+    const key = String(keyOf(item) || '').trim();
+    if (!key) return;
+    counts[key] = (counts[key] || 0) + 1;
+  });
+  const ordered = {};
+  options.forEach(option => {
+    if (counts[option]) ordered[option] = counts[option];
+  });
+  Object.keys(counts)
+    .filter(key => !(key in ordered))
+    .sort((a, b) => counts[b] - counts[a] || a.localeCompare(b))
+    .forEach(key => { ordered[key] = counts[key]; });
+  return ordered;
+}
+
+function percentRate(numerator, denominator) {
+  if (!denominator) return null;
+  return Math.round((numerator / denominator) * 1000) / 10;
+}
+
+function ticketClosedOnTime(ticket) {
+  if (!['已完成', '已关闭'].includes(ticket.status)) return false;
+  const deadlineMs = Date.parse(String(ticket.slaDeadline || ''));
+  const closedAtMs = Date.parse(String(ticket.closedAt || ticket.updatedAt || ''));
+  if (!Number.isFinite(deadlineMs) || !Number.isFinite(closedAtMs)) return ticket.slaStatus !== '超时';
+  return closedAtMs <= deadlineMs;
+}
+
+function summarizeReportTickets(tickets, atMs = Date.now()) {
+  const list = tickets || [];
+  const closed = list.filter(item => ['已完成', '已关闭'].includes(item.status));
+  const breached = list.filter(item => resolveTicketSlaStatus(item, atMs) === '超时');
+  const onTime = closed.filter(ticketClosedOnTime).length;
+  const responseHours = closed
+    .map(item => {
+      const createdMs = Date.parse(String(item.createdAt || ''));
+      const closedMs = Date.parse(String(item.closedAt || item.updatedAt || ''));
+      return Number.isFinite(createdMs) && Number.isFinite(closedMs) ? (closedMs - createdMs) / 3600000 : null;
+    })
+    .filter(value => Number.isFinite(value) && value >= 0);
+  return {
+    total: list.length,
+    closed: closed.length,
+    open: list.length - closed.length,
+    overdue: breached.length,
+    onTime,
+    slaComplianceRate: closed.length ? percentRate(onTime, closed.length) : null,
+    avgCloseHours: responseHours.length ? Math.round((responseHours.reduce((sum, value) => sum + value, 0) / responseHours.length) * 10) / 10 : null,
+    statusCounts: countReportValues(list, item => item.status, ticketStatusOptions),
+    priorityCounts: countReportValues(list, item => item.priority, ticketPriorityOptions),
+    categoryCounts: countReportValues(list, item => item.category, ticketCategoryOptions)
+  };
+}
+
+function summarizeReportIncidents(incidents) {
+  const list = incidents || [];
+  const closed = list.filter(item => ['已恢复', '已关闭', '已解决'].includes(item.status));
+  const overdue = list.filter(item => item.slaStatus === '超时').length;
+  return {
+    total: list.length,
+    closed: closed.length,
+    open: list.length - closed.length,
+    overdue,
+    resolutionRate: percentRate(closed.length, list.length),
+    slaComplianceRate: list.length ? percentRate(list.length - overdue, list.length) : null,
+    severityCounts: countReportValues(list, item => item.severity, incidentSeverityOptions),
+    statusCounts: countReportValues(list, item => item.status, incidentStatusOptions),
+    slaCounts: countReportValues(list, item => item.slaStatus, incidentSlaStatusOptions)
+  };
+}
+
+function summarizeReportInspections(executions) {
+  const list = executions || [];
+  const abnormal = list.filter(item => item.result === '异常').length;
+  return {
+    total: list.length,
+    normal: list.filter(item => item.result === '正常').length,
+    abnormal,
+    rectification: list.filter(item => String(item.issue || '').trim() || String(item.suggestion || '').trim()).length
+  };
+}
+
+function summarizeReportSpareParts(spareParts) {
+  const list = spareParts || [];
+  const quantityOf = item => Number(item.quantity ?? item.stock ?? 0);
+  const lowStock = list
+    .filter(item => quantityOf(item) <= Number(item.safeStock ?? 0))
+    .sort((a, b) => (quantityOf(a) - Number(a.safeStock ?? 0)) - (quantityOf(b) - Number(b.safeStock ?? 0)));
+  return {
+    total: list.length,
+    stock: list.reduce((sum, item) => sum + quantityOf(item), 0),
+    lowStock,
+    lowStockCount: lowStock.length
+  };
+}
+
+// 趋势按周期粒度分桶：日报/周报按天，月报按周，年报按月，避免 PPT 柱状图无法展示。
+function buildReportTrend(period, range, logs, tickets, incidents) {
+  if (!range) return [];
+  const bucketDateKey = value => getCalendarDateKey(value);
+  const logsByDate = (logs || []).map(item => ({ key: bucketDateKey(item.date || item.createdAt), item }));
+  const ticketsByDate = (tickets || []).map(item => ({ key: bucketDateKey(item.createdAt), item }));
+  const incidentsByDate = (incidents || []).map(item => ({ key: bucketDateKey(item.occurredAt || item.createdAt), item }));
+  const start = parseDateOnly(range.rangeStart);
+  const end = parseDateOnly(range.rangeEnd);
+  if (!start || !end) return [];
+  const rawBuckets = [];
+  if (period === 'year') {
+    for (let month = 0; month < 12; month += 1) {
+      const bucketStart = new Date(Date.UTC(start.getUTCFullYear(), month, 1));
+      const bucketEnd = endOfMonth(bucketStart);
+      rawBuckets.push({ start: bucketStart, end: bucketEnd, label: `${String(month + 1).padStart(2, '0')}月` });
+    }
+  } else if (period === 'month') {
+    let cursor = start;
+    while (cursor.getTime() <= end.getTime()) {
+      const bucketStart = cursor;
+      const bucketEnd = addDays(cursor, 6) > end ? end : addDays(cursor, 6);
+      rawBuckets.push({
+        start: bucketStart,
+        end: bucketEnd,
+        label: `${String(bucketStart.getUTCMonth() + 1).padStart(2, '0')}-${String(bucketStart.getUTCDate()).padStart(2, '0')}~${String(bucketEnd.getUTCMonth() + 1).padStart(2, '0')}-${String(bucketEnd.getUTCDate()).padStart(2, '0')}`
+      });
+      cursor = addDays(bucketEnd, 1);
+    }
+  } else {
+    let cursor = start;
+    while (cursor.getTime() <= end.getTime()) {
+      rawBuckets.push({
+        start: cursor,
+        end: cursor,
+        label: `${String(cursor.getUTCMonth() + 1).padStart(2, '0')}-${String(cursor.getUTCDate()).padStart(2, '0')}`
+      });
+      cursor = addDays(cursor, 1);
+    }
+  }
+  const inBucket = (key, bucket) => key && key >= dateToKey(bucket.start) && key <= dateToKey(bucket.end);
+  return rawBuckets.map(bucket => {
+    const bucketLogs = logsByDate.filter(item => inBucket(item.key, bucket));
+    return {
+      label: bucket.label,
+      rangeStart: dateToKey(bucket.start),
+      rangeEnd: dateToKey(bucket.end),
+      logCount: bucketLogs.length,
+      totalHours: Number(bucketLogs.reduce((sum, item) => sum + Number(item.item.durationHours || 0), 0).toFixed(2)),
+      ticketCount: ticketsByDate.filter(item => inBucket(item.key, bucket)).length,
+      incidentCount: incidentsByDate.filter(item => inBucket(item.key, bucket)).length
+    };
+  });
+}
+
+function buildReportInsights(report) {
+  const tickets = report.ticketMetrics || summarizeReportTickets(report.tickets || []);
+  const incidents = report.incidentMetrics || summarizeReportIncidents(report.incidents || []);
+  const inspections = report.inspectionMetrics || summarizeReportInspections(report.executions || []);
+  const inventory = report.inventoryMetrics || summarizeReportSpareParts(report.spareParts || []);
+  const slaText = tickets.slaComplianceRate === null ? '暂无工单' : `${tickets.slaComplianceRate}%`;
+  const insights = [
+    `本周期完成运维记录 ${(report.logs || []).length} 条、投入 ${Number(report.totalHours || 0)} 小时，巡检执行 ${inspections.total} 次，其中异常 ${inspections.abnormal} 次、提出整改 ${inspections.rectification} 项。`,
+    `工单 ${tickets.total} 单，已闭环 ${tickets.closed} 单，SLA 达标率 ${slaText}${tickets.overdue ? `，当前超时 ${tickets.overdue} 单` : ''}。`,
+    `故障 ${incidents.total} 起，已恢复/关闭 ${incidents.closed} 起，未闭环 ${incidents.open} 起${incidents.overdue ? `，SLA 超时 ${incidents.overdue} 起` : ''}。`,
+    `备件 ${inventory.total} 类、库存 ${inventory.stock} 件，低库存 ${inventory.lowStockCount} 项；知识沉淀 ${(report.kb || []).length} 条。`
+  ];
+  const risks = [];
+  (tickets.overdue ? [{ label: `超时工单 ${tickets.overdue} 单`, detail: (report.tickets || []).filter(item => resolveTicketSlaStatus(item) === '超时').map(item => `${item.ticketNo || item.title}（${item.priority || '-'}）`).join('、') }] : [])
+    .forEach(item => risks.push(item));
+  if (incidents.open) {
+    risks.push({ label: `未闭环故障 ${incidents.open} 起`, detail: (report.incidents || []).filter(item => !['已恢复', '已关闭', '已解决'].includes(item.status)).map(item => item.title).join('、') });
+  }
+  if (inspections.abnormal) {
+    risks.push({ label: `巡检异常 ${inspections.abnormal} 次`, detail: (report.executions || []).filter(item => item.result === '异常').map(item => item.issue || item.planId || '异常待复核').join('、') });
+  }
+  if (inventory.lowStockCount) {
+    risks.push({ label: `低库存备件 ${inventory.lowStockCount} 项`, detail: inventory.lowStock.slice(0, 8).map(item => `${item.name}（${item.quantity ?? 0}/${item.safeStock ?? 0}）`).join('、') });
+  }
+  if (!risks.length) risks.push({ label: '本周期无高风险待办', detail: '工单、故障、巡检与备件库存均在受控范围内。' });
+  return { insights, risks };
+}
+
 function buildOperationalReportData(db, scope, targetId, period, viewer) {
   const currentPeriod = getPeriodKey(formatDateKey(new Date()), period);
   const periodLabel = ({ week: '每周', month: '每月', year: '每年' }[period] || period);
@@ -9652,6 +9836,11 @@ function buildOperationalReportData(db, scope, targetId, period, viewer) {
       .filter(item => item.projectId === project.id)
       .filter(item => inPeriod(item.occurredAt || item.createdAt))
       .sort((a, b) => String(b.occurredAt || b.createdAt || '').localeCompare(String(a.occurredAt || a.createdAt || '')));
+    const tickets = (db.tickets || [])
+      .filter(item => item.projectId === project.id)
+      .filter(item => !isUserReport || item.assigneeId === targetId || item.createdBy === targetId)
+      .filter(item => inPeriod(item.createdAt))
+      .sort((a, b) => String(b.createdAt || '').localeCompare(String(a.createdAt || '')));
     const documents = (db.documents || []).filter(item => item.projectId === project.id);
     const spareParts = (db.spareParts || []).filter(item => item.projectId === project.id);
     const totalHours = Number(logs.reduce((sum, item) => sum + Number(item.durationHours || 0), 0).toFixed(2));
@@ -9666,6 +9855,7 @@ function buildOperationalReportData(db, scope, targetId, period, viewer) {
       executions,
       changes,
       incidents,
+      tickets,
       documents,
       spareParts,
       totalHours,
@@ -9684,6 +9874,7 @@ function buildOperationalReportData(db, scope, targetId, period, viewer) {
   const allExecutions = projectGroups.flatMap(group => group.executions);
   const allChanges = projectGroups.flatMap(group => group.changes);
   const allIncidents = projectGroups.flatMap(group => group.incidents);
+  const allTickets = projectGroups.flatMap(group => group.tickets);
   const allDocuments = projectGroups.flatMap(group => group.documents);
   const allSpareParts = projectGroups.flatMap(group => group.spareParts);
   const totalHours = Number(allLogs.reduce((sum, item) => sum + Number(item.durationHours || 0), 0).toFixed(2));
@@ -9709,6 +9900,7 @@ function buildOperationalReportData(db, scope, targetId, period, viewer) {
     executions: allExecutions,
     changes: allChanges,
     incidents: allIncidents,
+    tickets: allTickets,
     documents: allDocuments,
     spareParts: allSpareParts,
     totalHours,
@@ -9744,6 +9936,7 @@ function buildOperationalReportData(db, scope, targetId, period, viewer) {
   report.executions = report.projectGroups.flatMap(group => group.executions);
   report.changes = report.projectGroups.flatMap(group => group.changes);
   report.incidents = report.projectGroups.flatMap(group => group.incidents);
+  report.tickets = report.projectGroups.flatMap(group => group.tickets || []);
   report.documents = report.projectGroups.flatMap(group => group.documents);
   report.spareParts = report.projectGroups.flatMap(group => group.spareParts);
   const output = summarizeOutput(report);
@@ -9752,8 +9945,17 @@ function buildOperationalReportData(db, scope, targetId, period, viewer) {
   report.abnormalInspectionCount = report.executions.filter(item => item.result === '异常').length;
   report.normalInspectionCount = report.executions.filter(item => item.result === '正常').length;
   report.openIncidentCount = report.incidents.filter(item => item.status !== '已关闭' && item.status !== '已解决').length;
+  report.ticketMetrics = summarizeReportTickets(report.tickets);
+  report.incidentMetrics = summarizeReportIncidents(report.incidents);
+  report.inspectionMetrics = summarizeReportInspections(report.executions);
+  report.inventoryMetrics = summarizeReportSpareParts(report.spareParts);
+  report.trend = buildReportTrend(period, getDateRangeFromPeriod(period), report.logs, report.tickets, report.incidents);
+  const insights = buildReportInsights(report);
+  report.insights = insights.insights;
+  report.risks = insights.risks;
   report.projectStateSummary = summarizeState(report);
-  report.periodOutputSummary = output.text;
+  const ticketSummary = report.ticketMetrics;
+  report.periodOutputSummary = `${output.text}工单 ${ticketSummary.total} 单（闭环 ${ticketSummary.closed} 单），SLA 达标率 ${ticketSummary.slaComplianceRate === null ? '-' : `${ticketSummary.slaComplianceRate}%`}，巡检异常 ${report.inspectionMetrics.abnormal} 次，低库存备件 ${report.inventoryMetrics.lowStockCount} 项。`;
   return report;
 }
 
@@ -9846,6 +10048,94 @@ function createReportProjectGroupSlide(report) {
   ]);
 }
 
+function createReportInsightSlide(report) {
+  const shapes = createReportHeaderShapes('关键结论与风险提示', `${report.ownerName} · ${report.periodLabel} · ${report.currentPeriod}`);
+  shapes.push(createShape({ id: 10, x: emu(0.7), y: emu(1.15), cx: emu(5.7), cy: emu(0.28), textLines: ['本周期关键结论'], textOptions: { size: 1500, color: '0F172A', bold: true } }));
+  shapes.push(createShape({ id: 11, x: emu(6.75), y: emu(1.15), cx: emu(5.7), cy: emu(0.28), textLines: ['风险与待办'], textOptions: { size: 1500, color: '991B1B', bold: true } }));
+  (report.insights || []).slice(0, 4).forEach((text, index) => {
+    const top = 1.55 + index * 1.28;
+    const baseId = 20 + index * 5;
+    shapes.push(createShape({ id: baseId, x: emu(0.7), y: emu(top), cx: emu(5.7), cy: emu(1.12), fill: 'FFFFFF', line: 'DBEAFE', preset: 'roundRect' }));
+    shapes.push(createShape({ id: baseId + 1, x: emu(0.7), y: emu(top), cx: emu(0.08), cy: emu(1.12), fill: '2563EB', preset: 'roundRect' }));
+    shapes.push(createShape({ id: baseId + 2, x: emu(0.98), y: emu(top + 0.14), cx: emu(5.15), cy: emu(0.84), textLines: [truncateText(text, 82)], textOptions: { size: 1150, color: '0F172A' } }));
+  });
+  (report.risks || []).slice(0, 4).forEach((risk, index) => {
+    const top = 1.55 + index * 1.28;
+    const baseId = 50 + index * 5;
+    shapes.push(createShape({ id: baseId, x: emu(6.75), y: emu(top), cx: emu(5.85), cy: emu(1.12), fill: 'FEF2F2', line: 'FECACA', preset: 'roundRect' }));
+    shapes.push(createShape({ id: baseId + 1, x: emu(7.03), y: emu(top + 0.1), cx: emu(5.25), cy: emu(0.2), textLines: [risk.label], textOptions: { size: 1250, color: '991B1B', bold: true } }));
+    shapes.push(createShape({ id: baseId + 2, x: emu(7.03), y: emu(top + 0.4), cx: emu(5.25), cy: emu(0.58), textLines: [truncateText(risk.detail, 56)], textOptions: { size: 1000, color: '7F1D1D' } }));
+  });
+  return createBaseSlide(shapes);
+}
+
+function createReportTrendSlide(report) {
+  const trend = report.trend || [];
+  const shapes = createReportHeaderShapes('周期趋势对比', `${report.periodLabel}分桶：运维日志、工时、工单与故障变化`);
+  if (!trend.length) {
+    shapes.push(createShape({ id: 10, x: emu(0.7), y: emu(2.2), cx: emu(11.9), cy: emu(2.2), fill: 'FFFFFF', line: 'E2E8F0', preset: 'roundRect' }));
+    shapes.push(createShape({ id: 11, x: emu(3.4), y: emu(3.1), cx: emu(6.4), cy: emu(0.35), textLines: ['当前周期暂无趋势数据'], textOptions: { size: 1800, color: '64748B', bold: true, align: 'ctr' } }));
+    return createBaseSlide(shapes);
+  }
+  const buckets = trend.slice(0, 12);
+  const maxLogs = Math.max(1, ...buckets.map(item => Number(item.logCount || 0)));
+  const chartLeft = 0.95;
+  const chartTop = 1.55;
+  const chartWidth = 11.4;
+  const chartHeight = 3.55;
+  const slot = chartWidth / buckets.length;
+  const barWidth = Math.min(0.62, slot * 0.56);
+  shapes.push(createShape({ id: 10, x: emu(chartLeft), y: emu(chartTop + chartHeight), cx: emu(chartWidth), cy: emu(0.015), fill: 'CBD5E1' }));
+  buckets.forEach((item, index) => {
+    const ratio = Number(item.logCount || 0) / maxLogs;
+    const barHeight = Math.max(0.04, ratio * chartHeight);
+    const left = chartLeft + index * slot + (slot - barWidth) / 2;
+    const top = chartTop + chartHeight - barHeight;
+    const baseId = 20 + index * 6;
+    shapes.push(createShape({ id: baseId, x: emu(left), y: emu(top), cx: emu(barWidth), cy: emu(barHeight), fill: '2563EB', preset: 'roundRect', textLines: [String(item.logCount || 0)], textOptions: { size: 850, color: 'FFFFFF', bold: true, align: 'ctr' } }));
+    shapes.push(createShape({ id: baseId + 1, x: emu(chartLeft + index * slot - 0.05), y: emu(chartTop + chartHeight + 0.08), cx: emu(slot), cy: emu(0.18), textLines: [item.label], textOptions: { size: 750, color: '64748B', align: 'ctr' } }));
+    shapes.push(createShape({ id: baseId + 2, x: emu(chartLeft + index * slot - 0.05), y: emu(chartTop + chartHeight + 0.3), cx: emu(slot), cy: emu(0.18), textLines: [`${item.totalHours}h`], textOptions: { size: 750, color: '16A34A', align: 'ctr' } }));
+  });
+  const totalLogs = buckets.reduce((sum, item) => sum + Number(item.logCount || 0), 0);
+  const totalTickets = buckets.reduce((sum, item) => sum + Number(item.ticketCount || 0), 0);
+  const totalIncidents = buckets.reduce((sum, item) => sum + Number(item.incidentCount || 0), 0);
+  const peak = buckets.reduce((best, item) => (Number(item.logCount || 0) > Number(best.logCount || 0) ? item : best), buckets[0]);
+  shapes.push(createShape({ id: 120, x: emu(0.7), y: emu(5.95), cx: emu(11.9), cy: emu(0.72), fill: 'FFFFFF', line: 'E2E8F0', preset: 'roundRect' }));
+  shapes.push(createShape({
+    id: 121,
+    x: emu(0.95),
+    y: emu(6.12),
+    cx: emu(11.4),
+    cy: emu(0.34),
+    textLines: [`日志峰值：${peak.label}（${peak.logCount} 条 / ${peak.totalHours} 小时）　合计：日志 ${totalLogs} 条，工单 ${totalTickets} 单，故障 ${totalIncidents} 起`],
+    textOptions: { size: 1150, color: '334155' }
+  }));
+  return createBaseSlide(shapes);
+}
+
+function createReportTicketSlide(report) {
+  const metrics = report.ticketMetrics || summarizeReportTickets(report.tickets || []);
+  const tickets = (report.tickets || []).slice(0, 6);
+  const rows = tickets.map(item => [
+    item.ticketNo || '-',
+    item.title || '-',
+    item.priority || '-',
+    item.category || '-',
+    item.status || '-',
+    item.slaStatus || resolveTicketSlaStatus(item),
+    item.closedAt || item.updatedAt || item.createdAt || '-'
+  ]);
+  return createReportListSlide('周期产出 / 工单与 SLA', `工单 ${metrics.total} 单，闭环 ${metrics.closed} 单，SLA 达标率 ${metrics.slaComplianceRate === null ? '-' : `${metrics.slaComplianceRate}%`}`, rows, [
+    { label: '工单号', width: 2.0, max: 20 },
+    { label: '标题', width: 2.7, max: 26 },
+    { label: '优先级', width: 0.85, max: 6 },
+    { label: '分类', width: 1.05, max: 8 },
+    { label: '状态', width: 1.15, max: 8 },
+    { label: 'SLA', width: 0.85, max: 6 },
+    { label: '更新时间', width: 2.3, max: 20 }
+  ]);
+}
+
 function createReportListSlide(title, subtitle, rows, columns) {
   const shapes = createReportHeaderShapes(title, subtitle);
   shapes.push(createShape({ id: 10, x: emu(0.7), y: emu(1.25), cx: emu(11.9), cy: emu(0.38), fill: 'DBEAFE', line: 'BFDBFE', preset: 'roundRect' }));
@@ -9892,6 +10182,9 @@ function buildDetailedPptxBufferFromReport(report) {
   const slides = [
     createReportCoverSlide(report),
     createReportOverviewSlide(report),
+    createReportInsightSlide(report),
+    createReportTrendSlide(report),
+    createReportTicketSlide(report),
     ...((report.projectGroups || []).length > 1 ? [createReportProjectGroupSlide(report)] : []),
     (() => {
       const table = withProject(
@@ -10044,8 +10337,22 @@ function buildServiceReportSnapshot(db, projectId, filters = {}) {
   const tickets = (db.tickets || [])
     .filter(item => item.projectId === projectId && inRange(item.createdAt))
     .sort((a, b) => String(b.createdAt || '').localeCompare(String(a.createdAt || '')));
+  const incidents = (db.incidentRecords || [])
+    .filter(item => item.projectId === projectId && inRange(item.occurredAt || item.createdAt))
+    .sort((a, b) => String(b.occurredAt || b.createdAt || '').localeCompare(String(a.occurredAt || a.createdAt || '')));
+  const spareParts = (db.spareParts || []).filter(item => item.projectId === projectId);
   const totalHours = Number(logs.reduce((sum, item) => sum + Number(item.durationHours || 0), 0).toFixed(2));
   const planTitle = planId => (db.inspectionPlans || []).find(item => item.id === planId)?.title || '-';
+  const ticketMetrics = summarizeReportTickets(tickets);
+  const incidentMetrics = summarizeReportIncidents(incidents);
+  const inspectionMetrics = summarizeReportInspections(executions);
+  const inventoryMetrics = summarizeReportSpareParts(spareParts);
+  const serviceInsights = [
+    `本周期完成服务记录 ${logs.length} 条、投入 ${totalHours} 小时，巡检执行 ${inspectionMetrics.total} 次（异常 ${inspectionMetrics.abnormal} 次，整改建议 ${inspectionMetrics.rectification} 项）。`,
+    `工单 ${ticketMetrics.total} 单，闭环 ${ticketMetrics.closed} 单，SLA 达标率 ${ticketMetrics.slaComplianceRate === null ? '-' : `${ticketMetrics.slaComplianceRate}%`}${ticketMetrics.overdue ? `，超时 ${ticketMetrics.overdue} 单` : ''}。`,
+    `故障 ${incidentMetrics.total} 起，已恢复/关闭 ${incidentMetrics.closed} 起，未闭环 ${incidentMetrics.open} 起${incidentMetrics.overdue ? `，SLA 超时 ${incidentMetrics.overdue} 起` : ''}。`,
+    `备件保障 ${inventoryMetrics.total} 类，低库存 ${inventoryMetrics.lowStockCount} 项，服务连续性风险已纳入跟踪。`
+  ];
   return {
     project: {
       id: project.id,
@@ -10065,7 +10372,16 @@ function buildServiceReportSnapshot(db, projectId, filters = {}) {
       logCount: logs.length,
       totalHours,
       inspectionCount: executions.length,
-      ticketCount: tickets.length
+      ticketCount: tickets.length,
+      ticketClosedCount: ticketMetrics.closed,
+      ticketOverdueCount: ticketMetrics.overdue,
+      ticketSlaComplianceRate: ticketMetrics.slaComplianceRate,
+      incidentCount: incidents.length,
+      incidentOpenCount: incidentMetrics.open,
+      incidentOverdueCount: incidentMetrics.overdue,
+      inspectionAbnormalCount: inspectionMetrics.abnormal,
+      inspectionRectificationCount: inspectionMetrics.rectification,
+      lowStockCount: inventoryMetrics.lowStockCount
     },
     logs: logs.map(item => ({
       date: item.date || '',
@@ -10087,9 +10403,33 @@ function buildServiceReportSnapshot(db, projectId, filters = {}) {
       ticketNo: item.ticketNo || '',
       title: item.title || '',
       priority: item.priority || '',
+      category: item.category || '',
       status: item.status || '',
+      slaStatus: resolveTicketSlaStatus(item),
+      slaDeadline: item.slaDeadline || '',
       updatedAt: item.closedAt || item.updatedAt || item.createdAt || ''
     })),
+    ticketBreakdown: {
+      statusCounts: ticketMetrics.statusCounts,
+      priorityCounts: ticketMetrics.priorityCounts,
+      categoryCounts: ticketMetrics.categoryCounts
+    },
+    incidents: incidents.map(item => ({
+      title: item.title || '',
+      faultType: item.faultType || '',
+      severity: item.severity || '',
+      status: item.status || '',
+      slaStatus: item.slaStatus || '正常',
+      occurredAt: item.occurredAt || item.createdAt || ''
+    })),
+    incidentMetrics,
+    inspectionMetrics,
+    inventoryMetrics: {
+      total: inventoryMetrics.total,
+      stock: inventoryMetrics.stock,
+      lowStockCount: inventoryMetrics.lowStockCount
+    },
+    insights: serviceInsights,
     generatedAt: now()
   };
 }
@@ -10113,7 +10453,12 @@ function presentReportSignoff(item, includeSnapshot = false) {
       logCount: Number(metrics.logCount || 0),
       totalHours: Number(metrics.totalHours || 0),
       inspectionCount: Number(metrics.inspectionCount || 0),
-      ticketCount: Number(metrics.ticketCount || 0)
+      ticketCount: Number(metrics.ticketCount || 0),
+      ticketSlaComplianceRate: metrics.ticketSlaComplianceRate ?? null,
+      incidentCount: Number(metrics.incidentCount || 0),
+      incidentOpenCount: Number(metrics.incidentOpenCount || 0),
+      inspectionAbnormalCount: Number(metrics.inspectionAbnormalCount || 0),
+      lowStockCount: Number(metrics.lowStockCount || 0)
     },
     hasSnapshot: Boolean(snapshot),
     ...(includeSnapshot ? { snapshot } : {})
@@ -10131,6 +10476,12 @@ function buildServiceReportHtml(db, projectId, filters, viewer, signoff = null) 
   const tickets = Array.isArray(snapshot.tickets) ? snapshot.tickets : [];
   const metrics = snapshot.metrics || {};
   const totalHours = Number(metrics.totalHours || 0);
+  const ticketMetrics = snapshot.ticketBreakdown || {};
+  const incidentMetrics = snapshot.incidentMetrics || summarizeReportIncidents(snapshot.incidents || []);
+  const inspectionMetrics = snapshot.inspectionMetrics || summarizeReportInspections(executions);
+  const lowStockCount = Number(metrics.lowStockCount || snapshot.inventoryMetrics?.lowStockCount || 0);
+  const insights = Array.isArray(snapshot.insights) ? snapshot.insights : [];
+  const distributionText = counts => Object.entries(counts || {}).map(([key, value]) => `${key} ${value}`).join(' / ') || '-';
   const rows = (items, colspan, mapper) => items.map(mapper).join('') || `<tr><td colspan="${colspan}">本周期无记录</td></tr>`;
   const logRows = rows(logs, 6, item => `<tr>
     <td>${escapeHtml(item.date || '-')}</td>
@@ -10148,11 +10499,13 @@ function buildServiceReportHtml(db, projectId, filters, viewer, signoff = null) 
     <td>${escapeHtml(item.suggestion || '-')}</td>
     ${isCustomer ? '' : `<td>${escapeHtml(item.executor || '-')}</td>`}
   </tr>`);
-  const ticketRows = rows(tickets, 5, item => `<tr>
+  const ticketRows = rows(tickets, 7, item => `<tr>
     <td>${escapeHtml(item.ticketNo || '-')}</td>
     <td>${escapeHtml(item.title || '-')}</td>
     <td>${escapeHtml(item.priority || '-')}</td>
+    <td>${escapeHtml(item.category || '-')}</td>
     <td>${escapeHtml(item.status || '-')}</td>
+    <td>${escapeHtml(item.slaStatus || '-')}</td>
     <td>${escapeHtml(item.updatedAt || '-')}</td>
   </tr>`);
   const signoffStatus = signoff ? reportSignoffStatusLabel(signoff.status) : '未发起签收';
@@ -10182,6 +10535,10 @@ function buildServiceReportHtml(db, projectId, filters, viewer, signoff = null) 
     .stat { border: 1px solid #e2e8f0; border-radius: 12px; padding: 14px 16px; background: #f8fafc; }
     .stat span { font-size: 12px; color: #64748b; }
     .stat strong { display: block; margin-top: 6px; font-size: 22px; }
+    .insight-grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 10px; }
+    .insight { display: flex; gap: 10px; align-items: flex-start; border: 1px solid #dbeafe; background: #f8fbff; border-radius: 10px; padding: 10px 12px; font-size: 12.5px; line-height: 1.6; }
+    .insight-no { flex: none; width: 20px; height: 20px; border-radius: 999px; background: #2563eb; color: #fff; font-size: 12px; display: inline-flex; align-items: center; justify-content: center; }
+    .distribution { margin: 0 0 8px; font-size: 12px; color: #475569; }
     h2 { font-size: 17px; margin: 26px 0 10px; padding-left: 10px; border-left: 4px solid #2563eb; }
     table { width: 100%; border-collapse: collapse; font-size: 12.5px; }
     th, td { border: 1px solid #e2e8f0; padding: 8px 10px; text-align: left; vertical-align: top; }
@@ -10202,6 +10559,7 @@ function buildServiceReportHtml(db, projectId, filters, viewer, signoff = null) 
       .sheet { box-shadow: none; border-radius: 0; padding: 0; max-width: none; }
       .toolbar { display: none; }
       table { font-size: 10.5px; }
+      .insight-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); }
       tr, td, th { break-inside: avoid; page-break-inside: avoid; }
     }
   </style>
@@ -10231,7 +10589,12 @@ function buildServiceReportHtml(db, projectId, filters, viewer, signoff = null) 
       <div class="stat"><span>累计工时</span><strong>${totalHours}</strong></div>
       <div class="stat"><span>巡检执行</span><strong>${Number(metrics.inspectionCount || 0)}</strong></div>
       <div class="stat"><span>工单数量</span><strong>${Number(metrics.ticketCount || 0)}</strong></div>
+      <div class="stat"><span>工单 SLA 达标率</span><strong>${metrics.ticketSlaComplianceRate === null || metrics.ticketSlaComplianceRate === undefined ? '-' : `${Number(metrics.ticketSlaComplianceRate)}%`}</strong></div>
+      <div class="stat"><span>未闭环故障</span><strong>${Number(metrics.incidentOpenCount || 0)} / ${Number(metrics.incidentCount || 0)}</strong></div>
+      <div class="stat"><span>巡检异常</span><strong>${Number(metrics.inspectionAbnormalCount || inspectionMetrics.abnormal || 0)}</strong></div>
+      <div class="stat"><span>低库存备件</span><strong>${lowStockCount}</strong></div>
     </div>
+    ${insights.length ? `<h2>服务结论摘要</h2><div class="insight-grid">${insights.map((text, index) => `<div class="insight"><span class="insight-no">${index + 1}</span><div>${escapeHtml(text)}</div></div>`).join('')}</div>` : ''}
     <h2>服务过程记录</h2>
     <table>
       <thead><tr><th style="width:96px;">日期</th><th style="width:140px;">事件</th><th>对象/位置</th><th>处理过程</th><th style="width:88px;">结果</th><th style="width:64px;">工时</th></tr></thead>
@@ -10243,9 +10606,16 @@ function buildServiceReportHtml(db, projectId, filters, viewer, signoff = null) 
       <tbody>${inspectionRows}</tbody>
     </table>
     <h2>工单处理情况</h2>
+    <div class="distribution">工单状态：${escapeHtml(distributionText(ticketMetrics.statusCounts))}　优先级：${escapeHtml(distributionText(ticketMetrics.priorityCounts))}　分类：${escapeHtml(distributionText(ticketMetrics.categoryCounts))}</div>
     <table>
-      <thead><tr><th style="width:150px;">工单号</th><th>标题</th><th style="width:70px;">优先级</th><th style="width:90px;">状态</th><th style="width:160px;">更新时间</th></tr></thead>
+      <thead><tr><th style="width:140px;">工单号</th><th>标题</th><th style="width:64px;">优先级</th><th style="width:80px;">分类</th><th style="width:86px;">状态</th><th style="width:64px;">SLA</th><th style="width:150px;">更新时间</th></tr></thead>
       <tbody>${ticketRows}</tbody>
+    </table>
+    <h2>故障与闭环情况</h2>
+    <div class="distribution">故障状态：${escapeHtml(distributionText(incidentMetrics.statusCounts))}　严重级别：${escapeHtml(distributionText(incidentMetrics.severityCounts))}　SLA：${escapeHtml(distributionText(incidentMetrics.slaCounts))}</div>
+    <table>
+      <thead><tr><th style="width:180px;">故障标题</th><th style="width:110px;">故障类型</th><th style="width:70px;">级别</th><th style="width:86px;">状态</th><th style="width:64px;">SLA</th><th>发生时间</th></tr></thead>
+      <tbody>${rows(Array.isArray(snapshot.incidents) ? snapshot.incidents : [], 6, item => `<tr><td>${escapeHtml(item.title || '-')}</td><td>${escapeHtml(item.faultType || '-')}</td><td>${escapeHtml(item.severity || '-')}</td><td>${escapeHtml(item.status || '-')}</td><td>${escapeHtml(item.slaStatus || '-')}</td><td>${escapeHtml(item.occurredAt || '-')}</td></tr>`)}</tbody>
     </table>
     <div class="signoff">
       <h2>客户签收</h2>
@@ -10285,6 +10655,12 @@ function buildOperationalReportHtml(db, scope, targetId, period, viewer) {
     <td>${Number(group.totalHours || 0)}</td>
   </tr>`).join('');
   const renderSectionTitle = (group, title, tone) => `<div class="section-title ${tone}"><span class="section-group">${escapeHtml(group)}</span><span class="section-name">${escapeHtml(title)}</span></div>`;
+  const distributionText = counts => Object.entries(counts || {}).map(([key, value]) => `${key} ${value}`).join(' / ') || '暂无数据';
+  const ticketMetrics = report.ticketMetrics || summarizeReportTickets(report.tickets || []);
+  const incidentMetrics = report.incidentMetrics || summarizeReportIncidents(report.incidents || []);
+  const inspectionMetrics = report.inspectionMetrics || summarizeReportInspections(report.executions || []);
+  const inventoryMetrics = report.inventoryMetrics || summarizeReportSpareParts(report.spareParts || []);
+  const trendRows = (report.trend || []).map(item => `<tr><td>${escapeHtml(item.label)}</td><td>${Number(item.logCount || 0)}</td><td>${Number(item.totalHours || 0)}</td><td>${Number(item.ticketCount || 0)}</td><td>${Number(item.incidentCount || 0)}</td></tr>`).join('') || '<tr><td colspan="5">当前周期暂无趋势数据</td></tr>';
   return `<!DOCTYPE html>
 <html lang="zh-CN">
 <head>
@@ -10315,12 +10691,22 @@ function buildOperationalReportHtml(db, scope, targetId, period, viewer) {
     .section-name { font-size:20px; font-weight:700; color:#0f172a; }
     .tone-state .section-group { background:#ffedd5; color:#9a3412; }
     .tone-output .section-group { background:#dbeafe; color:#1d4ed8; }
+    .insight-grid { display:grid; grid-template-columns:repeat(2,minmax(0,1fr)); gap:12px; }
+    .insight { display:flex; gap:10px; align-items:flex-start; border:1px solid #dbeafe; background:#f8fbff; border-radius:12px; padding:12px 14px; font-size:13px; line-height:1.65; }
+    .insight-no { flex:none; width:22px; height:22px; border-radius:999px; background:#2563eb; color:#fff; font-size:12px; display:inline-flex; align-items:center; justify-content:center; }
+    .risk-list { display:grid; gap:10px; }
+    .risk-item { border:1px solid #fecaca; background:#fef2f2; border-radius:12px; padding:12px 14px; }
+    .risk-item strong { display:block; color:#991b1b; margin-bottom:4px; font-size:13px; }
+    .risk-item span { color:#7f1d1d; font-size:12.5px; }
+    .distribution { margin:0 0 10px; font-size:12.5px; color:#475569; }
+    .metric-table td strong { font-size:16px; }
     /* 打印与另存 PDF：去掉背景色与阴影，避免分页时出现大面积色块并保证表格不被截断。 */
     @media print {
       @page { size: A4 landscape; margin: 12mm; }
       body { margin: 0; background: #fff; }
       .card { box-shadow: none; break-inside: avoid; page-break-inside: avoid; }
       .summary-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+      .insight-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); }
       table { font-size: 11px; }
       tr, td, th { break-inside: avoid; page-break-inside: avoid; }
     }
@@ -10341,6 +10727,10 @@ function buildOperationalReportHtml(db, scope, targetId, period, viewer) {
       <div class="stat output"><span class="muted">累计工时</span><strong>${report.totalHours}</strong></div>
       <div class="stat output"><span class="muted">巡检执行</span><strong>${report.executions.length}</strong></div>
       <div class="stat output"><span class="muted">未关闭故障</span><strong>${report.openIncidentCount}</strong></div>
+      <div class="stat output"><span class="muted">工单总数</span><strong>${ticketMetrics.total}</strong></div>
+      <div class="stat output"><span class="muted">工单 SLA 达标率</span><strong>${ticketMetrics.slaComplianceRate === null ? '-' : `${ticketMetrics.slaComplianceRate}%`}</strong></div>
+      <div class="stat state"><span class="muted">巡检异常</span><strong>${inspectionMetrics.abnormal}</strong></div>
+      <div class="stat state"><span class="muted">低库存备件</span><strong>${inventoryMetrics.lowStockCount}</strong></div>
     </div>
   </div>
   <div class="card"><h2>项目基本信息</h2><table><tbody>
@@ -10352,6 +10742,18 @@ function buildOperationalReportHtml(db, scope, targetId, period, viewer) {
     <div class="summary-panel state"><h2>项目现状摘要</h2><div class="muted">${escapeHtml(report.projectStateSummary)}</div></div>
     <div class="summary-panel output"><h2>周期产出摘要</h2><div class="muted">${escapeHtml(report.periodOutputSummary)}</div></div>
   </div>
+  <div class="card"><h2>关键结论</h2><div class="insight-grid">${(report.insights || []).map((text, index) => `<div class="insight"><span class="insight-no">${index + 1}</span><div>${escapeHtml(text)}</div></div>`).join('')}</div></div>
+  <div class="card"><h2>风险与待办</h2><div class="risk-list">${(report.risks || []).map(risk => `<div class="risk-item"><strong>${escapeHtml(risk.label)}</strong><span>${escapeHtml(risk.detail)}</span></div>`).join('')}</div></div>
+  <div class="card"><h2>周期趋势</h2><table><thead><tr><th>时间分桶</th><th>日志数</th><th>工时</th><th>新增工单</th><th>新增故障</th></tr></thead><tbody>${trendRows}</tbody></table></div>
+  <div class="card"><h2>工单与 SLA</h2>
+    <div class="distribution">状态分布：${escapeHtml(distributionText(ticketMetrics.statusCounts))}　优先级分布：${escapeHtml(distributionText(ticketMetrics.priorityCounts))}　分类分布：${escapeHtml(distributionText(ticketMetrics.categoryCounts))}</div>
+    <table class="metric-table"><thead><tr>${projectHeader}<th>工单号</th><th>标题</th><th>优先级</th><th>分类</th><th>状态</th><th>SLA</th><th>截止时间</th><th>更新时间</th></tr></thead><tbody>${tableRows(report.tickets || [], 9 + projectColumnSpan, item => `<tr>${projectCell(item.projectId)}<td>${escapeHtml(item.ticketNo || '-')}</td><td>${escapeHtml(item.title || '-')}</td><td>${escapeHtml(item.priority || '-')}</td><td>${escapeHtml(item.category || '-')}</td><td>${escapeHtml(item.status || '-')}</td><td>${escapeHtml(item.slaStatus || resolveTicketSlaStatus(item))}</td><td>${escapeHtml(item.slaDeadline || '-')}</td><td>${escapeHtml(item.closedAt || item.updatedAt || item.createdAt || '-')}</td></tr>`)}</tbody></table>
+  </div>
+  <div class="card"><h2>故障闭环与 SLA</h2>
+    <div class="distribution">状态分布：${escapeHtml(distributionText(incidentMetrics.statusCounts))}　严重级别：${escapeHtml(distributionText(incidentMetrics.severityCounts))}　SLA：${escapeHtml(distributionText(incidentMetrics.slaCounts))}</div>
+    <table><thead><tr>${projectHeader}<th>故障标题</th><th>类型</th><th>级别</th><th>状态</th><th>SLA</th><th>发生时间</th><th>处理说明</th></tr></thead><tbody>${tableRows(report.incidents || [], 8 + projectColumnSpan, item => `<tr>${projectCell(item.projectId)}<td>${escapeHtml(item.title || '-')}</td><td>${escapeHtml(item.faultType || '-')}</td><td>${escapeHtml(item.severity || '-')}</td><td>${escapeHtml(item.status || '-')}</td><td>${escapeHtml(item.slaStatus || '-')}</td><td>${escapeHtml(item.occurredAt || item.createdAt || '-')}</td><td>${escapeHtml(item.resolution || '-')}</td></tr>`)}</tbody></table>
+  </div>
+  <div class="card"><h2>低库存备件</h2><table><thead><tr>${projectHeader}<th>备件名称</th><th>型号</th><th>当前库存</th><th>安全库存</th><th>单位</th><th>存放位置</th></tr></thead><tbody>${tableRows(inventoryMetrics.lowStock, 7 + projectColumnSpan, item => `<tr>${projectCell(item.projectId)}<td>${escapeHtml(item.name || '-')}</td><td>${escapeHtml(item.model || '-')}</td><td>${escapeHtml(String(item.quantity ?? 0))}</td><td>${escapeHtml(String(item.safeStock ?? 0))}</td><td>${escapeHtml(item.unit || '-')}</td><td>${escapeHtml(item.location || '-')}</td></tr>`)}</tbody></table></div>
   ${reportProjects.length > 1 ? `<div class="card tone-state">${renderSectionTitle('项目现状', '按项目分组概览', 'tone-state')}<table><thead><tr><th>项目</th><th>资产</th><th>巡检计划</th><th>资料</th><th>备件</th><th>日志</th><th>工时</th></tr></thead><tbody>${projectGroupRows || '<tr><td colspan="7">暂无数据</td></tr>'}</tbody></table></div>` : ''}
   <div class="card tone-state">${renderSectionTitle('项目现状', '资产台账', 'tone-state')}<table><thead><tr>${projectHeader}<th>名称</th><th>类型</th><th>品牌型号</th><th>位置</th><th>维保到期</th><th>状态</th></tr></thead><tbody>${tableRows(report.assets, 6 + projectColumnSpan, item => `<tr>${projectCell(item.projectId)}<td>${escapeHtml(item.name || '-')}</td><td>${escapeHtml(item.type || '-')}</td><td>${escapeHtml([item.brand, item.model].filter(Boolean).join(' / ') || '-')}</td><td>${escapeHtml(item.installationLocation || item.location || '-')}</td><td>${escapeHtml(item.maintainExpiryDate || '-')}</td><td>${escapeHtml(item.status || '-')}</td></tr>`)}</tbody></table></div>
   <div class="card tone-state">${renderSectionTitle('项目现状', '巡检计划', 'tone-state')}<table><thead><tr>${projectHeader}<th>计划名称</th><th>周期</th><th>下次巡检</th><th>计划状态</th><th>本周期执行时间</th><th>执行结果</th><th>异常说明</th><th>整改建议</th></tr></thead><tbody>${tableRows(report.plans, 8 + projectColumnSpan, plan => { const exec = report.executions.find(item => item.planId === plan.id); return `<tr>${projectCell(plan.projectId)}<td>${escapeHtml(plan.title || '-')}</td><td>${escapeHtml(plan.cycle || '-')}</td><td>${escapeHtml(plan.nextDate || '-')}</td><td>${escapeHtml(plan.status || '-')}</td><td>${escapeHtml(exec?.executedAt || '-')}</td><td>${escapeHtml(exec?.result || '-')}</td><td>${escapeHtml(exec?.issue || '-')}</td><td>${escapeHtml(exec?.suggestion || '-')}</td></tr>`; })}</tbody></table></div>

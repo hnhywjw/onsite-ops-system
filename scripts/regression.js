@@ -2302,6 +2302,9 @@ async function main() {
     body: '{}'
   });
   assert(projectPptx.status === 200, '项目报表下载失败');
+  assert(String(projectPptx.data || '').includes('关键结论与风险提示'), '项目 PPT 缺少关键结论页');
+  assert(String(projectPptx.data || '').includes('周期趋势对比'), '项目 PPT 缺少趋势页');
+  assert(String(projectPptx.data || '').includes('周期产出 / 工单与 SLA'), '项目 PPT 缺少工单 SLA 页');
   const projectHtml = await request(`/api/reports/project/${encodeURIComponent(projectId)}/html?period=month`, {
     method: 'POST',
     headers: { cookie, 'Content-Type': 'application/json' },
@@ -2312,6 +2315,10 @@ async function main() {
   assert(String(projectHtml.data || '').includes('周期产出摘要'), '项目 HTML 报表缺少周期产出分区');
   assert(String(projectHtml.data || '').includes('section-group') && String(projectHtml.data || '').includes('项目现状') && String(projectHtml.data || '').includes('资产台账'), '项目 HTML 报表缺少项目现状样式标题');
   assert(String(projectHtml.data || '').includes('section-name') && String(projectHtml.data || '').includes('周期产出') && String(projectHtml.data || '').includes('运维日志'), '项目 HTML 报表缺少周期产出样式标题');
+  assert(String(projectHtml.data || '').includes('关键结论') && String(projectHtml.data || '').includes('风险与待办'), '项目 HTML 报表缺少结论与风险分区');
+  assert(String(projectHtml.data || '').includes('周期趋势') && String(projectHtml.data || '').includes('时间分桶'), '项目 HTML 报表缺少趋势分区');
+  assert(String(projectHtml.data || '').includes('工单与 SLA') && String(projectHtml.data || '').includes('SLA 达标率'), '项目 HTML 报表缺少工单 SLA 分区');
+  assert(String(projectHtml.data || '').includes('故障闭环与 SLA') && String(projectHtml.data || '').includes('低库存备件'), '项目 HTML 报表缺少故障闭环或低库存分区');
   const inspectionHtml = await request(`/api/reports/inspection/project/${encodeURIComponent(projectId)}/html?period=month`, {
     method: 'POST',
     headers: { cookie, 'Content-Type': 'application/json' },
@@ -2364,6 +2371,7 @@ async function main() {
     body: '{}'
   });
   assert(customerReportPptx.status === 200, '客户项目 PPTX 报表生成失败');
+  assert(String(customerReportHtml.data || '').includes('关键结论') && String(customerReportHtml.data || '').includes('工单与 SLA'), '客户报表应保留结论与 SLA 分析分区');
   await request(`/api/kb/${reportKb.data.id}`, { method: 'DELETE', headers: { cookie } });
   await request(`/api/users/${createReportCustomer.data.id}`, { method: 'DELETE', headers: { cookie } });
 
@@ -4019,6 +4027,8 @@ async function main() {
   const p2ServiceReport = await request(`/api/reports/service/${encodeURIComponent(p2ProjectId)}?period=month`, { headers: { cookie } });
   assert(p2ServiceReport.status === 200 && String(p2ServiceReport.headers['content-type'] || '').includes('text/html'), '服务报告生成失败');
   assert(typeof p2ServiceReport.data === 'string' && p2ServiceReport.data.includes('服务报告') && p2ServiceReport.data.includes('P2客户'), '服务报告内容不完整');
+  assert(p2ServiceReport.data.includes('服务结论摘要') && p2ServiceReport.data.includes('工单 SLA 达标率'), '服务报告缺少结论摘要或 SLA 指标');
+  assert(p2ServiceReport.data.includes('故障与闭环情况') && p2ServiceReport.data.includes('低库存备件'), '服务报告缺少故障闭环或低库存分区');
   const p2Signoff = await request(`/api/reports/service/${encodeURIComponent(p2ProjectId)}/signoff`, {
     method: 'POST', headers: { cookie: p2EngineerCookie, 'Content-Type': 'application/json' },
     body: JSON.stringify({ period: 'month' })
