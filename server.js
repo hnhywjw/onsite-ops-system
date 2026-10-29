@@ -7251,6 +7251,14 @@ function auditMeta(req) {
   };
 }
 
+// 登录失败按两个维度分别计数：
+// - IP+账号：限制单点爆破；
+// - 账号：限制攻击者轮换 IP 后继续爆破同一账号。
+// 账号键使用 @ 前缀，IP 与主机名字符集都不含 @，不会与 IP+账号键冲突。
+function getLoginRateLimitAccountKey(username) {
+  return `@account:${String(username || '').trim().toLowerCase()}`;
+}
+
 function getLoginRateLimitKey(req, username) {
   return `${getRequestClientIp(req)}:${String(username || '').trim().toLowerCase()}`;
 }
@@ -7266,52 +7274,68 @@ function getLoginRateLimitConfig(db) {
 
 function getLoginRateLimitState(db, req, username) {
   const store = getLoginRateLimitStateStore(db);
-  const key = getLoginRateLimitKey(req, username);
+  const keys = [getLoginRateLimitKey(req, username), getLoginRateLimitAccountKey(username)];
   const { windowMs } = getLoginRateLimitConfig(db);
-  const state = store.get(key) || { count: 0, firstAttemptAt: 0, lastAttemptAt: 0, lockedUntil: 0 };
-  if (state.lockedUntil > nowMs()) {
-    return { blocked: true, retryAfterMs: state.lockedUntil - nowMs(), key, state, store };
-  }
-  if (!state.firstAttemptAt || nowMs() - state.firstAttemptAt > windowMs) {
-    state.count = 0;
-    state.firstAttemptAt = 0;
-    state.lastAttemptAt = 0;
-    state.lockedUntil = 0;
-    store.set(key, state);
+  const states = keys.map(key => {
+    const state = store.get(key) || { count: 0, firstAttemptAt: 0, lastAttemptAt: 0, lockedUntil: 0 };
+    if (!state.firstAttemptAt || nowMs() - state.firstAttemptAt > windowMs) {
+      state.count = 0;
+      state.firstAttemptAt = 0;
+      state.lastAttemptAt = 0;
+      state.lockedUntil = 0;
+      store.set(key, state);
+    }
+    return { key, state };
+  });
+  const locked = states.filter(item => item.state.lockedUntil > nowMs());
+  if (locked.length) {
+    const retryAfterMs = Math.max(...locked.map(item => item.state.lockedUntil - nowMs()));
     setLoginRateLimitStateStore(db, store);
+    return { blocked: true, retryAfterMs, key: locked[0].key, state: locked[0].state, store };
   }
-  return { blocked: false, retryAfterMs: 0, key, state, store };
+  setLoginRateLimitStateStore(db, store);
+  return { blocked: false, retryAfterMs: 0, key: states[0].key, state: states[0].state, store };
 }
 
-function registerLoginFailure(db, req, username) {
-  const { key, state, store } = getLoginRateLimitState(db, req, username);
+// scope 为 account 时同时累计账号级计数；captcha 失败只累计 IP+账号维度，
+// 避免攻击者用错误验证码把他人账号锁死。
+function registerLoginFailure(db, req, username, scope = 'account') {
+  const { store } = getLoginRateLimitState(db, req, username);
   const { windowMs, lockMs, maxAttempts } = getLoginRateLimitConfig(db);
-  if (!state.firstAttemptAt || nowMs() - state.firstAttemptAt > windowMs) {
-    state.count = 0;
-    state.firstAttemptAt = nowMs();
+  const keys = [getLoginRateLimitKey(req, username)];
+  if (scope === 'account') keys.push(getLoginRateLimitAccountKey(username));
+  let failedState = { count: 0, lockedUntil: 0 };
+  for (const key of keys) {
+    const state = store.get(key) || { count: 0, firstAttemptAt: 0, lastAttemptAt: 0, lockedUntil: 0 };
+    if (!state.firstAttemptAt || nowMs() - state.firstAttemptAt > windowMs) {
+      state.count = 0;
+      state.firstAttemptAt = nowMs();
+    }
+    state.count += 1;
+    state.lastAttemptAt = nowMs();
+    if (state.count >= maxAttempts) {
+      state.lockedUntil = nowMs() + lockMs;
+    }
+    store.set(key, state);
+    if (state.lockedUntil > failedState.lockedUntil) failedState = state;
   }
-  state.count += 1;
-  state.lastAttemptAt = nowMs();
-  if (state.count >= maxAttempts) {
-    state.lockedUntil = nowMs() + lockMs;
-  }
-  store.set(key, state);
   setLoginRateLimitStateStore(db, store);
-  return state;
+  return failedState;
 }
 
 function clearLoginFailures(db, req, username) {
   const store = getLoginRateLimitStateStore(db);
   store.delete(getLoginRateLimitKey(req, username));
+  store.delete(getLoginRateLimitAccountKey(username));
   setLoginRateLimitStateStore(db, store);
 }
 
 // 登录失败计数存放在 runtimeState（整字段覆盖式合并），必须在临界区内基于最新状态自增，
 // 否则并发失败会丢失计数，导致达到锁定阈值的尝试数被低估。
-async function recordLoginFailureLocked(req, username) {
+async function recordLoginFailureLocked(req, username, scope = 'account') {
   return withDbMutationLock(async () => {
     const lockDb = await readDb();
-    const failedState = registerLoginFailure(lockDb, req, username);
+    const failedState = registerLoginFailure(lockDb, req, username, scope);
     if (req) {
       appendAuditLog(
         lockDb,
@@ -7319,7 +7343,7 @@ async function recordLoginFailureLocked(req, username) {
         'login_failed',
         'auth',
         '',
-        '账号或密码校验失败',
+        scope === 'ip' ? '验证码校验失败' : '账号或密码校验失败',
         '',
         auditMeta(req)
       );
@@ -11513,7 +11537,7 @@ const requestHandler = async (req, res) => {
         return json(res, 429, { message: loginBlockedMessage(rateLimitState.retryAfterMs) }, rateLimitResponseHeaders(rateLimitState.retryAfterMs));
       }
       if (!verifyCaptchaToken(body.captchaToken, body.captcha)) {
-        const failedState = await recordLoginFailureLocked(req, username);
+        const failedState = await recordLoginFailureLocked(req, username, 'ip');
         if (failedState.lockedUntil > nowMs()) {
           return json(res, 429, { message: loginBlockedMessage(failedState.lockedUntil - nowMs()) }, rateLimitResponseHeaders(failedState.lockedUntil - nowMs()));
         }
@@ -12080,7 +12104,7 @@ const requestHandler = async (req, res) => {
         return json(res, 429, { message: loginBlockedMessage(rateLimitState.retryAfterMs) }, rateLimitResponseHeaders(rateLimitState.retryAfterMs));
       }
       if (!verifyCaptchaToken(body.captchaToken, body.captcha)) {
-        const failedState = await recordLoginFailureLocked(req, username);
+        const failedState = await recordLoginFailureLocked(req, username, 'ip');
         if (failedState.lockedUntil > nowMs()) {
           return json(res, 429, { message: loginBlockedMessage(failedState.lockedUntil - nowMs()) }, rateLimitResponseHeaders(failedState.lockedUntil - nowMs()));
         }
@@ -12897,6 +12921,16 @@ const requestHandler = async (req, res) => {
           return json(res, 400, { message: '密码必须包含字母、数字和特殊字符' });
         }
         target.passwordHash = hash(body.password);
+        // 管理员重置密码后清除该账号的登录锁定，避免账号被恶意锁定后无法恢复。
+        const loginStore = getLoginRateLimitStateStore(db);
+        const lockedUsername = String(target.username || '').trim().toLowerCase();
+        loginStore.delete(getLoginRateLimitAccountKey(lockedUsername));
+        for (const key of Array.from(loginStore.keys())) {
+          // IP+账号键形如 "<ip>:<username>"，按分隔符精确拆分，用户名含冒号时也不会误删其他键。
+          const separator = key.lastIndexOf(':');
+          if (separator > 0 && key.slice(separator + 1) === lockedUsername) loginStore.delete(key);
+        }
+        setLoginRateLimitStateStore(db, loginStore);
       }
       appendAuditLog(db, user, 'update', 'user', target.id, `修改人员 ${target.name}`, target.projectId);
       if (body.password || roleOrProjectChanged) {

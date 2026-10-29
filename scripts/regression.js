@@ -426,24 +426,43 @@ async function main() {
   if (certNotice.data.notice) {
     assert(Boolean(certNotice.data.notice.validTo), '证书到期提示应包含到期时间');
   }
+  // 用不存在的探针账号验证限流，避免账号级锁定影响后续 admin 登录。
+  const rateLimitProbeUser = `probe_${Date.now()}`;
   const throttledHeaders = { 'x-forwarded-for': '198.51.100.10' };
   for (let index = 0; index < 5; index += 1) {
-    const failedLogin = await login('admin', 'wrong-password', { headers: throttledHeaders });
+    const failedLogin = await login(rateLimitProbeUser, 'wrong-password', { headers: throttledHeaders });
     assert(failedLogin.status === 401 || failedLogin.status === 429, '错误密码登录未返回预期状态');
   }
-  const blockedLogin = await login('admin', 'wrong-password', { headers: throttledHeaders });
+  const blockedLogin = await login(rateLimitProbeUser, 'wrong-password', { headers: throttledHeaders });
   assert(blockedLogin.status === 429, '登录限流未生效');
-  const persistentBlockedLogin = await login('admin', 'wrong-password', { headers: throttledHeaders });
+  const persistentBlockedLogin = await login(rateLimitProbeUser, 'wrong-password', { headers: throttledHeaders });
   assert(persistentBlockedLogin.status === 429, '登录限流持久化未生效');
   // 伪造成 X-Forwarded-For 首段不应重置限流桶，真实客户端取可信代理追加的最后一跳
-  const spoofedForwardedLogin = await login('admin', 'wrong-password', { headers: { 'x-forwarded-for': '203.0.113.77, 198.51.100.10' } });
+  const spoofedForwardedLogin = await login(rateLimitProbeUser, 'wrong-password', { headers: { 'x-forwarded-for': '203.0.113.77, 198.51.100.10' } });
   assert(spoofedForwardedLogin.status === 429, '伪造 X-Forwarded-For 首段不应绕过登录限流');
+  // 账号级锁定：换 IP 继续尝试同一账号仍应被拦截，避免轮换 IP 绕过等保要求的失败次数限制。
+  const rotatedIpLogin = await login(rateLimitProbeUser, 'wrong-password', { headers: { 'x-forwarded-for': '198.51.100.19' } });
+  assert(rotatedIpLogin.status === 429, '更换 IP 后继续爆破同一账号不应绕过锁定');
   const admin = await login('admin', 'Admin123!');
   assert(admin.status === 200, '管理员登录失败');
   assert(admin.data.sessionToken === undefined, '登录响应不应返回 sessionToken');
   assert(Number(admin.data.systemConfig?.webIdleLogoutMinutes) >= 1, '登录响应未返回控制台超时配置');
   let cookie = admin.cookie;
   assert(String(admin.headers['set-cookie'] || '').includes('SameSite=Lax'), '登录 Cookie 应为 SameSite=Lax');
+  // 错误验证码只应计入 IP 维度：攻击者反复提交错误验证码不应把目标账号锁死。
+  const captchaOnlyIp = `198.18.${(Date.now() % 200) + 1}.${Math.floor(Math.random() * 250) + 1}`;
+  for (let index = 0; index < 6; index += 1) {
+    const captcha = await request('/api/captcha');
+    await request('/api/login', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', 'x-forwarded-for': captchaOnlyIp },
+      body: JSON.stringify({ username: 'admin', password: 'Admin123!', captchaToken: captcha.data.token, captcha: 'zzzz' })
+    });
+  }
+  const captchaOnlyLogin = await login('admin', 'Admin123!');
+  assert(captchaOnlyLogin.status === 200, '错误验证码不应导致账号级锁定');
+  // 重新登录会按单账号单会话策略失效旧会话，后续步骤必须使用新 cookie。
+  cookie = captchaOnlyLogin.cookie;
   // 先清掉上一次中断留下的监控测试资产，避免累积资产拖慢本轮采集。
   await cleanupRegressionArtifacts(cookie);
 

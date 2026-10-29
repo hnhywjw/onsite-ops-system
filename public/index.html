@@ -4103,7 +4103,7 @@
                 <span>空闲自动退出时长（分钟）</span>
                 <input id="webIdleLogoutMinutes" type="number" min="1" max="1440" step="1" />
               </label>
-              <div class="muted" style="margin-top: 14px;">同一账号在同一 IP 登录失败达到设定次数后，自动锁定指定时长。</div>
+              <div class="muted" style="margin-top: 14px;">同一账号或同一 IP+账号登录失败达到设定次数后，自动锁定指定时长；验证码错误只计入 IP 维度。</div>
               <div class="grid cols-3" style="gap: 12px; margin-top: 8px; max-width: 480px;">
                 <label>
                   <span>允许失败次数</span>

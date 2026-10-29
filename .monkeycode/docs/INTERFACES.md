@@ -45,9 +45,10 @@
 - `GET /api/captcha`
   - 获取验证码与 `token`。
 - `POST /api/login`
-  - 账号密码登录。
+  - 账号密码登录；失败按「账号」与「IP+账号」双维度限流，默认 10 分钟内累计 5 次失败锁定 15 分钟。
+  - 验证码错误只累计 IP+账号维度，避免被用于锁定他人账号。
 - `POST /api/auth/ldap`
-  - LDAP 登录，已接验证码和限流。
+  - LDAP 登录，已接验证码和与本地登录一致的账号级限流。
 - `POST /api/account/2fa/setup`、`POST /api/account/2fa/disable`
   - 绑定与关闭动态令牌前需复核当前密码，失败按账号锁定。
   - LDAP 账号（`ldap_` 前缀）的本地口令为随机占位值，复核时回源 LDAP 校验域账号密码；LDAP 未配置或校验不通过一律拒绝。
