@@ -1769,6 +1769,15 @@ function resolveWriteProjectId(user, requestedProjectId) {
   return String(user.projectId || '').trim() || userProjectIds(user)[0] || '';
 }
 
+// 看板类只读统计：未指定项目时统计账号全部授权项目，指定项目时必须具备该项目权限。
+function resolveWorkloadProjectFilter(user, requestedProjectId) {
+  if (!user) return { projectId: '', error: '未登录' };
+  const requested = String(requestedProjectId || '').trim();
+  if (!requested || user.role === 'admin') return { projectId: requested, error: '' };
+  if (!userHasProject(user, requested)) return { projectId: '', error: '无权查看指定项目的工作量' };
+  return { projectId: requested, error: '' };
+}
+
 // 人员可关联多个项目：主项目必填，项目集自动包含主项目并去重。
 function normalizeUserProjectSelection(db, primaryProjectId, rawProjectIds) {
   const projectId = String(primaryProjectId || '').trim();
@@ -8461,9 +8470,11 @@ function buildWorkloadMetrics(db, filters = {}) {
   const rangeEnd = String(filters.rangeEnd || '');
   const userId = String(filters.userId || '');
   const projectId = String(filters.projectId || '');
+  const projectScope = new Set((filters.projectIds || []).map(item => String(item || '').trim()).filter(Boolean));
   const matches = (itemProjectId, itemUserId, itemDate) => {
     if (!isDateInRange(itemDate, rangeStart, rangeEnd)) return false;
     if (projectId && itemProjectId !== projectId) return false;
+    if (!projectId && projectScope.size && !projectScope.has(String(itemProjectId || ''))) return false;
     if (userId && String(itemUserId || '') !== userId) return false;
     return true;
   };
@@ -8811,6 +8822,7 @@ function buildWorkloadRows(db, currentUser, filters = {}) {
   const workDays = getInclusiveDayCount(rangeStart, rangeEnd);
   const reportRows = (db.workReports || []).filter(report => {
     if (!isWorkReportInRange(report, rangeStart, rangeEnd)) return false;
+    if (filters.projectId && report.projectId !== filters.projectId) return false;
     if (currentUser.role !== 'admin' && !userHasProject(currentUser, report.projectId)) return false;
     return true;
   });
@@ -8830,13 +8842,15 @@ function buildWorkloadRows(db, currentUser, filters = {}) {
     reportStatsByUser.set(key, current);
   }
   return scopedUsers
-    .filter(item => !filters.projectId || item.projectId === filters.projectId)
+    .filter(item => !filters.projectId || userHasProject(item, filters.projectId))
     .map(item => {
       const metrics = buildWorkloadMetrics(db, {
         rangeStart: filters.rangeStart,
         rangeEnd: filters.rangeEnd,
         userId: item.id,
-        projectId: filters.projectId || item.projectId || ''
+        projectId: filters.projectId || '',
+        // 未指定项目时按账号完整项目集统计，避免多项目人员只计入主项目。
+        projectIds: filters.projectId ? [] : userProjectIds(item)
       });
       const project = db.projects.find(projectItem => projectItem.id === item.projectId);
       const reportStats = reportStatsByUser.get(item.id) || { dailySubmittedCount: 0, submittedCount: 0, reportCount: 0 };
@@ -17761,7 +17775,9 @@ const requestHandler = async (req, res) => {
       if (!user) return;
       if (user.role === 'customer') return json(res, 403, { message: '当前账号无权查看工作量看板' });
       const period = String(reqUrl.searchParams.get('period') || 'month').trim();
-      const projectId = user.role === 'admin' ? String(reqUrl.searchParams.get('projectId') || '').trim() : resolveWriteProjectId(user, reqUrl.searchParams.get('projectId'));
+      const projectFilter = resolveWorkloadProjectFilter(user, reqUrl.searchParams.get('projectId'));
+      if (projectFilter.error) return json(res, 403, { message: projectFilter.error });
+      const projectId = projectFilter.projectId;
       const range = getDateRangeFromPeriod(period, reqUrl.searchParams.get('anchorDate') || '', reqUrl.searchParams.get('startDate') || '', reqUrl.searchParams.get('endDate') || '');
       if (!range) return json(res, 400, { message: '无效的统计范围' });
       const rows = buildWorkloadRows(db, user, { rangeStart: range.rangeStart, rangeEnd: range.rangeEnd, projectId });
@@ -17786,7 +17802,9 @@ const requestHandler = async (req, res) => {
       if (!user) return;
       if (user.role === 'customer') return json(res, 403, { message: '当前账号无权查看工作量看板' });
       const period = String(reqUrl.searchParams.get('period') || 'month').trim();
-      const projectId = user.role === 'admin' ? String(reqUrl.searchParams.get('projectId') || '').trim() : resolveWriteProjectId(user, reqUrl.searchParams.get('projectId'));
+      const projectFilter = resolveWorkloadProjectFilter(user, reqUrl.searchParams.get('projectId'));
+      if (projectFilter.error) return json(res, 403, { message: projectFilter.error });
+      const projectId = projectFilter.projectId;
       const range = getDateRangeFromPeriod(period, reqUrl.searchParams.get('anchorDate') || '', reqUrl.searchParams.get('startDate') || '', reqUrl.searchParams.get('endDate') || '');
       if (!range) return json(res, 400, { message: '无效的统计范围' });
       const rows = buildWorkloadRows(db, user, { rangeStart: range.rangeStart, rangeEnd: range.rangeEnd, projectId });

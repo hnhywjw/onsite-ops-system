@@ -2974,6 +2974,18 @@ async function main() {
     body: JSON.stringify(multiLogPayload(multiProject.data.id, multiLogDate, '多项目汇总兼任项目日志'))
   });
   assert(multiLogPrimary.status === 201 && multiLogSecondary.status === 201, '多项目工程师创建日志失败');
+  const multiWorkloadAll = await request(`/api/reports/workload?period=custom&startDate=${multiLogDate}&endDate=${multiLogDate}`, { headers: { cookie } });
+  const multiWorkloadAllRow = (multiWorkloadAll.data.data || []).find(item => item.userId === multiUser.data.id);
+  assert(multiWorkloadAll.status === 200 && multiWorkloadAllRow && multiWorkloadAllRow.logCount === 2 && Number(multiWorkloadAllRow.totalHours) === 2,
+    '工作量看板应按多项目人员全部授权项目统计');
+  const multiWorkloadSecondary = await request(`/api/reports/workload?period=custom&projectId=${encodeURIComponent(multiProject.data.id)}&startDate=${multiLogDate}&endDate=${multiLogDate}`, { headers: { cookie } });
+  const multiWorkloadSecondaryRow = (multiWorkloadSecondary.data.data || []).find(item => item.userId === multiUser.data.id);
+  assert(multiWorkloadSecondary.status === 200 && multiWorkloadSecondaryRow && multiWorkloadSecondaryRow.logCount === 1,
+    '工作量看板按兼任项目筛选时应保留多项目人员');
+  const multiSelfWorkload = await request(`/api/reports/workload?period=custom&startDate=${multiLogDate}&endDate=${multiLogDate}`, { headers: { cookie: multiCookie } });
+  const multiSelfWorkloadRow = (multiSelfWorkload.data.data || []).find(item => item.userId === multiUser.data.id);
+  assert(multiSelfWorkload.status === 200 && multiSelfWorkloadRow && multiSelfWorkloadRow.logCount === 2,
+    '工程师本人工作量看板应覆盖全部授权项目');
   const multiSummaryAll = await request('/api/reports/summary?period=month', { headers: { cookie: multiCookie } });
   const multiSummaryAllRow = (multiSummaryAll.data || []).find(item => item.period === multiLogPeriod);
   assert(multiSummaryAll.status === 200 && multiSummaryAllRow && multiSummaryAllRow.totalLogs === 2, '多项目账号汇总应默认覆盖全部授权项目');
