@@ -9006,7 +9006,7 @@ function buildAuditLogCsv(entries) {
       item.userAgent
     ].map(quoteCsvValue).join(','));
   });
-  return lines.join('\n');
+  return `\ufeff${lines.join('\n')}`;
 }
 
 const CONTRACT_STATUS_LABELS = { draft: '草稿', active: '执行中', completed: '已完成', terminated: '已终止' };

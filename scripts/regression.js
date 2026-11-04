@@ -133,6 +133,7 @@ function getTimezoneOffsetForHour(isoString, targetHour) {
 async function request(path, options = {}) {
   const method = options.method || 'GET';
   const response = await fetch(base + path, { ...options, headers: withCsrf(options.headers || {}, method) });
+  const bytes = new Uint8Array(await response.clone().arrayBuffer());
   const text = await response.text();
   let data = text;
   try {
@@ -142,6 +143,7 @@ async function request(path, options = {}) {
   return {
     status: response.status,
     data,
+    bytes,
     headers: Object.fromEntries(response.headers.entries())
   };
 }
@@ -4051,6 +4053,8 @@ async function main() {
   const p2AuditCsv = await request(`/api/audit-logs/export?format=csv&projectId=${encodeURIComponent(p2ProjectId)}`, { headers: { cookie } });
   assert(p2AuditCsv.status === 200 && String(p2AuditCsv.headers['content-type'] || '').includes('text/csv'), '审计日志 CSV 导出失败');
   assert(typeof p2AuditCsv.data === 'string' && p2AuditCsv.data.includes('操作人') && p2AuditCsv.data.includes(p2Keyword), '审计日志 CSV 内容不正确');
+  assert(p2AuditCsv.bytes[0] === 0xef && p2AuditCsv.bytes[1] === 0xbb && p2AuditCsv.bytes[2] === 0xbf,
+    '审计日志 CSV 应带 BOM 以兼容 Excel 中文显示');
   const p2AuditJson = await request(`/api/audit-logs/export?format=json&projectId=${encodeURIComponent(p2ProjectId)}`, { headers: { cookie } });
   assert(p2AuditJson.status === 200 && Array.isArray(p2AuditJson.data.data) && p2AuditJson.data.total === p2AuditJson.data.data.length, '审计日志 JSON 导出失败');
   assert(p2AuditJson.data.data.every(item => item.projectId === p2ProjectId), '审计导出应按项目过滤');

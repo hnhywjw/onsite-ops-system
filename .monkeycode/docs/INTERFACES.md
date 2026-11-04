@@ -344,6 +344,7 @@ pending/approved -> cancelled
 ```
 
 - 项目新增 `customerLogVisible` 开关，默认关闭；开启后客户可读取该项目的服务日志，且仅下发 `process`、`result`、`conclusion` 等安全字段，`userId`、`attachments` 不下发。
+- 服务报告 HTML（含客户查看与签收快照）始终渲染服务过程日志，作为交付内容的一部分，不受 `customerLogVisible` 开关约束；该开关仅控制 `/api/logs` 的客户视图。
 - 审批删除：管理员删除已关联变更的审批时级联删除变更并返回 `cascadedChangeId`；非管理员只能作废本人未完成的审批。
 
 ## 审计要求
