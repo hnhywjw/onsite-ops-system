@@ -8470,11 +8470,13 @@ function buildWorkloadMetrics(db, filters = {}) {
   const rangeEnd = String(filters.rangeEnd || '');
   const userId = String(filters.userId || '');
   const projectId = String(filters.projectId || '');
+  // 传入 projectIds 即启用项目集约束；空数组代表账号没有任何授权项目，应统计为空。
+  const hasProjectScope = Array.isArray(filters.projectIds);
   const projectScope = new Set((filters.projectIds || []).map(item => String(item || '').trim()).filter(Boolean));
   const matches = (itemProjectId, itemUserId, itemDate) => {
     if (!isDateInRange(itemDate, rangeStart, rangeEnd)) return false;
     if (projectId && itemProjectId !== projectId) return false;
-    if (!projectId && projectScope.size && !projectScope.has(String(itemProjectId || ''))) return false;
+    if (!projectId && hasProjectScope && !projectScope.has(String(itemProjectId || ''))) return false;
     if (userId && String(itemUserId || '') !== userId) return false;
     return true;
   };

@@ -131,9 +131,11 @@ function getTimezoneOffsetForHour(isoString, targetHour) {
 }
 
 async function request(path, options = {}) {
-  const method = options.method || 'GET';
-  const response = await fetch(base + path, { ...options, headers: withCsrf(options.headers || {}, method) });
-  const bytes = new Uint8Array(await response.clone().arrayBuffer());
+  const { captureBytes = false, ...init } = options;
+  const method = init.method || 'GET';
+  const response = await fetch(base + path, { ...init, headers: withCsrf(init.headers || {}, method) });
+  // fetch 的 text() 会剥离 BOM，需要原始字节时显式声明，避免所有请求都复制响应体。
+  const bytes = captureBytes ? new Uint8Array(await response.clone().arrayBuffer()) : null;
   const text = await response.text();
   let data = text;
   try {
@@ -2984,6 +2986,8 @@ async function main() {
   const multiWorkloadSecondaryRow = (multiWorkloadSecondary.data.data || []).find(item => item.userId === multiUser.data.id);
   assert(multiWorkloadSecondary.status === 200 && multiWorkloadSecondaryRow && multiWorkloadSecondaryRow.logCount === 1,
     '工作量看板按兼任项目筛选时应保留多项目人员');
+  const multiWorkloadForbidden = await request(`/api/reports/workload?period=custom&projectId=${encodeURIComponent(otherProject.data.id)}&startDate=${multiLogDate}&endDate=${multiLogDate}`, { headers: { cookie: multiCookie } });
+  assert(multiWorkloadForbidden.status === 403, '工作量看板按未授权项目筛选应拒绝');
   const multiSelfWorkload = await request(`/api/reports/workload?period=custom&startDate=${multiLogDate}&endDate=${multiLogDate}`, { headers: { cookie: multiCookie } });
   const multiSelfWorkloadRow = (multiSelfWorkload.data.data || []).find(item => item.userId === multiUser.data.id);
   assert(multiSelfWorkload.status === 200 && multiSelfWorkloadRow && multiSelfWorkloadRow.logCount === 2,
@@ -4050,7 +4054,7 @@ async function main() {
   const p2ShortSearch = await request('/api/search?keyword=a', { headers: { cookie } });
   assert(p2ShortSearch.status === 400, '全局搜索关键字过短应拒绝');
 
-  const p2AuditCsv = await request(`/api/audit-logs/export?format=csv&projectId=${encodeURIComponent(p2ProjectId)}`, { headers: { cookie } });
+  const p2AuditCsv = await request(`/api/audit-logs/export?format=csv&projectId=${encodeURIComponent(p2ProjectId)}`, { headers: { cookie }, captureBytes: true });
   assert(p2AuditCsv.status === 200 && String(p2AuditCsv.headers['content-type'] || '').includes('text/csv'), '审计日志 CSV 导出失败');
   assert(typeof p2AuditCsv.data === 'string' && p2AuditCsv.data.includes('操作人') && p2AuditCsv.data.includes(p2Keyword), '审计日志 CSV 内容不正确');
   assert(p2AuditCsv.bytes[0] === 0xef && p2AuditCsv.bytes[1] === 0xbb && p2AuditCsv.bytes[2] === 0xbf,
