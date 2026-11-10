@@ -109,16 +109,28 @@ docker compose --env-file .env.production -f docker-compose.prod.yml up -d --bui
 
 ## 版本
 
-当前版本：`1.3.0`
+当前版本：`1.3.1`
 
 ### 软件包下载
 
-最新版本：**[v1.3.0](https://github.com/hnhywjw/onsite-ops-system/releases/tag/v1.3.0)**
+最新版本：**[v1.3.1](https://github.com/hnhywjw/onsite-ops-system/releases/tag/v1.3.1)**
 
-- 完整安装包 `onsite-ops-system-v1.3.0-production.tar.gz`
-- 离线升级包 `onsite-ops-upgrade-v1.3.0.tar.gz`
+- 完整安装包 `onsite-ops-system-v1.3.1-production.tar.gz`
+- 离线升级包 `onsite-ops-upgrade-v1.3.1.tar.gz`
 - SHA256 校验文件
 - 部署说明见仓库 `PRODUCTION_DEPLOY.md`
+
+### v1.3.1 更新说明
+
+运维与安全增强：
+- 运维报表：新增趋势、结论摘要与工单 SLA 分析维度，PPT 与 HTML 共用同一数据口径
+- 服务报告：支持客户签收与冻结快照，签收后内容不可变
+- 登录安全：登录失败增加账号级锁定维度，按等保基线 5 次/10 分钟、锁定 15 分钟
+- 出站安全：固定通知目标解析结果，防范 DNS 重绑定
+- 工作量看板：按账号完整授权项目集统计，修复兼任项目日志漏统计与按项目筛选丢行
+- 审计导出：审计日志 CSV 补 UTF-8 BOM，修复 Excel 打开中文乱码
+- 备件管理：补齐低库存提醒与页面预警
+- 生产部署：编排强制必填密钥，并同步部署文档
 
 ### v1.3.0 更新说明
 
