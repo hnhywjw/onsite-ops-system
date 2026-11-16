@@ -109,16 +109,22 @@ docker compose --env-file .env.production -f docker-compose.prod.yml up -d --bui
 
 ## 版本
 
-当前版本：`1.3.1`
+当前版本：`1.3.2`
 
 ### 软件包下载
 
-最新版本：**[v1.3.1](https://github.com/hnhywjw/onsite-ops-system/releases/tag/v1.3.1)**
+最新版本：**[v1.3.2](https://github.com/hnhywjw/onsite-ops-system/releases/tag/v1.3.2)**
 
-- 完整安装包 `onsite-ops-system-v1.3.1-production.tar.gz`
-- 离线升级包 `onsite-ops-upgrade-v1.3.1.tar.gz`
+- 完整安装包 `onsite-ops-system-v1.3.2-production.tar.gz`
+- 离线升级包 `onsite-ops-upgrade-v1.3.2.tar.gz`
 - SHA256 校验文件
 - 部署说明见仓库 `PRODUCTION_DEPLOY.md`
+
+### v1.3.2 更新说明
+
+审计与合规修复：
+- 操作审计：资产关系创建/修改/删除、盘点结果登记、拓扑布局保存均写入操作日志，覆盖此前静默变更
+- 回归测试：补充资产关系增删改审计断言，并保留删除资产时级联清理拓扑关系的校验
 
 ### v1.3.1 更新说明
 
