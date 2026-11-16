@@ -3363,15 +3363,33 @@ async function main() {
     body: JSON.stringify({ sourceAssetId: relSrc.data.id, targetAssetId: relTgt.data.id })
   });
   assert(rel.status === 201, `创建资产关系失败: ${JSON.stringify(rel.data)}`);
+  const auditAfterRelCreate = await request('/api/audit-logs?all=1', { headers: { cookie } });
+  assert(hasAuditLogForTarget(auditAfterRelCreate.data.data, 'create', 'assetRelation', rel.data.id, '创建资产关系'), '创建资产关系未写入操作日志');
+  const relUpdate = await request(`/api/asset-relations/${rel.data.id}`, {
+    method: 'PUT', headers: { cookie, 'Content-Type': 'application/json' },
+    body: JSON.stringify({ label: `关系标签-${Date.now()}` })
+  });
+  assert(relUpdate.status === 200, `更新资产关系失败: ${JSON.stringify(relUpdate.data)}`);
   const blankRelEndpoint = await request(`/api/asset-relations/${rel.data.id}`, {
     method: 'PUT', headers: { cookie, 'Content-Type': 'application/json' },
     body: JSON.stringify({ sourceAssetId: '' })
   });
   assert(blankRelEndpoint.status === 400, '资产关系更新不应允许清空端点');
+  const auditAfterRelUpdate = await request('/api/audit-logs?all=1', { headers: { cookie } });
+  assert(hasAuditLogForTarget(auditAfterRelUpdate.data.data, 'update', 'assetRelation', rel.data.id, '修改资产关系'), '更新资产关系未写入操作日志');
+  const explicitRelDelete = await request(`/api/asset-relations/${rel.data.id}`, { method: 'DELETE', headers: { cookie } });
+  assert(explicitRelDelete.status === 200, '删除资产关系失败');
+  const auditAfterRelDelete = await request('/api/audit-logs?all=1', { headers: { cookie } });
+  assert(hasAuditLogForTarget(auditAfterRelDelete.data.data, 'delete', 'assetRelation', rel.data.id, '删除资产关系'), '删除资产关系未写入操作日志');
+  const cascadeRel = await request('/api/asset-relations', {
+    method: 'POST', headers: { cookie, 'Content-Type': 'application/json' },
+    body: JSON.stringify({ sourceAssetId: relSrc.data.id, targetAssetId: relTgt.data.id })
+  });
+  assert(cascadeRel.status === 201, `重建级联测试关系失败: ${JSON.stringify(cascadeRel.data)}`);
   const delRelSrc = await request(`/api/assets/${relSrc.data.id}`, { method: 'DELETE', headers: { cookie } });
   assert(delRelSrc.status === 200, '删除带拓扑关系的资产应成功');
   const relsAfter = await request('/api/asset-relations', { headers: { cookie } });
-  assert(!(relsAfter.data || []).some(item => item.id === rel.data.id), '删除资产后应级联清理拓扑关系');
+  assert(!(relsAfter.data || []).some(item => item.id === cascadeRel.data.id), '删除资产后应级联清理拓扑关系');
   await request(`/api/assets/${relTgt.data.id}`, { method: 'DELETE', headers: { cookie } });
   await request(`/api/assets/${noSnmpAsset.data.id}`, { method: 'DELETE', headers: { cookie } });
   const importProjectName = (projects.data.data || []).find(item => item.id === projectId)?.name || '';

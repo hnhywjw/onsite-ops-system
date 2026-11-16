@@ -13238,6 +13238,7 @@ const requestHandler = async (req, res) => {
         task.status = 'running';
         task.startedAt = task.startedAt || now();
       }
+      appendAuditLog(db, user, 'update', 'assetInventory', task.id, `登记盘点结果 ${task.name}（${entries.length} 项）`, task.projectId);
       await writeDb(db);
       return json(res, 200, task);
     }
@@ -13787,6 +13788,7 @@ const requestHandler = async (req, res) => {
         createdAt: now()
       };
       db.assetRelations.push(rel);
+      appendAuditLog(db, user, 'create', 'assetRelation', rel.id, `创建资产关系 ${srcAsset.name} → ${tgtAsset.name}（${relationType}）`, srcAsset.projectId);
       await writeDb(db);
       return json(res, 201, rel);
     }
@@ -13816,8 +13818,11 @@ const requestHandler = async (req, res) => {
         const srcAsset = (db.assets || []).find(a => a.id === rel.sourceAssetId);
         if (!srcAsset || !userHasProject(user, srcAsset.projectId)) return json(res, 403, { message: '无权操作此关系' });
       }
+      const removedRel = db.assetRelations[idx];
+      const removedSrcAsset = (db.assets || []).find(a => a.id === removedRel.sourceAssetId);
       db.assetRelations.splice(idx, 1);
       invalidateRelationRuntimeState(relId);
+      appendAuditLog(db, user, 'delete', 'assetRelation', relId, `删除资产关系 ${removedRel.sourceAssetId} → ${removedRel.targetAssetId}`, removedSrcAsset ? removedSrcAsset.projectId : '');
       await writeDb(db);
       return json(res, 200, { ok: true });
     }
@@ -13861,6 +13866,8 @@ const requestHandler = async (req, res) => {
       if (hasSourceField) rel.sourceAssetId = String(body.sourceAssetId);
       if (hasTargetField) rel.targetAssetId = String(body.targetAssetId);
       invalidateRelationRuntimeState(relId);
+      const relProjectAsset = (db.assets || []).find(a => a.id === rel.sourceAssetId);
+      appendAuditLog(db, user, 'update', 'assetRelation', relId, `修改资产关系 ${rel.sourceAssetId} → ${rel.targetAssetId}（${rel.relationType}）`, relProjectAsset ? relProjectAsset.projectId : '');
       await writeDb(db);
       return json(res, 200, { ok: true, relation: rel });
     }
@@ -13912,6 +13919,7 @@ const requestHandler = async (req, res) => {
       if (!db.topologyLayouts) db.topologyLayouts = { positions: {} };
       if (!db.topologyLayouts.positions) db.topologyLayouts.positions = {};
       db.topologyLayouts.positions[projectId] = layout.positions;
+      appendAuditLog(db, user, 'update', 'topologyLayout', projectId, '保存拓扑布局', projectId);
       await writeDb(db);
       return json(res, 200, { ok: true });
     }
