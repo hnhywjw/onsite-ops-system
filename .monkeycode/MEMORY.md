@@ -75,6 +75,7 @@ Agent 在任务执行过程中发现的条目应遵循以下格式：
 - Instructions:
   - `cloneDbSnapshot` 对 `notifications`、`aiInspectionResults` 等数组集合只做浅拷贝，元素对象与内存缓存共享引用；原地修改字段（如写入 `readBy`/`hiddenBy`）后两侧对象序列化结果完全相同。
   - `collectionChanged` 因此无法靠 `JSON.stringify` 比较发现变更，写入被静默跳过、刷新即回退；此类原地修改必须显式设置元素 `_dirty = true`，由 `arrayHasDirtyItems`/`collectionDirtyItems` 识别后才落库。
+  - 依赖全量集合统计的上限校验（当日累计工时、日志/资料/巡检附件配额、单号唯一性、库存数量）必须放进 `withDbMutationLock` 并在锁内重新 `readDb()` 后校验，否则并发请求会各自通过后累计超限；「先查配额、后落盘文件」的上传接口要先进锁再查，失败时回收本次写入的附件。
 
 [备份文件保留策略与凭据语义]
 - Date: 2026-09-29

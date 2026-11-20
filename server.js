@@ -13065,15 +13065,6 @@ const requestHandler = async (req, res) => {
       const user = requireEditor(req, res, db);
       if (!user) return;
       const body = await readBody(req);
-      const asset = (db.assets || []).find(item => item.id === String(body.assetId || ''));
-      if (!asset) return json(res, 404, { message: '资产不存在' });
-      if (!canManageAssetProject(user, asset)) return json(res, 403, { message: '无权操作该资产' });
-      if (['已报废', '已退役'].includes(normalizeAssetStatus(asset.status))) {
-        return json(res, 400, { message: '已报废或已退役的资产不能借出' });
-      }
-      if ((db.assetCheckouts || []).some(item => item.assetId === asset.id && item.status === 'checked_out')) {
-        return json(res, 400, { message: '该资产已借出，请先归还' });
-      }
       const borrowerId = String(body.borrowerId || '').trim();
       const borrower = borrowerId ? requireExistingUser(borrowerId, db) : null;
       if (borrowerId && !borrower) return json(res, 400, { message: '借用人不存在' });
@@ -13083,59 +13074,80 @@ const requestHandler = async (req, res) => {
       if (purposeError) return json(res, 400, { message: purposeError });
       const dueAt = String(body.dueAt || '').trim();
       if (dueAt && !parseDateOnly(dueAt)) return json(res, 400, { message: '预计归还日期格式无效' });
-      const record = {
-        id: id('assetCheckout'),
-        projectId: asset.projectId,
-        assetId: asset.id,
-        borrowerId: borrower ? borrower.id : '',
-        borrowerName,
-        quantity: 1,
-        purpose: String(body.purpose || '').trim(),
-        checkoutAt: now(),
-        dueAt,
-        returnedAt: '',
-        returnCondition: '',
-        status: 'checked_out',
-        operatorId: user.id,
-        operatorName: user.name || user.username || '',
-        createdAt: now()
-      };
-      db.assetCheckouts = db.assetCheckouts || [];
-      db.assetCheckouts.push(record);
-      const previousStatus = normalizeAssetStatus(asset.status);
-      asset.status = '借出';
-      appendAssetLifecycle(db, asset, 'checkout', user, `借出给 ${borrowerName}${dueAt ? `，预计 ${dueAt} 归还` : ''}`, {
-        fromStatus: previousStatus,
-        toStatus: '借出'
+      // 借出记录与资产状态必须同一临界区写入，避免并发借出让同一资产出现多条进行中的借出记录。
+      const outcome = await withDbMutationLock(async () => {
+        const lockDb = await readDb();
+        const asset = (lockDb.assets || []).find(item => item.id === String(body.assetId || ''));
+        if (!asset) return { status: 404, message: '资产不存在' };
+        if (!canManageAssetProject(user, asset)) return { status: 403, message: '无权操作该资产' };
+        if (['已报废', '已退役'].includes(normalizeAssetStatus(asset.status))) {
+          return { status: 400, message: '已报废或已退役的资产不能借出' };
+        }
+        if ((lockDb.assetCheckouts || []).some(item => item.assetId === asset.id && item.status === 'checked_out')) {
+          return { status: 400, message: '该资产已借出，请先归还' };
+        }
+        const record = {
+          id: id('assetCheckout'),
+          projectId: asset.projectId,
+          assetId: asset.id,
+          borrowerId: borrower ? borrower.id : '',
+          borrowerName,
+          quantity: 1,
+          purpose: String(body.purpose || '').trim(),
+          checkoutAt: now(),
+          dueAt,
+          returnedAt: '',
+          returnCondition: '',
+          status: 'checked_out',
+          operatorId: user.id,
+          operatorName: user.name || user.username || '',
+          createdAt: now()
+        };
+        lockDb.assetCheckouts = lockDb.assetCheckouts || [];
+        lockDb.assetCheckouts.push(record);
+        const previousStatus = normalizeAssetStatus(asset.status);
+        asset.status = '借出';
+        appendAssetLifecycle(lockDb, asset, 'checkout', user, `借出给 ${borrowerName}${dueAt ? `，预计 ${dueAt} 归还` : ''}`, {
+          fromStatus: previousStatus,
+          toStatus: '借出'
+        });
+        appendAuditLog(lockDb, user, 'checkout', 'asset', asset.id, `借出资产 ${asset.name} 给 ${borrowerName}`, asset.projectId);
+        await writeDb(lockDb);
+        return { status: 201, body: record };
       });
-      appendAuditLog(db, user, 'checkout', 'asset', asset.id, `借出资产 ${asset.name} 给 ${borrowerName}`, asset.projectId);
-      await writeDb(db);
-      return json(res, 201, record);
+      if (outcome.status !== 201) return json(res, outcome.status, { message: outcome.message });
+      return json(res, 201, outcome.body);
     }
 
     if (req.method === 'POST' && pathname.match(/^\/api\/asset-checkouts\/[^/]+\/return$/)) {
       const user = requireEditor(req, res, db);
       if (!user) return;
       const checkoutId = pathname.split('/')[3];
-      const record = (db.assetCheckouts || []).find(item => item.id === checkoutId);
-      if (!record) return json(res, 404, { message: '借出记录不存在' });
-      if (!canViewProject(user, record.projectId)) return json(res, 403, { message: '无权操作该记录' });
-      if (record.status === 'returned') return json(res, 400, { message: '该资产已归还' });
       const body = await readBody(req);
-      record.status = 'returned';
-      record.returnedAt = now();
-      record.returnCondition = String(body.condition || '').trim();
-      const asset = (db.assets || []).find(item => item.id === record.assetId);
-      if (asset && normalizeAssetStatus(asset.status) === '借出') {
-        asset.status = '使用中';
-        appendAssetLifecycle(db, asset, 'return', user, `由 ${record.borrowerName} 归还${record.returnCondition ? `，状况：${record.returnCondition}` : ''}`, {
-          fromStatus: '借出',
-          toStatus: '使用中'
-        });
-      }
-      appendAuditLog(db, user, 'return', 'asset', record.assetId, `资产归还 ${record.borrowerName}`, record.projectId);
-      await writeDb(db);
-      return json(res, 200, record);
+      // 归还同样需要临界区保护，避免并发归还重复置位并重复写入生命周期流水。
+      const outcome = await withDbMutationLock(async () => {
+        const lockDb = await readDb();
+        const record = (lockDb.assetCheckouts || []).find(item => item.id === checkoutId);
+        if (!record) return { status: 404, message: '借出记录不存在' };
+        if (!canViewProject(user, record.projectId)) return { status: 403, message: '无权操作该记录' };
+        if (record.status === 'returned') return { status: 400, message: '该资产已归还' };
+        record.status = 'returned';
+        record.returnedAt = now();
+        record.returnCondition = String(body.condition || '').trim();
+        const asset = (lockDb.assets || []).find(item => item.id === record.assetId);
+        if (asset && normalizeAssetStatus(asset.status) === '借出') {
+          asset.status = '使用中';
+          appendAssetLifecycle(lockDb, asset, 'return', user, `由 ${record.borrowerName} 归还${record.returnCondition ? `，状况：${record.returnCondition}` : ''}`, {
+            fromStatus: '借出',
+            toStatus: '使用中'
+          });
+        }
+        appendAuditLog(lockDb, user, 'return', 'asset', record.assetId, `资产归还 ${record.borrowerName}`, record.projectId);
+        await writeDb(lockDb);
+        return { status: 200, body: record };
+      });
+      if (outcome.status !== 200) return json(res, outcome.status, { message: outcome.message });
+      return json(res, 200, outcome.body);
     }
 
     if (req.method === 'GET' && pathname === '/api/asset-inventory-tasks') {
@@ -14242,64 +14254,76 @@ const requestHandler = async (req, res) => {
       const user = requireEditor(req, res, db);
       if (!user) return;
       const body = await readBody(req, logAttachmentBodyLimitBytes);
-      const validation = validateLogPayload(db, user, body);
-      if (validation.error) return json(res, 400, { message: validation.error });
-      const attachmentQuotaError = findAttachmentQuotaExceeded({
-        items: db.logs,
-        userId: user.id,
-        projectId: validation.payload.projectId,
-        incomingBytes: (validation.payload.attachments || []).reduce((sum, item) => sum + logAttachmentBytes(item), 0),
-        getOwnerId: item => item.userId || '',
-        getProjectId: item => item.projectId || '',
-        getBytes: item => (item.attachments || []).reduce((sum, attachment) => sum + logAttachmentBytes(attachment), 0),
-        perUserBytes: logAttachmentQuotaPerUserBytes,
-        perProjectBytes: logAttachmentQuotaPerProjectBytes,
-        label: '日志附件'
+      // 当日工时上限与附件配额都依赖全量日志，校验与写入必须同一临界区，否则并发提交可各自通过校验后累计超限。
+      const outcome = await withDbMutationLock(async () => {
+        const lockDb = await readDb();
+        const validation = validateLogPayload(lockDb, user, body);
+        if (validation.error) return { status: 400, message: validation.error };
+        const attachmentQuotaError = findAttachmentQuotaExceeded({
+          items: lockDb.logs,
+          userId: user.id,
+          projectId: validation.payload.projectId,
+          incomingBytes: (validation.payload.attachments || []).reduce((sum, item) => sum + logAttachmentBytes(item), 0),
+          getOwnerId: item => item.userId || '',
+          getProjectId: item => item.projectId || '',
+          getBytes: item => (item.attachments || []).reduce((sum, attachment) => sum + logAttachmentBytes(attachment), 0),
+          perUserBytes: logAttachmentQuotaPerUserBytes,
+          perProjectBytes: logAttachmentQuotaPerProjectBytes,
+          label: '日志附件'
+        });
+        if (attachmentQuotaError) return { status: 413, message: attachmentQuotaError };
+        const warnings = buildLogQualityWarnings(lockDb, user.id, validation.payload);
+        const item = {
+          id: id('log'),
+          userId: user.id,
+          ...validation.payload,
+          createdAt: now()
+        };
+        lockDb.logs.push(item);
+        appendAuditLog(lockDb, user, 'create', 'log', item.id, `创建日志 ${item.event}`, item.projectId);
+        await writeDb(lockDb);
+        return { status: 201, body: { ...item, warnings } };
       });
-      if (attachmentQuotaError) return json(res, 413, { message: attachmentQuotaError });
-      const warnings = buildLogQualityWarnings(db, user.id, validation.payload);
-      const item = {
-        id: id('log'),
-        userId: user.id,
-        ...validation.payload,
-        createdAt: now()
-      };
-      db.logs.push(item);
-      appendAuditLog(db, user, 'create', 'log', item.id, `创建日志 ${item.event}`, item.projectId);
-      await writeDb(db);
-      return json(res, 201, { ...item, warnings });
+      if (outcome.status !== 201) return json(res, outcome.status, { message: outcome.message });
+      return json(res, 201, outcome.body);
     }
 
     if (req.method === 'PUT' && pathname.startsWith('/api/logs/')) {
       const user = requireEditor(req, res, db);
       if (!user) return;
       const logId = pathname.split('/')[3];
-      const target = db.logs.find(item => item.id === logId);
-      if (!target) return json(res, 404, { message: '日志不存在' });
-      if (user.role !== 'admin' && target.userId !== user.id) return json(res, 403, { message: '仅日志创建者或管理员可以编辑' });
       const body = await readBody(req, logAttachmentBodyLimitBytes);
-      const validation = validateLogPayload(db, user, body, target);
-      if (validation.error) return json(res, 400, { message: validation.error });
-      const attachmentQuotaError = findAttachmentQuotaExceeded({
-        items: db.logs,
-        userId: target.userId || user.id,
-        projectId: validation.payload.projectId,
-        incomingBytes: (validation.payload.attachments || []).reduce((sum, item) => sum + logAttachmentBytes(item), 0),
-        excludeId: logId,
-        getOwnerId: item => item.userId || '',
-        getProjectId: item => item.projectId || '',
-        getBytes: item => (item.attachments || []).reduce((sum, attachment) => sum + logAttachmentBytes(attachment), 0),
-        perUserBytes: logAttachmentQuotaPerUserBytes,
-        perProjectBytes: logAttachmentQuotaPerProjectBytes,
-        label: '日志附件'
+      // 编辑同样需要重新校验当日工时上限与附件配额，避免并发编辑把累计值推出上限。
+      const outcome = await withDbMutationLock(async () => {
+        const lockDb = await readDb();
+        const target = (lockDb.logs || []).find(item => item.id === logId);
+        if (!target) return { status: 404, message: '日志不存在' };
+        if (user.role !== 'admin' && target.userId !== user.id) return { status: 403, message: '仅日志创建者或管理员可以编辑' };
+        const validation = validateLogPayload(lockDb, user, body, target);
+        if (validation.error) return { status: 400, message: validation.error };
+        const attachmentQuotaError = findAttachmentQuotaExceeded({
+          items: lockDb.logs,
+          userId: target.userId || user.id,
+          projectId: validation.payload.projectId,
+          incomingBytes: (validation.payload.attachments || []).reduce((sum, item) => sum + logAttachmentBytes(item), 0),
+          excludeId: logId,
+          getOwnerId: item => item.userId || '',
+          getProjectId: item => item.projectId || '',
+          getBytes: item => (item.attachments || []).reduce((sum, attachment) => sum + logAttachmentBytes(attachment), 0),
+          perUserBytes: logAttachmentQuotaPerUserBytes,
+          perProjectBytes: logAttachmentQuotaPerProjectBytes,
+          label: '日志附件'
+        });
+        if (attachmentQuotaError) return { status: 413, message: attachmentQuotaError };
+        const warnings = buildLogQualityWarnings(lockDb, target.userId || user.id, validation.payload, target);
+        if (body.title !== undefined) target.title = String(body.title || '').trim() || target.title;
+        Object.assign(target, validation.payload);
+        appendAuditLog(lockDb, user, 'update', 'log', logId, `编辑日志 ${target.event || target.title || logId}`, target.projectId);
+        await writeDb(lockDb);
+        return { status: 200, body: { ...target, warnings } };
       });
-      if (attachmentQuotaError) return json(res, 413, { message: attachmentQuotaError });
-      const warnings = buildLogQualityWarnings(db, target.userId || user.id, validation.payload, target);
-      if (body.title !== undefined) target.title = String(body.title || '').trim() || target.title;
-      Object.assign(target, validation.payload);
-      appendAuditLog(db, user, 'update', 'log', logId, `编辑日志 ${target.event || target.title || logId}`, target.projectId);
-      await writeDb(db);
-      return json(res, 200, { ...target, warnings });
+      if (outcome.status !== 200) return json(res, outcome.status, { message: outcome.message });
+      return json(res, 200, outcome.body);
     }
 
     if (req.method === 'DELETE' && pathname.startsWith('/api/logs/')) {
@@ -14578,29 +14602,6 @@ const requestHandler = async (req, res) => {
       if (!project) return json(res, 400, { message: '关联项目不存在' });
       const docId = id('doc');
       let attachmentName = '', attachmentPath = '', attachmentSize = 0;
-      if (type !== 'device') {
-        const filePart = parts.find(p => p.name === 'attachment' && p.filename);
-        if (!filePart || !filePart.filename) return json(res, 400, { message: '请上传附件' });
-        const quotaError = findAttachmentQuotaExceeded({
-          items: db.documents,
-          userId: user.id,
-          projectId,
-          incomingBytes: filePart.data.length,
-          getOwnerId: item => item.createdBy || '',
-          getProjectId: item => item.projectId || '',
-          getBytes: item => item.attachmentSize || 0,
-          perUserBytes: documentQuotaPerUserBytes,
-          perProjectBytes: documentQuotaPerProjectBytes,
-          label: '资料附件'
-        });
-        if (quotaError) return json(res, 413, { message: quotaError });
-        const docDir = path.join(documentsUploadDir, docId);
-        fs.mkdirSync(docDir, { recursive: true });
-        attachmentName = sanitizeUploadFilename(filePart.filename);
-        attachmentPath = resolveSafeChildPath(docDir, attachmentName);
-        fs.writeFileSync(attachmentPath, filePart.data);
-        attachmentSize = filePart.data.length;
-      }
       const item = {
         id: docId, projectId, type, title,
         brand: getField('brand'), model: getField('model'),
@@ -14614,24 +14615,68 @@ const requestHandler = async (req, res) => {
         accessPasswordHash: hash(accessPassword),
         createdBy: user.id, createdAt: now(), updatedAt: now()
       };
-      db.documents.push(item);
-      appendAuditLog(db, user, 'create', 'document', docId, `新增资料 ${title}`, projectId);
-      await writeDb(db);
-      return json(res, 201, sanitizeDocumentForApi(item, true));
+      // 附件配额依赖全量资料统计，校验、落盘与入库必须同一临界区，否则并发上传可各自通过校验后超额。
+      const outcome = await withDbMutationLock(async () => {
+        const lockDb = await readDb();
+        if (!requireExistingProject(projectId, lockDb)) return { status: 400, message: '关联项目不存在' };
+        if (type !== 'device') {
+          const filePart = parts.find(p => p.name === 'attachment' && p.filename);
+          if (!filePart || !filePart.filename) return { status: 400, message: '请上传附件' };
+          const quotaError = findAttachmentQuotaExceeded({
+            items: lockDb.documents,
+            userId: user.id,
+            projectId,
+            incomingBytes: filePart.data.length,
+            getOwnerId: owner => owner.createdBy || '',
+            getProjectId: owner => owner.projectId || '',
+            getBytes: owner => owner.attachmentSize || 0,
+            perUserBytes: documentQuotaPerUserBytes,
+            perProjectBytes: documentQuotaPerProjectBytes,
+            label: '资料附件'
+          });
+          if (quotaError) return { status: 413, message: quotaError };
+          const docDir = path.join(documentsUploadDir, docId);
+          fs.mkdirSync(docDir, { recursive: true });
+          attachmentName = sanitizeUploadFilename(filePart.filename);
+          attachmentPath = resolveSafeChildPath(docDir, attachmentName);
+          try {
+            fs.writeFileSync(attachmentPath, filePart.data);
+          } catch (error) {
+            try { fs.rmSync(docDir, { recursive: true, force: true }); } catch (_) {}
+            throw error;
+          }
+          attachmentSize = filePart.data.length;
+        }
+        item.attachmentName = attachmentName;
+        item.attachmentPath = attachmentPath;
+        item.attachmentSize = attachmentSize;
+        lockDb.documents.push(item);
+        appendAuditLog(lockDb, user, 'create', 'document', docId, `新增资料 ${title}`, projectId);
+        try {
+          await writeDb(lockDb);
+        } catch (error) {
+          // 入库失败时回收已写入的附件目录，避免数据库从未引用的孤儿文件。
+          if (attachmentPath) {
+            try { fs.rmSync(path.join(documentsUploadDir, docId), { recursive: true, force: true }); } catch (_) {}
+          }
+          throw error;
+        }
+        return { status: 201, body: sanitizeDocumentForApi(item, true) };
+      });
+      if (outcome.status !== 201) return json(res, outcome.status, { message: outcome.message });
+      return json(res, 201, outcome.body);
     }
 
     if (req.method === 'PUT' && pathname.startsWith('/api/documents/')) {
       const user = requireEditor(req, res, db);
       if (!user) return;
       const docId = pathname.split('/')[3];
-      const target = db.documents.find(item => item.id === docId);
-      if (!target) return json(res, 404, { message: '资料不存在' });
-      if (!canDeleteOwnedRecord(user, target, target.createdBy || '')) return json(res, 403, { message: '仅支持修改自己创建的资料' });
       const contentType = req.headers['content-type'] || '';
-      // 附件文件在落库成功后才删除旧文件，避免写库失败时数据库仍指向已删除的路径。
-      let replacedAttachmentPath = '';
-      let uploadedAttachmentPath = '';
-      if (contentType.includes('multipart/form-data')) {
+      const isMultipart = contentType.includes('multipart/form-data');
+      let parts = null;
+      let getField = null;
+      let body = null;
+      if (isMultipart) {
         const boundary = parseMultipartBoundary(contentType);
         if (!boundary) return json(res, 400, { message: '无效的上传格式' });
         const rawBody = await readMultipartBody(req, documentAttachmentLimitBytes, `附件不能超过 ${documentAttachmentLimitMb}MB`).catch(err => {
@@ -14639,97 +14684,156 @@ const requestHandler = async (req, res) => {
           throw err;
         });
         if (!Buffer.isBuffer(rawBody)) return;
-        const parts = parseMultipart(rawBody, boundary);
-        const getField = (name) => {
+        parts = parseMultipart(rawBody, boundary);
+        getField = (name) => {
           const part = parts.find(p => p.name === name && !p.filename);
           return part ? part.data.toString('utf8').trim() : '';
         };
-        if (getField('title')) target.title = getField('title');
-        if (getField('type')) target.type = getField('type');
-        if (getField('brand') !== undefined) target.brand = getField('brand');
-        if (getField('model') !== undefined) target.model = getField('model');
-        if (getField('serialNumber') !== undefined) target.serialNumber = getField('serialNumber');
-        if (getField('purchaseDate') !== undefined) target.purchaseDate = getField('purchaseDate');
-        if (getField('warrantyExpiryDate') !== undefined) target.warrantyExpiryDate = getField('warrantyExpiryDate');
-        if (getField('managementMethod') !== undefined) target.managementMethod = getField('managementMethod');
-        if (getField('managementIp') !== undefined) target.managementIp = getField('managementIp');
-        if (getField('managementPort') !== undefined) target.managementPort = getField('managementPort');
-        if (getField('loginAccount') !== undefined) target.loginAccount = getField('loginAccount');
-        const nextLoginPassword = getField('loginPassword');
-        const nextAccessPassword = getField('accessPassword');
-        const legacyAccessKey = getField('_encryptionKey');
-        if (nextLoginPassword) {
-          target.loginPasswordHash = hash(nextLoginPassword);
-          // 登录密码密文由访问密码派生密钥加密，优先使用本次提交的新访问密码。
-          const encKey = nextAccessPassword || legacyAccessKey;
-          if (encKey) target.loginPasswordEncrypted = encryptLoginPassword(nextLoginPassword, encKey);
-        }
-        if (nextAccessPassword) {
-          target.accessPasswordHash = hash(nextAccessPassword);
+      } else {
+        body = await readBody(req);
+      }
+      // 附件文件在落库成功后才删除旧文件，避免写库失败时数据库仍指向已删除的路径。
+      let replacedAttachmentPath = '';
+      let uploadedAttachmentPath = '';
+      // 附件配额依赖全量资料统计，校验、落盘与入库必须同一临界区，否则并发替换附件可各自通过校验后超额。
+      const outcome = await withDbMutationLock(async () => {
+        const lockDb = await readDb();
+        const target = (lockDb.documents || []).find(item => item.id === docId);
+        if (!target) return { status: 404, message: '资料不存在' };
+        if (!canDeleteOwnedRecord(user, target, target.createdBy || '')) return { status: 403, message: '仅支持修改自己创建的资料' };
+        if (isMultipart) {
+          if (getField('title')) target.title = getField('title');
+          if (getField('type')) target.type = getField('type');
+          if (getField('brand') !== undefined) target.brand = getField('brand');
+          if (getField('model') !== undefined) target.model = getField('model');
+          if (getField('serialNumber') !== undefined) target.serialNumber = getField('serialNumber');
+          if (getField('purchaseDate') !== undefined) target.purchaseDate = getField('purchaseDate');
+          if (getField('warrantyExpiryDate') !== undefined) target.warrantyExpiryDate = getField('warrantyExpiryDate');
+          if (getField('managementMethod') !== undefined) target.managementMethod = getField('managementMethod');
+          if (getField('managementIp') !== undefined) target.managementIp = getField('managementIp');
+          if (getField('managementPort') !== undefined) target.managementPort = getField('managementPort');
+          if (getField('loginAccount') !== undefined) target.loginAccount = getField('loginAccount');
+          const nextLoginPassword = getField('loginPassword');
+          const nextAccessPassword = getField('accessPassword');
+          const legacyAccessKey = getField('_encryptionKey');
           if (nextLoginPassword) {
-            target.loginPasswordEncrypted = encryptLoginPassword(nextLoginPassword, nextAccessPassword);
-          } else if (target.loginPasswordEncrypted) {
-            // 仅修改访问密码时，用旧密钥解密后按新密码重新加密，避免登录密码永久不可恢复。
-            let plainLoginPassword = '';
-            try { plainLoginPassword = decryptLoginPassword(target.loginPasswordEncrypted, legacyAccessKey) || ''; } catch (_) { plainLoginPassword = ''; }
-            if (!plainLoginPassword) return json(res, 400, { message: '修改访问密码时请同时重新填写登录密码' });
-            target.loginPasswordEncrypted = encryptLoginPassword(plainLoginPassword, nextAccessPassword);
+            target.loginPasswordHash = hash(nextLoginPassword);
+            // 登录密码密文由访问密码派生密钥加密，优先使用本次提交的新访问密码。
+            const encKey = nextAccessPassword || legacyAccessKey;
+            if (encKey) target.loginPasswordEncrypted = encryptLoginPassword(nextLoginPassword, encKey);
           }
-        }
-        if (user.role === 'admin' && getField('projectId')) {
-          const nextDocumentProjectId = getField('projectId');
-          if (!requireExistingProject(nextDocumentProjectId, db)) return json(res, 400, { message: '关联项目不存在' });
-          target.projectId = nextDocumentProjectId;
-        }
-        const newType = getField('type') || target.type;
-        if (newType && !DOCUMENT_TYPES.includes(newType)) {
-          return json(res, 400, { message: '无效的资料类型' });
-        }
-        if (getField('type')) target.type = newType;
-        const filePart = parts.find(p => p.name === 'attachment' && p.filename);
-        if (filePart && filePart.filename) {
-          const quotaError = findAttachmentQuotaExceeded({
-            items: db.documents,
-            userId: user.id,
-            projectId: target.projectId || '',
-            incomingBytes: filePart.data.length,
-            excludeId: docId,
-            getOwnerId: item => item.createdBy || '',
-            getProjectId: item => item.projectId || '',
-            getBytes: item => item.attachmentSize || 0,
-            perUserBytes: documentQuotaPerUserBytes,
-            perProjectBytes: documentQuotaPerProjectBytes,
-            label: '资料附件'
-          });
-          if (quotaError) return json(res, 413, { message: quotaError });
-          const docDir = path.join(documentsUploadDir, docId);
-          fs.mkdirSync(docDir, { recursive: true });
-          target.attachmentName = sanitizeUploadFilename(filePart.filename);
-          const nextAttachmentPath = resolveSafeChildPath(docDir, target.attachmentName);
-          const previousAttachmentPath = target.attachmentPath || '';
-          // 先写临时文件再原子重命名，避免中途失败导致旧附件已被删除、新附件写入一半。
-          const tempAttachmentPath = `${nextAttachmentPath}.tmp-${crypto.randomBytes(6).toString('hex')}`;
-          fs.writeFileSync(tempAttachmentPath, filePart.data);
-          try {
-            fs.renameSync(tempAttachmentPath, nextAttachmentPath);
-          } catch (error) {
-            try { fs.rmSync(tempAttachmentPath, { force: true }); } catch (_) {}
-            throw error;
+          if (nextAccessPassword) {
+            target.accessPasswordHash = hash(nextAccessPassword);
+            if (nextLoginPassword) {
+              target.loginPasswordEncrypted = encryptLoginPassword(nextLoginPassword, nextAccessPassword);
+            } else if (target.loginPasswordEncrypted) {
+              // 仅修改访问密码时，用旧密钥解密后按新密码重新加密，避免登录密码永久不可恢复。
+              let plainLoginPassword = '';
+              try { plainLoginPassword = decryptLoginPassword(target.loginPasswordEncrypted, legacyAccessKey) || ''; } catch (_) { plainLoginPassword = ''; }
+              if (!plainLoginPassword) return { status: 400, message: '修改访问密码时请同时重新填写登录密码' };
+              target.loginPasswordEncrypted = encryptLoginPassword(plainLoginPassword, nextAccessPassword);
+            }
           }
-          target.attachmentPath = nextAttachmentPath;
-          target.attachmentSize = filePart.data.length;
-          replacedAttachmentPath = previousAttachmentPath;
-          uploadedAttachmentPath = nextAttachmentPath;
-        }
-        // 与 JSON 分支保持一致：非设备类型资料必须存在附件。
-        if (newType !== 'device') {
-          const hasAttachment = !!(target.attachmentPath && fs.existsSync(target.attachmentPath));
-          if (!hasAttachment) return json(res, 400, { message: '非设备类型资料必须上传附件' });
+          if (user.role === 'admin' && getField('projectId')) {
+            const nextDocumentProjectId = getField('projectId');
+            if (!requireExistingProject(nextDocumentProjectId, lockDb)) return { status: 400, message: '关联项目不存在' };
+            target.projectId = nextDocumentProjectId;
+          }
+          const newType = getField('type') || target.type;
+          if (newType && !DOCUMENT_TYPES.includes(newType)) {
+            return { status: 400, message: '无效的资料类型' };
+          }
+          if (getField('type')) target.type = newType;
+          const filePart = parts.find(p => p.name === 'attachment' && p.filename);
+          if (filePart && filePart.filename) {
+            const quotaError = findAttachmentQuotaExceeded({
+              items: lockDb.documents,
+              userId: user.id,
+              projectId: target.projectId || '',
+              incomingBytes: filePart.data.length,
+              excludeId: docId,
+              getOwnerId: owner => owner.createdBy || '',
+              getProjectId: owner => owner.projectId || '',
+              getBytes: owner => owner.attachmentSize || 0,
+              perUserBytes: documentQuotaPerUserBytes,
+              perProjectBytes: documentQuotaPerProjectBytes,
+              label: '资料附件'
+            });
+            if (quotaError) return { status: 413, message: quotaError };
+            const docDir = path.join(documentsUploadDir, docId);
+            fs.mkdirSync(docDir, { recursive: true });
+            target.attachmentName = sanitizeUploadFilename(filePart.filename);
+            const nextAttachmentPath = resolveSafeChildPath(docDir, target.attachmentName);
+            const previousAttachmentPath = target.attachmentPath || '';
+            // 先写临时文件再原子重命名，避免中途失败导致旧附件已被删除、新附件写入一半。
+            const tempAttachmentPath = `${nextAttachmentPath}.tmp-${crypto.randomBytes(6).toString('hex')}`;
+            fs.writeFileSync(tempAttachmentPath, filePart.data);
+            try {
+              fs.renameSync(tempAttachmentPath, nextAttachmentPath);
+            } catch (error) {
+              try { fs.rmSync(tempAttachmentPath, { force: true }); } catch (_) {}
+              throw error;
+            }
+            target.attachmentPath = nextAttachmentPath;
+            target.attachmentSize = filePart.data.length;
+            replacedAttachmentPath = previousAttachmentPath;
+            uploadedAttachmentPath = nextAttachmentPath;
+          }
+          // 与 JSON 分支保持一致：非设备类型资料必须存在附件。
+          if (newType !== 'device') {
+            const hasAttachment = !!(target.attachmentPath && fs.existsSync(target.attachmentPath));
+            if (!hasAttachment) return { status: 400, message: '非设备类型资料必须上传附件' };
+          }
+        } else {
+          const newType = body.type !== undefined ? body.type : target.type;
+          if (newType && !DOCUMENT_TYPES.includes(newType)) {
+            return { status: 400, message: '无效的资料类型' };
+          }
+          if (newType !== 'device' && body.type !== undefined) {
+            const hasAttachment = !!(target.attachmentPath && fs.existsSync(target.attachmentPath));
+            if (!hasAttachment) return { status: 400, message: '非设备类型资料必须上传附件，请使用附件上传方式提交' };
+          }
+          if (body.title !== undefined) {
+            const nextDocTitle = String(body.title || '').trim();
+            if (!nextDocTitle) return { status: 400, message: '资料名称不能为空' };
+            target.title = nextDocTitle;
+          }
+          if (body.type !== undefined) target.type = newType;
+          if (body.brand !== undefined) target.brand = body.brand;
+          if (body.model !== undefined) target.model = body.model;
+          if (body.serialNumber !== undefined) target.serialNumber = body.serialNumber;
+          if (body.purchaseDate !== undefined) target.purchaseDate = body.purchaseDate;
+          if (body.warrantyExpiryDate !== undefined) target.warrantyExpiryDate = body.warrantyExpiryDate;
+          if (body.managementMethod !== undefined) target.managementMethod = body.managementMethod;
+          if (body.managementIp !== undefined) target.managementIp = body.managementIp;
+          if (body.managementPort !== undefined) target.managementPort = body.managementPort;
+          if (body.loginAccount !== undefined) target.loginAccount = body.loginAccount;
+          if (body.loginPassword) {
+            target.loginPasswordHash = hash(body.loginPassword);
+            const encKey = body.accessPassword || body._encryptionKey;
+            if (encKey) target.loginPasswordEncrypted = encryptLoginPassword(body.loginPassword, encKey);
+          }
+          if (body.accessPassword) {
+            target.accessPasswordHash = hash(body.accessPassword);
+            if (body.loginPassword) {
+              target.loginPasswordEncrypted = encryptLoginPassword(body.loginPassword, body.accessPassword);
+            } else if (target.loginPasswordEncrypted) {
+              // 与 multipart 分支一致：仅改访问密码时用旧密钥重新加密，失败则要求重填登录密码。
+              let plainLoginPassword = '';
+              try { plainLoginPassword = decryptLoginPassword(target.loginPasswordEncrypted, body._encryptionKey) || ''; } catch (_) { plainLoginPassword = ''; }
+              if (!plainLoginPassword) return { status: 400, message: '修改访问密码时请同时重新填写登录密码' };
+              target.loginPasswordEncrypted = encryptLoginPassword(plainLoginPassword, body.accessPassword);
+            }
+          }
+          if (user.role === 'admin' && body.projectId !== undefined) {
+            if (!requireExistingProject(body.projectId, lockDb)) return { status: 400, message: '关联项目不存在' };
+            target.projectId = body.projectId;
+          }
         }
         target.updatedAt = now();
-        appendAuditLog(db, user, 'update', 'document', docId, `修改资料 ${target.title}`, target.projectId);
+        appendAuditLog(lockDb, user, 'update', 'document', docId, `修改资料 ${target.title}`, target.projectId);
         try {
-          await writeDb(db);
+          await writeDb(lockDb);
         } catch (error) {
           // 落库失败时回收本次上传的新文件，避免留下数据库从未引用的孤儿附件。
           if (uploadedAttachmentPath && uploadedAttachmentPath !== replacedAttachmentPath) {
@@ -14737,64 +14841,22 @@ const requestHandler = async (req, res) => {
           }
           throw error;
         }
-        if (replacedAttachmentPath && replacedAttachmentPath !== uploadedAttachmentPath) {
-          // 旧文件在数据库确认不再引用后才删除，写库失败时保持原附件可用。
-          try { fs.rmSync(replacedAttachmentPath, { force: true }); } catch (_) {}
-        }
         // 与详情接口保持一致：受保护字段需通过访问密码校验（X-Document-Access-Token）后才可下发。
         const revealProtectedOnUpdate = !target.accessPasswordHash || verifyDocumentAccessToken(readDocumentAccessToken(req), docId, user.id).ok;
-        return json(res, 200, sanitizeDocumentForApi(target, revealProtectedOnUpdate));
-      }
-      const body = await readBody(req);
-      const newType = body.type !== undefined ? body.type : target.type;
-      if (newType && !DOCUMENT_TYPES.includes(newType)) {
-        return json(res, 400, { message: '无效的资料类型' });
-      }
-      if (newType !== 'device' && body.type !== undefined) {
-        const hasAttachment = !!(target.attachmentPath && fs.existsSync(target.attachmentPath));
-        if (!hasAttachment) return json(res, 400, { message: '非设备类型资料必须上传附件，请使用附件上传方式提交' });
-      }
-      if (body.title !== undefined) {
-        const nextDocTitle = String(body.title || '').trim();
-        if (!nextDocTitle) return json(res, 400, { message: '资料名称不能为空' });
-        target.title = nextDocTitle;
-      }
-      if (body.type !== undefined) target.type = newType;
-      if (body.brand !== undefined) target.brand = body.brand;
-      if (body.model !== undefined) target.model = body.model;
-      if (body.serialNumber !== undefined) target.serialNumber = body.serialNumber;
-      if (body.purchaseDate !== undefined) target.purchaseDate = body.purchaseDate;
-      if (body.warrantyExpiryDate !== undefined) target.warrantyExpiryDate = body.warrantyExpiryDate;
-      if (body.managementMethod !== undefined) target.managementMethod = body.managementMethod;
-      if (body.managementIp !== undefined) target.managementIp = body.managementIp;
-      if (body.managementPort !== undefined) target.managementPort = body.managementPort;
-      if (body.loginAccount !== undefined) target.loginAccount = body.loginAccount;
-      if (body.loginPassword) {
-        target.loginPasswordHash = hash(body.loginPassword);
-        const encKey = body.accessPassword || body._encryptionKey;
-        if (encKey) target.loginPasswordEncrypted = encryptLoginPassword(body.loginPassword, encKey);
-      }
-      if (body.accessPassword) {
-        target.accessPasswordHash = hash(body.accessPassword);
-        if (body.loginPassword) {
-          target.loginPasswordEncrypted = encryptLoginPassword(body.loginPassword, body.accessPassword);
-        } else if (target.loginPasswordEncrypted) {
-          // 与 multipart 分支一致：仅改访问密码时用旧密钥重新加密，失败则要求重填登录密码。
-          let plainLoginPassword = '';
-          try { plainLoginPassword = decryptLoginPassword(target.loginPasswordEncrypted, body._encryptionKey) || ''; } catch (_) { plainLoginPassword = ''; }
-          if (!plainLoginPassword) return json(res, 400, { message: '修改访问密码时请同时重新填写登录密码' });
-          target.loginPasswordEncrypted = encryptLoginPassword(plainLoginPassword, body.accessPassword);
+        return { status: 200, body: sanitizeDocumentForApi(target, revealProtectedOnUpdate) };
+      });
+      if (outcome.status !== 200) {
+        // 校验失败但附件已落盘时回收新文件，避免留下未被数据库引用的孤儿附件。
+        if (uploadedAttachmentPath && uploadedAttachmentPath !== replacedAttachmentPath) {
+          try { fs.rmSync(uploadedAttachmentPath, { force: true }); } catch (_) {}
         }
+        return json(res, outcome.status, { message: outcome.message });
       }
-      if (user.role === 'admin' && body.projectId !== undefined) {
-        if (!requireExistingProject(body.projectId, db)) return json(res, 400, { message: '关联项目不存在' });
-        target.projectId = body.projectId;
+      if (replacedAttachmentPath && replacedAttachmentPath !== uploadedAttachmentPath) {
+        // 旧文件在数据库确认不再引用后才删除，写库失败时保持原附件可用。
+        try { fs.rmSync(replacedAttachmentPath, { force: true }); } catch (_) {}
       }
-      target.updatedAt = now();
-      appendAuditLog(db, user, 'update', 'document', docId, `修改资料 ${target.title}`, target.projectId);
-      await writeDb(db);
-      const revealProtectedOnUpdate = !target.accessPasswordHash || verifyDocumentAccessToken(readDocumentAccessToken(req), docId, user.id).ok;
-      return json(res, 200, sanitizeDocumentForApi(target, revealProtectedOnUpdate));
+      return json(res, 200, outcome.body);
     }
 
     if (req.method === 'DELETE' && pathname.startsWith('/api/documents/')) {
@@ -15042,126 +15104,20 @@ const requestHandler = async (req, res) => {
         nextDate = computeNextInspectionDateKey(plan.cycle, executedDateKey) || nextDate;
       }
       const attachment = normalizeInspectionAttachment(body.attachment);
-      const attachmentQuotaError = findAttachmentQuotaExceeded({
-        items: db.inspectionExecutions,
-        userId: user.id,
-        projectId: plan.projectId,
-        incomingBytes: inspectionAttachmentBytes(attachment),
-        getOwnerId: item => item.createdBy || '',
-        getProjectId: item => item.projectId || '',
-        getBytes: item => inspectionAttachmentBytes(item.attachment),
-        perUserBytes: inspectionAttachmentQuotaPerUserBytes,
-        perProjectBytes: inspectionAttachmentQuotaPerProjectBytes,
-        label: '巡检附件'
-      });
-      if (attachmentQuotaError) return json(res, 413, { message: attachmentQuotaError });
       const checklistItems = normalizeInspectionChecklistItems(body.checklistItems);
       const hasAbnormalItem = checklistItems.some(item => item.result === '异常');
       // 逐项结果优先于手工选择：只要存在异常项，整单必须记为异常，避免误判为正常后漏掉整改。
       const executionResult = hasAbnormalItem ? '异常' : (body.result || '正常');
-      const execution = {
-        id: id('inspectionExec'),
-        planId: plan.id,
-        projectId: plan.projectId,
-        assetId: plan.assetId || '',
-        executedAt,
-        executor: body.executor || user.name,
-        checklist: body.checklist || '',
-        checklistItems,
-        result: executionResult,
-        issue: body.issue || '',
-        suggestion: body.suggestion || '',
-        ticketId: '',
-        recheckStatus: '',
-        recheckAt: '',
-        recheckBy: '',
-        recheckResult: '',
-        attachment,
-        nextDate,
-        createdBy: user.id,
-        createdAt: now()
-      };
-      db.inspectionExecutions = db.inspectionExecutions || [];
-      db.inspectionExecutions.push(execution);
-      if (execution.result === '异常') {
-        const abnormalNames = checklistItems.filter(item => item.result === '异常').map(item => item.name);
-        const createdAt = now();
-        const ticket = {
-          id: id('ticket'),
-          ticketNo: nextTicketNo(db),
-          projectId: plan.projectId,
-          assetId: plan.assetId || '',
-          title: `${plan.title || '巡检'} 巡检异常`,
-          description: [
-            abnormalNames.length ? `异常检查项：${abnormalNames.join('、')}` : '',
-            execution.issue ? `异常说明：${execution.issue}` : '',
-            execution.suggestion ? `整改建议：${execution.suggestion}` : ''
-          ].filter(Boolean).join('\n') || '巡检发现异常，请跟进处理',
-          category: '巡检异常',
-          priority: '中',
-          status: '待接单',
-          assigneeId: '',
-          assigneeName: '',
-          dispatcherId: user.id,
-          sourceType: 'inspectionExecution',
-          sourceId: execution.id,
-          slaHours: ticketSlaHours('中'),
-          slaDeadline: computeTicketSlaDeadline(createdAt, '中'),
-          slaStatus: '正常',
-          acceptedAt: '',
-          respondedAt: '',
-          closedAt: '',
-          resolution: '',
-          customerConfirmedAt: '',
-          customerComment: '',
-          createdBy: user.id,
-          createdAt,
-          updatedAt: createdAt
-        };
-        db.tickets = db.tickets || [];
-        db.tickets.push(ticket);
-        execution.ticketId = ticket.id;
-        execution.recheckStatus = '待复查';
-      }
-      // 统一按该计划下最新一条执行记录派生状态，避免补录历史记录时覆盖当前状态。
-      refreshInspectionPlanFromExecutions(db, plan.id);
-      appendAuditLog(db, user, 'execute', 'inspectionPlan', plan.id, `执行巡检 ${plan.title}，结果 ${execution.result}`, plan.projectId);
-      if (execution.result === '异常') {
-        createNotification(db, plan.projectId, '巡检异常提醒', `${plan.title} 巡检发现异常`, 'warning', 'inspection', 'inspectionPlan', plan.id);
-        createNotification(db, plan.projectId, '巡检异常已转工单', `${execution.ticketId ? '已自动生成整改工单' : '请及时跟进整改'}：${plan.title}`, 'warning', 'ticket-created', 'ticket', execution.ticketId || plan.id);
-      }
-      await writeDb(db);
-      return json(res, 201, execution);
-    }
-
-    if (req.method === 'PUT' && pathname.startsWith('/api/inspection-executions/')) {
-      const user = requireEditor(req, res, db);
-      if (!user) return;
-      const executionId = pathname.split('/')[3];
-      const target = (db.inspectionExecutions || []).find(item => item.id === executionId);
-      if (!target) return json(res, 404, { message: '巡检执行记录不存在' });
-      if (!canManageInspectionRecord(user, target)) return json(res, 403, { message: '无权修改该巡检执行记录' });
-      const body = await readBody(req, inspectionAttachmentBodyLimitBytes);
-      if (body.result !== undefined && !['正常', '异常'].includes(String(body.result))) return json(res, 400, { message: '无效的巡检结果' });
-      if (body.executedAt !== undefined) target.executedAt = body.executedAt;
-      if (body.executor !== undefined) target.executor = body.executor;
-      if (body.result !== undefined) target.result = body.result;
-      if (body.checklist !== undefined) target.checklist = body.checklist;
-      if (body.checklistItems !== undefined) {
-        target.checklistItems = normalizeInspectionChecklistItems(body.checklistItems);
-        if (target.checklistItems.some(item => item.result === '异常')) target.result = '异常';
-      }
-      if (body.issue !== undefined) target.issue = body.issue;
-      if (body.suggestion !== undefined) target.suggestion = body.suggestion;
-      if (body.nextDate !== undefined) target.nextDate = body.nextDate;
-      const attachment = normalizeInspectionAttachment(body.attachment);
-      if (attachment && attachment.name) {
+      // 执行记录、自动整改工单与计划状态必须同一临界区写入，保证并发巡检时工单号不重复且计划状态按最新记录派生。
+      const execution = await withDbMutationLock(async () => {
+        const lockDb = await readDb();
+        const lockPlan = (lockDb.inspectionPlans || []).find(item => item.id === plan.id);
+        if (!lockPlan) return { status: 404, message: '巡检计划不存在' };
         const attachmentQuotaError = findAttachmentQuotaExceeded({
-          items: db.inspectionExecutions,
+          items: lockDb.inspectionExecutions,
           userId: user.id,
-          projectId: target.projectId || '',
+          projectId: lockPlan.projectId,
           incomingBytes: inspectionAttachmentBytes(attachment),
-          excludeId: executionId,
           getOwnerId: item => item.createdBy || '',
           getProjectId: item => item.projectId || '',
           getBytes: item => inspectionAttachmentBytes(item.attachment),
@@ -15169,15 +15125,135 @@ const requestHandler = async (req, res) => {
           perProjectBytes: inspectionAttachmentQuotaPerProjectBytes,
           label: '巡检附件'
         });
-        if (attachmentQuotaError) return json(res, 413, { message: attachmentQuotaError });
-        target.attachment = attachment;
-      }
-      // 依据该计划下最新一条执行记录统一刷新状态，避免修改历史记录时错误覆盖计划当前状态。
-      const plan = (db.inspectionPlans || []).find(item => item.id === target.planId);
-      refreshInspectionPlanFromExecutions(db, target.planId);
-      appendAuditLog(db, user, 'update', 'inspectionExecution', executionId, `修改巡检执行记录`, target.projectId || plan?.projectId || '');
-      await writeDb(db);
-      return json(res, 200, target);
+        if (attachmentQuotaError) return { status: 413, message: attachmentQuotaError };
+        const created = {
+          id: id('inspectionExec'),
+          planId: lockPlan.id,
+          projectId: lockPlan.projectId,
+          assetId: lockPlan.assetId || '',
+          executedAt,
+          executor: body.executor || user.name,
+          checklist: body.checklist || '',
+          checklistItems,
+          result: executionResult,
+          issue: body.issue || '',
+          suggestion: body.suggestion || '',
+          ticketId: '',
+          recheckStatus: '',
+          recheckAt: '',
+          recheckBy: '',
+          recheckResult: '',
+          attachment,
+          nextDate,
+          createdBy: user.id,
+          createdAt: now()
+        };
+        lockDb.inspectionExecutions = lockDb.inspectionExecutions || [];
+        lockDb.inspectionExecutions.push(created);
+        if (created.result === '异常') {
+          const abnormalNames = checklistItems.filter(item => item.result === '异常').map(item => item.name);
+          const createdAt = now();
+          const ticket = {
+            id: id('ticket'),
+            ticketNo: nextTicketNo(lockDb),
+            projectId: lockPlan.projectId,
+            assetId: lockPlan.assetId || '',
+            title: `${lockPlan.title || '巡检'} 巡检异常`,
+            description: [
+              abnormalNames.length ? `异常检查项：${abnormalNames.join('、')}` : '',
+              created.issue ? `异常说明：${created.issue}` : '',
+              created.suggestion ? `整改建议：${created.suggestion}` : ''
+            ].filter(Boolean).join('\n') || '巡检发现异常，请跟进处理',
+            category: '巡检异常',
+            priority: '中',
+            status: '待接单',
+            assigneeId: '',
+            assigneeName: '',
+            dispatcherId: user.id,
+            sourceType: 'inspectionExecution',
+            sourceId: created.id,
+            slaHours: ticketSlaHours('中'),
+            slaDeadline: computeTicketSlaDeadline(createdAt, '中'),
+            slaStatus: '正常',
+            acceptedAt: '',
+            respondedAt: '',
+            closedAt: '',
+            resolution: '',
+            customerConfirmedAt: '',
+            customerComment: '',
+            createdBy: user.id,
+            createdAt,
+            updatedAt: createdAt
+          };
+          lockDb.tickets = lockDb.tickets || [];
+          lockDb.tickets.push(ticket);
+          created.ticketId = ticket.id;
+          created.recheckStatus = '待复查';
+        }
+        // 统一按该计划下最新一条执行记录派生状态，避免补录历史记录时覆盖当前状态。
+        refreshInspectionPlanFromExecutions(lockDb, lockPlan.id);
+        appendAuditLog(lockDb, user, 'execute', 'inspectionPlan', lockPlan.id, `执行巡检 ${lockPlan.title}，结果 ${created.result}`, lockPlan.projectId);
+        if (created.result === '异常') {
+          createNotification(lockDb, lockPlan.projectId, '巡检异常提醒', `${lockPlan.title} 巡检发现异常`, 'warning', 'inspection', 'inspectionPlan', lockPlan.id);
+          createNotification(lockDb, lockPlan.projectId, '巡检异常已转工单', `${created.ticketId ? '已自动生成整改工单' : '请及时跟进整改'}：${lockPlan.title}`, 'warning', 'ticket-created', 'ticket', created.ticketId || lockPlan.id);
+        }
+        await writeDb(lockDb);
+        return { status: 201, body: created };
+      });
+      if (execution.status !== 201) return json(res, execution.status, { message: execution.message });
+      return json(res, 201, execution.body);
+    }
+
+    if (req.method === 'PUT' && pathname.startsWith('/api/inspection-executions/')) {
+      const user = requireEditor(req, res, db);
+      if (!user) return;
+      const executionId = pathname.split('/')[3];
+      const body = await readBody(req, inspectionAttachmentBodyLimitBytes);
+      if (body.result !== undefined && !['正常', '异常'].includes(String(body.result))) return json(res, 400, { message: '无效的巡检结果' });
+      const attachment = normalizeInspectionAttachment(body.attachment);
+      // 附件配额依赖全量执行记录统计，校验与入库必须同一临界区，否则并发替换附件可各自通过校验后超额。
+      const outcome = await withDbMutationLock(async () => {
+        const lockDb = await readDb();
+        const target = (lockDb.inspectionExecutions || []).find(item => item.id === executionId);
+        if (!target) return { status: 404, message: '巡检执行记录不存在' };
+        if (!canManageInspectionRecord(user, target)) return { status: 403, message: '无权修改该巡检执行记录' };
+        if (body.executedAt !== undefined) target.executedAt = body.executedAt;
+        if (body.executor !== undefined) target.executor = body.executor;
+        if (body.result !== undefined) target.result = body.result;
+        if (body.checklist !== undefined) target.checklist = body.checklist;
+        if (body.checklistItems !== undefined) {
+          target.checklistItems = normalizeInspectionChecklistItems(body.checklistItems);
+          if (target.checklistItems.some(item => item.result === '异常')) target.result = '异常';
+        }
+        if (body.issue !== undefined) target.issue = body.issue;
+        if (body.suggestion !== undefined) target.suggestion = body.suggestion;
+        if (body.nextDate !== undefined) target.nextDate = body.nextDate;
+        if (attachment && attachment.name) {
+          const attachmentQuotaError = findAttachmentQuotaExceeded({
+            items: lockDb.inspectionExecutions,
+            userId: user.id,
+            projectId: target.projectId || '',
+            incomingBytes: inspectionAttachmentBytes(attachment),
+            excludeId: executionId,
+            getOwnerId: owner => owner.createdBy || '',
+            getProjectId: owner => owner.projectId || '',
+            getBytes: owner => inspectionAttachmentBytes(owner.attachment),
+            perUserBytes: inspectionAttachmentQuotaPerUserBytes,
+            perProjectBytes: inspectionAttachmentQuotaPerProjectBytes,
+            label: '巡检附件'
+          });
+          if (attachmentQuotaError) return { status: 413, message: attachmentQuotaError };
+          target.attachment = attachment;
+        }
+        // 依据该计划下最新一条执行记录统一刷新状态，避免修改历史记录时错误覆盖计划当前状态。
+        const plan = (lockDb.inspectionPlans || []).find(item => item.id === target.planId);
+        refreshInspectionPlanFromExecutions(lockDb, target.planId);
+        appendAuditLog(lockDb, user, 'update', 'inspectionExecution', executionId, `修改巡检执行记录`, target.projectId || plan?.projectId || '');
+        await writeDb(lockDb);
+        return { status: 200, body: target };
+      });
+      if (outcome.status !== 200) return json(res, outcome.status, { message: outcome.message });
+      return json(res, 200, outcome.body);
     }
 
     if (req.method === 'DELETE' && pathname.startsWith('/api/inspection-executions/')) {
@@ -15538,32 +15614,42 @@ const requestHandler = async (req, res) => {
       if (!Number.isFinite(quantity) || quantity <= 0) return json(res, 400, { message: '采购数量必须大于 0' });
       const unitPrice = normalizeMoney(body.unitPrice);
       if (unitPrice < 0) return json(res, 400, { message: '采购单价不能为负数' });
-      const purchase = {
-        id: id('sparePurchase'),
-        purchaseNo: nextPurchaseNo(db),
-        projectId: sparePart.projectId,
-        sparePartId: sparePart.id,
-        vendorId: vendor ? vendor.id : '',
-        quantity,
-        unitPrice,
-        totalAmount: normalizeMoney(quantity * unitPrice),
-        requestedAt: now(),
-        expectedAt: body.expectedAt || '',
-        receivedAt: '',
-        status: 'pending',
-        applicantId: user.id,
-        applicantName: user.name || user.username || '',
-        approverId: '',
-        approverName: '',
-        approvalNote: '',
-        notes: String(body.notes || '').slice(0, 500),
-        createdBy: user.id,
-        createdAt: now(),
-        updatedAt: now()
-      };
-      db.sparePartPurchases.push(purchase);
-      appendAuditLog(db, user, 'create', 'sparePartPurchase', purchase.id, `提交备件采购申请 ${sparePart.name} x${quantity}`, sparePart.projectId);
-      await writeDb(db);
+      // 采购单号按当日最大序号生成，必须在临界区内取号并落库，避免并发创建拿到相同编号。
+      const purchase = await withDbMutationLock(async () => {
+        const lockDb = await readDb();
+        const lockPart = (lockDb.spareParts || []).find(item => item.id === sparePart.id);
+        if (!lockPart) return null;
+        const createdAt = now();
+        const created = {
+          id: id('sparePurchase'),
+          purchaseNo: nextPurchaseNo(lockDb),
+          projectId: lockPart.projectId,
+          sparePartId: lockPart.id,
+          vendorId: vendor ? vendor.id : '',
+          quantity,
+          unitPrice,
+          totalAmount: normalizeMoney(quantity * unitPrice),
+          requestedAt: createdAt,
+          expectedAt: body.expectedAt || '',
+          receivedAt: '',
+          status: 'pending',
+          applicantId: user.id,
+          applicantName: user.name || user.username || '',
+          approverId: '',
+          approverName: '',
+          approvalNote: '',
+          notes: String(body.notes || '').slice(0, 500),
+          createdBy: user.id,
+          createdAt,
+          updatedAt: createdAt
+        };
+        lockDb.sparePartPurchases = lockDb.sparePartPurchases || [];
+        lockDb.sparePartPurchases.push(created);
+        appendAuditLog(lockDb, user, 'create', 'sparePartPurchase', created.id, `提交备件采购申请 ${lockPart.name} x${quantity}`, lockPart.projectId);
+        await writeDb(lockDb);
+        return created;
+      });
+      if (!purchase) return json(res, 400, { message: '关联备件不存在' });
       return json(res, 201, purchase);
     }
 
@@ -15573,46 +15659,53 @@ const requestHandler = async (req, res) => {
       const parts = pathname.split('/');
       const purchaseId = parts[3];
       const action = parts[4];
-      const purchase = (db.sparePartPurchases || []).find(item => item.id === purchaseId);
-      if (!purchase) return json(res, 404, { message: '采购申请不存在' });
-      if (!canViewProject(user, purchase.projectId)) return json(res, 403, { message: '无权处理该采购申请' });
       const body = await readBody(req).catch(() => ({}));
-      if (action === 'approve') {
-        if (user.role !== 'admin') return json(res, 403, { message: '仅管理员可审批采购申请' });
-        if (purchase.status !== 'pending') return json(res, 400, { message: '仅待审批的申请可以审批' });
-        purchase.status = 'approved';
-        purchase.approverId = user.id;
-        purchase.approverName = user.name || user.username || '';
-        purchase.approvalNote = String(body.note || '').slice(0, 500);
-        appendAuditLog(db, user, 'approved', 'sparePartPurchase', purchase.id, `审批通过备件采购 ${purchase.purchaseNo}`, purchase.projectId);
-      } else if (action === 'receive') {
-        if (purchase.status !== 'approved') return json(res, 400, { message: '仅已审批的申请可以收货' });
-        const sparePart = (db.spareParts || []).find(item => item.id === purchase.sparePartId);
-        if (!sparePart) return json(res, 404, { message: '关联备件已删除，无法入库' });
-        sparePart.quantity = Number(sparePart.quantity || 0) + Number(purchase.quantity || 0);
-        db.sparePartMovements.push({
-          id: id('spareMove'),
-          sparePartId: sparePart.id,
-          projectId: sparePart.projectId,
-          assetId: sparePart.assetId || '',
-          type: 'inbound',
-          quantity: Number(purchase.quantity || 0),
-          reason: `采购入库 ${purchase.purchaseNo}`,
-          operatorId: user.id,
-          operatorName: user.name || user.username || '',
-          createdAt: now()
-        });
-        purchase.status = 'received';
-        purchase.receivedAt = now();
-        appendAuditLog(db, user, 'receive', 'sparePartPurchase', purchase.id, `备件采购到货入库 ${purchase.purchaseNo}`, purchase.projectId);
-      } else {
-        if (purchase.status === 'received') return json(res, 400, { message: '已入库的采购申请不能取消' });
-        purchase.status = 'cancelled';
-        appendAuditLog(db, user, 'cancel', 'sparePartPurchase', purchase.id, `取消备件采购 ${purchase.purchaseNo}`, purchase.projectId);
-      }
-      purchase.updatedAt = now();
-      await writeDb(db);
-      return json(res, 200, purchase);
+      // 审批与入库会改写库存和申请状态，必须在同一临界区内基于最新库存完成，避免并发入库丢失增量。
+      const outcome = await withDbMutationLock(async () => {
+        const lockDb = await readDb();
+        const purchase = (lockDb.sparePartPurchases || []).find(item => item.id === purchaseId);
+        if (!purchase) return { status: 404, message: '采购申请不存在' };
+        if (!canViewProject(user, purchase.projectId)) return { status: 403, message: '无权处理该采购申请' };
+        if (action === 'approve') {
+          if (user.role !== 'admin') return { status: 403, message: '仅管理员可审批采购申请' };
+          if (purchase.status !== 'pending') return { status: 400, message: '仅待审批的申请可以审批' };
+          purchase.status = 'approved';
+          purchase.approverId = user.id;
+          purchase.approverName = user.name || user.username || '';
+          purchase.approvalNote = String(body.note || '').slice(0, 500);
+          appendAuditLog(lockDb, user, 'approved', 'sparePartPurchase', purchase.id, `审批通过备件采购 ${purchase.purchaseNo}`, purchase.projectId);
+        } else if (action === 'receive') {
+          if (purchase.status !== 'approved') return { status: 400, message: '仅已审批的申请可以收货' };
+          const sparePart = (lockDb.spareParts || []).find(item => item.id === purchase.sparePartId);
+          if (!sparePart) return { status: 404, message: '关联备件已删除，无法入库' };
+          sparePart.quantity = Number(sparePart.quantity || 0) + Number(purchase.quantity || 0);
+          lockDb.sparePartMovements = lockDb.sparePartMovements || [];
+          lockDb.sparePartMovements.push({
+            id: id('spareMove'),
+            sparePartId: sparePart.id,
+            projectId: sparePart.projectId,
+            assetId: sparePart.assetId || '',
+            type: 'inbound',
+            quantity: Number(purchase.quantity || 0),
+            reason: `采购入库 ${purchase.purchaseNo}`,
+            operatorId: user.id,
+            operatorName: user.name || user.username || '',
+            createdAt: now()
+          });
+          purchase.status = 'received';
+          purchase.receivedAt = now();
+          appendAuditLog(lockDb, user, 'receive', 'sparePartPurchase', purchase.id, `备件采购到货入库 ${purchase.purchaseNo}`, purchase.projectId);
+        } else {
+          if (purchase.status === 'received') return { status: 400, message: '已入库的采购申请不能取消' };
+          purchase.status = 'cancelled';
+          appendAuditLog(lockDb, user, 'cancel', 'sparePartPurchase', purchase.id, `取消备件采购 ${purchase.purchaseNo}`, purchase.projectId);
+        }
+        purchase.updatedAt = now();
+        await writeDb(lockDb);
+        return { status: 200, body: purchase };
+      });
+      if (outcome.status !== 200) return json(res, outcome.status, { message: outcome.message });
+      return json(res, 200, outcome.body);
     }
 
     if (req.method === 'GET' && pathname === '/api/spare-part-inventory-tasks') {
@@ -15671,53 +15764,60 @@ const requestHandler = async (req, res) => {
       const parts = pathname.split('/');
       const taskId = parts[3];
       const action = parts[4];
-      const task = (db.sparePartInventoryTasks || []).find(item => item.id === taskId);
-      if (!task) return json(res, 404, { message: '盘点任务不存在' });
-      if (!canViewProject(user, task.projectId)) return json(res, 403, { message: '无权操作该盘点任务' });
-      if (task.status === 'completed') return json(res, 400, { message: '盘点任务已完成' });
       const body = await readBody(req);
-      if (action === 'record') {
-        const entry = task.items.find(item => item.sparePartId === String(body.sparePartId || ''));
-        if (!entry) return json(res, 404, { message: '盘点明细不存在' });
-        const actual = Number(body.actualQuantity);
-        if (!Number.isFinite(actual) || actual < 0) return json(res, 400, { message: '实盘数量必须为非负数' });
-        entry.actualQuantity = actual;
-        entry.difference = normalizeMoney(actual - entry.expectedQuantity);
-        entry.result = entry.difference === 0 ? 'match' : 'mismatch';
-        entry.note = String(body.note || '').slice(0, 500);
-        entry.checkedAt = now();
-        task.status = 'running';
-        appendAuditLog(db, user, 'update', 'sparePartInventoryTask', task.id, `登记备件盘点 ${entry.name} 实盘 ${actual}`, task.projectId);
-        await writeDb(db);
-        return json(res, 200, task);
-      }
-      // 完成盘点时按实盘数量回写库存，并为每条差异生成 adjust 流水，保证账实一致且可追溯。
-      const unchecked = task.items.filter(item => item.result === 'unchecked');
-      if (unchecked.length) return json(res, 400, { message: `仍有 ${unchecked.length} 项备件未盘点` });
-      for (const entry of task.items) {
-        const sparePart = (db.spareParts || []).find(item => item.id === entry.sparePartId);
-        if (!sparePart || entry.actualQuantity === null) continue;
-        if (sparePart.quantity === entry.actualQuantity) continue;
-        const delta = normalizeMoney(entry.actualQuantity - sparePart.quantity);
-        sparePart.quantity = entry.actualQuantity;
-        db.sparePartMovements.push({
-          id: id('spareMove'),
-          sparePartId: sparePart.id,
-          projectId: sparePart.projectId,
-          assetId: sparePart.assetId || '',
-          type: 'adjust',
-          quantity: delta,
-          reason: `盘点调整 ${task.name}`,
-          operatorId: user.id,
-          operatorName: user.name || user.username || '',
-          createdAt: now()
-        });
-      }
-      task.status = 'completed';
-      task.completedAt = now();
-      appendAuditLog(db, user, 'complete', 'sparePartInventoryTask', task.id, `完成备件盘点 ${task.name}`, task.projectId);
-      await writeDb(db);
-      return json(res, 200, task);
+      // 盘点登记与完成共享任务状态；完成时还会回写库存，必须在同一临界区内基于最新数据执行。
+      const outcome = await withDbMutationLock(async () => {
+        const lockDb = await readDb();
+        const task = (lockDb.sparePartInventoryTasks || []).find(item => item.id === taskId);
+        if (!task) return { status: 404, message: '盘点任务不存在' };
+        if (!canViewProject(user, task.projectId)) return { status: 403, message: '无权操作该盘点任务' };
+        if (task.status === 'completed') return { status: 400, message: '盘点任务已完成' };
+        if (action === 'record') {
+          const entry = task.items.find(item => item.sparePartId === String(body.sparePartId || ''));
+          if (!entry) return { status: 404, message: '盘点明细不存在' };
+          const actual = Number(body.actualQuantity);
+          if (!Number.isFinite(actual) || actual < 0) return { status: 400, message: '实盘数量必须为非负数' };
+          entry.actualQuantity = actual;
+          entry.difference = normalizeMoney(actual - entry.expectedQuantity);
+          entry.result = entry.difference === 0 ? 'match' : 'mismatch';
+          entry.note = String(body.note || '').slice(0, 500);
+          entry.checkedAt = now();
+          task.status = 'running';
+          appendAuditLog(lockDb, user, 'update', 'sparePartInventoryTask', task.id, `登记备件盘点 ${entry.name} 实盘 ${actual}`, task.projectId);
+          await writeDb(lockDb);
+          return { status: 200, body: task };
+        }
+        // 完成盘点时按实盘数量回写库存，并为每条差异生成 adjust 流水，保证账实一致且可追溯。
+        const unchecked = task.items.filter(item => item.result === 'unchecked');
+        if (unchecked.length) return { status: 400, message: `仍有 ${unchecked.length} 项备件未盘点` };
+        for (const entry of task.items) {
+          const sparePart = (lockDb.spareParts || []).find(item => item.id === entry.sparePartId);
+          if (!sparePart || entry.actualQuantity === null) continue;
+          if (sparePart.quantity === entry.actualQuantity) continue;
+          const delta = normalizeMoney(entry.actualQuantity - sparePart.quantity);
+          sparePart.quantity = entry.actualQuantity;
+          lockDb.sparePartMovements = lockDb.sparePartMovements || [];
+          lockDb.sparePartMovements.push({
+            id: id('spareMove'),
+            sparePartId: sparePart.id,
+            projectId: sparePart.projectId,
+            assetId: sparePart.assetId || '',
+            type: 'adjust',
+            quantity: delta,
+            reason: `盘点调整 ${task.name}`,
+            operatorId: user.id,
+            operatorName: user.name || user.username || '',
+            createdAt: now()
+          });
+        }
+        task.status = 'completed';
+        task.completedAt = now();
+        appendAuditLog(lockDb, user, 'complete', 'sparePartInventoryTask', task.id, `完成备件盘点 ${task.name}`, task.projectId);
+        await writeDb(lockDb);
+        return { status: 200, body: task };
+      });
+      if (outcome.status !== 200) return json(res, outcome.status, { message: outcome.message });
+      return json(res, 200, outcome.body);
     }
 
     if (req.method === 'GET' && pathname === '/api/change-records') {
@@ -16079,40 +16179,45 @@ const requestHandler = async (req, res) => {
         }
       }
       const priority = body.priority || '中';
-      const createdAt = now();
-      const item = {
-        id: id('ticket'),
-        ticketNo: nextTicketNo(db),
-        projectId,
-        assetId: body.assetId || '',
-        title,
-        description: String(body.description || '').slice(0, 4000),
-        category: body.category || '服务请求',
-        priority,
-        status: '待接单',
-        assigneeId: assignee?.id || '',
-        assigneeName: assignee?.name || '',
-        dispatcherId: user.id,
-        sourceType: body.sourceType || '',
-        sourceId: body.sourceId || '',
-        slaHours: ticketSlaHours(priority),
-        slaDeadline: computeTicketSlaDeadline(createdAt, priority),
-        slaStatus: '正常',
-        acceptedAt: '',
-        respondedAt: '',
-        closedAt: '',
-        resolution: '',
-        customerConfirmedAt: '',
-        customerComment: '',
-        createdBy: user.id,
-        createdAt,
-        updatedAt: createdAt
-      };
-      db.tickets = db.tickets || [];
-      db.tickets.push(item);
-      appendAuditLog(db, user, 'create', 'ticket', item.id, `创建工单 ${item.ticketNo} ${item.title}`, projectId);
-      createNotification(db, projectId, '新工单待接单', `${item.ticketNo} ${item.title}（${item.priority}）已派发`, 'info', 'ticket-created', 'ticket', item.id);
-      await writeDb(db);
+      // 工单号按当日最大序号生成，必须在临界区内取号并落库，避免并发创建拿到相同编号。
+      const item = await withDbMutationLock(async () => {
+        const lockDb = await readDb();
+        const createdAt = now();
+        const created = {
+          id: id('ticket'),
+          ticketNo: nextTicketNo(lockDb),
+          projectId,
+          assetId: body.assetId || '',
+          title,
+          description: String(body.description || '').slice(0, 4000),
+          category: body.category || '服务请求',
+          priority,
+          status: '待接单',
+          assigneeId: assignee?.id || '',
+          assigneeName: assignee?.name || '',
+          dispatcherId: user.id,
+          sourceType: body.sourceType || '',
+          sourceId: body.sourceId || '',
+          slaHours: ticketSlaHours(priority),
+          slaDeadline: computeTicketSlaDeadline(createdAt, priority),
+          slaStatus: '正常',
+          acceptedAt: '',
+          respondedAt: '',
+          closedAt: '',
+          resolution: '',
+          customerConfirmedAt: '',
+          customerComment: '',
+          createdBy: user.id,
+          createdAt,
+          updatedAt: createdAt
+        };
+        lockDb.tickets = lockDb.tickets || [];
+        lockDb.tickets.push(created);
+        appendAuditLog(lockDb, user, 'create', 'ticket', created.id, `创建工单 ${created.ticketNo} ${created.title}`, projectId);
+        createNotification(lockDb, projectId, '新工单待接单', `${created.ticketNo} ${created.title}（${created.priority}）已派发`, 'info', 'ticket-created', 'ticket', created.id);
+        await writeDb(lockDb);
+        return created;
+      });
       return json(res, 201, item);
     }
 
@@ -16475,6 +16580,10 @@ const requestHandler = async (req, res) => {
         if (item.currentStage === 'completed' || item.status === '已通过' || item.status === '已驳回') {
           return { status: 400, message: '该审批已结束，不能重复处理' };
         }
+        // 阶段异常时拒绝决策，避免未知阶段被误判为“客户确认完成”。
+        if (!['approver', 'customer'].includes(item.currentStage)) {
+          return { status: 400, message: '审批当前阶段异常，请刷新后重试' };
+        }
         if (!['approved', 'rejected'].includes(decision)) {
           return { status: 400, message: '无效的审批决策' };
         }
@@ -16484,7 +16593,7 @@ const requestHandler = async (req, res) => {
             item.currentStage = 'customer';
             item.approvedBy = user.id;
             createNotification(lockDb, item.projectId, '审批流转通知', `${item.title} 已通过运维审批，等待甲方客户确认`, 'warning', 'approval', 'approval', item.id);
-          } else {
+          } else if (item.currentStage === 'customer') {
             item.status = '已通过';
             item.currentStage = 'completed';
             item.approvedBy = user.id;
@@ -16494,7 +16603,7 @@ const requestHandler = async (req, res) => {
           item.status = '已驳回';
           item.currentStage = 'completed';
           item.approvedBy = user.id;
-          item.rejectionReason = body.reason || '';
+          item.rejectionReason = String(body.reason || '').slice(0, 500);
           createNotification(lockDb, item.projectId, '审批结果通知', `${item.title} 已驳回${item.rejectionReason ? '：' + item.rejectionReason : ''}`, 'warning', 'approval', 'approval', item.id);
         }
         item.updatedAt = now();
@@ -17744,8 +17853,8 @@ const requestHandler = async (req, res) => {
       const reportId = pathname.split('/')[3];
       const target = (db.workReports || []).find(item => item.id === reportId);
       if (!target) return json(res, 404, { message: '工作汇报不存在' });
-      // 禁止自审：审核人不得审核本人提交的工作汇报；管理员作为可审核角色予以豁免。
-      if (user.role !== 'admin' && user.id === target.userId) {
+      // 禁止自审：与审批流程保持一致，任何角色都不得审核本人提交的工作汇报。
+      if (user.id === target.userId) {
         return json(res, 403, { message: '不能审核本人提交的工作汇报' });
       }
       const body = await readBody(req);

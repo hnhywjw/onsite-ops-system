@@ -1151,6 +1151,39 @@ async function main() {
   assert(tooManyAttachments.status === 400, '超过 6 张现场取证附件应返回 400');
   const deleteAttachmentLog = await request(`/api/logs/${logWithAttachment.data.id}`, { method: 'DELETE', headers: { cookie: engineerCookie } });
   assert(deleteAttachmentLog.status === 200, '清理现场取证回归日志失败');
+  // 当日工时上限必须在写锁内校验：并发提交不能各自通过校验后累计超限。
+  // reportDate 此时已有 2.5 小时，两条 12 小时并发最多只允许一条成功。
+  const concurrentLogPayload = suffix => ({
+    projectId,
+    assetId,
+    date: reportDate,
+    ticketType: '事务工作',
+    event: `并发工时上限回归日志${suffix}`,
+    relatedTarget: '核心交换机',
+    result: '已完成',
+    process: '并发提交当日工时',
+    conclusion: '完成',
+    durationHours: 12
+  });
+  const concurrentLogResults = await Promise.all([
+    request('/api/logs', {
+      method: 'POST',
+      headers: { cookie: engineerCookie, 'Content-Type': 'application/json' },
+      body: JSON.stringify(concurrentLogPayload('A'))
+    }),
+    request('/api/logs', {
+      method: 'POST',
+      headers: { cookie: engineerCookie, 'Content-Type': 'application/json' },
+      body: JSON.stringify(concurrentLogPayload('B'))
+    })
+  ]);
+  const acceptedConcurrentLogs = concurrentLogResults.filter(item => item.status === 201);
+  const rejectedConcurrentLogs = concurrentLogResults.filter(item => item.status === 400);
+  assert(acceptedConcurrentLogs.length === 1 && rejectedConcurrentLogs.length === 1, '并发提交日志应只允许一条通过当日工时上限');
+  for (const accepted of acceptedConcurrentLogs) {
+    const cleanup = await request(`/api/logs/${accepted.data.id}`, { method: 'DELETE', headers: { cookie: engineerCookie } });
+    assert(cleanup.status === 200, '清理并发工时回归日志失败');
+  }
   const previousMonthWorkReport = await request('/api/work-reports', {
     method: 'POST',
     headers: { cookie: engineerCookie, 'Content-Type': 'application/json' },
@@ -1510,6 +1543,41 @@ async function main() {
   assert(workReportOverviewCsv.status === 200, '导出工作汇报管理汇总看板失败');
   assert(String(workReportOverviewCsv.data || '').includes('汇总指标') && String(workReportOverviewCsv.data || '').includes('待审核汇报'), '工作汇报管理汇总导出内容不正确');
   assert(String(workReportOverviewCsv.data || '').includes('统计口径') && String(workReportOverviewCsv.data || '').includes('导出时间'), '工作汇报管理汇总导出缺少口径或导出时间');
+  // 管理员同样不得审核本人提交的工作汇报，避免自审自批绕过审核闭环。
+  const adminSelfReport = await request('/api/work-reports', {
+    method: 'POST',
+    headers: { cookie, 'Content-Type': 'application/json' },
+    body: JSON.stringify({
+      reportType: 'daily',
+      anchorDate: '2098-08-16',
+      projectId,
+      summary: '管理员自审校验',
+      completedWork: '创建自审校验日报',
+      pendingWork: '无',
+      risks: '无',
+      nextPlan: '验证禁止自审'
+    })
+  });
+  assert(adminSelfReport.status === 200, `管理员创建本人工作汇报失败: ${adminSelfReport.status} ${JSON.stringify(adminSelfReport.data)}`);
+  const adminSelfReportId = adminSelfReport.data.data.id;
+  const adminSelfSubmit = await request(`/api/work-reports/${adminSelfReportId}/submit`, {
+    method: 'POST',
+    headers: { cookie, 'Content-Type': 'application/json' },
+    body: '{}'
+  });
+  assert(adminSelfSubmit.status === 200, '管理员提交本人工作汇报失败');
+  const adminSelfReview = await request(`/api/work-reports/${adminSelfReportId}/review`, {
+    method: 'POST',
+    headers: { cookie, 'Content-Type': 'application/json' },
+    body: JSON.stringify({ action: 'approved', comment: '自审应被拒绝' })
+  });
+  assert(adminSelfReview.status === 403, '管理员不应能审核本人提交的工作汇报');
+  const adminSelfDelete = await request(`/api/work-reports/${adminSelfReportId}`, {
+    method: 'DELETE',
+    headers: { cookie, 'Content-Type': 'application/json' },
+    body: '{}'
+  });
+  assert(adminSelfDelete.status === 200, '清理管理员自审校验汇报失败');
   const wrCustomerPayload = {
     name: '汇报只读客户',
     username: `wr_customer_${Date.now()}`,
