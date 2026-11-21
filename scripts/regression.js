@@ -3872,11 +3872,26 @@ async function main() {
     body: JSON.stringify({ status: 'approved' })
   });
   assert(scopeDecisionApproved.status === 200 && scopeDecisionApproved.data.status === '待客户确认', '指定审批人应能通过运维审批');
+  const scopeDecisionAdminAtCustomer = await request(`/api/approvals/${scopeApprovalA.id}/decision`, {
+    method: 'POST', headers: { cookie, 'Content-Type': 'application/json' },
+    body: JSON.stringify({ status: 'approved' })
+  });
+  assert(scopeDecisionAdminAtCustomer.status === 403, '管理员不应在客户确认阶段代客户完成确认');
   const scopeDecisionCustomer = await request(`/api/approvals/${scopeApprovalA.id}/decision`, {
     method: 'POST', headers: { cookie: scopeCustomerCookie, 'Content-Type': 'application/json' },
     body: JSON.stringify({ status: 'approved' })
   });
   assert(scopeDecisionCustomer.status === 200 && scopeDecisionCustomer.data.status === '已通过', '甲方客户应能完成最终确认');
+  const scopeDecisionRepeat = await request(`/api/approvals/${scopeApprovalA.id}/decision`, {
+    method: 'POST', headers: { cookie, 'Content-Type': 'application/json' },
+    body: JSON.stringify({ status: 'rejected', reason: '重复处理' })
+  });
+  assert(scopeDecisionRepeat.status === 400, '审批结束后不应再次决策');
+  const scopeDecisionRepeatDenied = await request(`/api/approvals/${scopeApprovalA.id}/decision`, {
+    method: 'POST', headers: { cookie: scopeCookieC, 'Content-Type': 'application/json' },
+    body: JSON.stringify({ status: 'approved' })
+  });
+  assert(scopeDecisionRepeatDenied.status === 403, '无关人员不应通过已结束审批探测存在性');
 
   const scopeTemplates = await request('/api/ai-inspection/templates', { headers: { cookie } });
   const scopeTemplate = (scopeTemplates.data.data || []).find(item => item.category === 'server');

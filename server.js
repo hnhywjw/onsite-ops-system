@@ -8118,8 +8118,9 @@ function canDecideApproval(user, approval) {
   if (!user || !approval) return false;
   // 禁止提交人审批自己的单据，避免自审自批。
   if (user.id === approval.requestedBy) return false;
-  if (user.role === 'admin') return true;
+  // 客户确认阶段只能由指定甲方客户处理，管理员也不能代签，否则会跳过客户确认环节。
   if (approval.currentStage === 'customer') return user.role === 'customer' && user.id === approval.customerId;
+  if (user.role === 'admin') return true;
   // 运维审批阶段仅允许同项目工程师执行，避免只读角色被指派后获得写权限。
   if (user.role !== 'engineer') return false;
   if (!userHasProject(user, approval.projectId)) return false;
@@ -16575,11 +16576,17 @@ const requestHandler = async (req, res) => {
         const lockDb = await readDb();
         const item = (lockDb.approvals || []).find(entry => entry.id === approvalId);
         if (!item) return { status: 404, message: '审批记录不存在' };
-        if (!canDecideApproval(user, item)) return { status: 403, message: '当前账号无权处理该审批' };
         // 已结束的审批不可再次决策，避免重复流转覆盖最终结果。
         if (item.currentStage === 'completed' || item.status === '已通过' || item.status === '已驳回') {
+          // 仅对与审批相关的账号返回「已结束」，避免向无关账号泄露审批存在性。
+          const related = user.role === 'admin'
+            || item.requestedBy === user.id
+            || item.approverId === user.id
+            || item.customerId === user.id;
+          if (!related) return { status: 403, message: '当前账号无权处理该审批' };
           return { status: 400, message: '该审批已结束，不能重复处理' };
         }
+        if (!canDecideApproval(user, item)) return { status: 403, message: '当前账号无权处理该审批' };
         // 阶段异常时拒绝决策，避免未知阶段被误判为“客户确认完成”。
         if (!['approver', 'customer'].includes(item.currentStage)) {
           return { status: 400, message: '审批当前阶段异常，请刷新后重试' };
