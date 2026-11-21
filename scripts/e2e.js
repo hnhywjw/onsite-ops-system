@@ -223,6 +223,32 @@ async function waitForTableRow(page, selector, keyword) {
   }, { targetSelector: selector, text: keyword }, { timeout: 60000 });
 }
 
+// 审批列表会在登录后异步刷新，行文本可能先于 state 数据就绪；等状态与行同时匹配后再点击按钮。
+async function waitForApprovalStage(page, title, stage, status) {
+  await page.waitForFunction(({ approvalTitle, approvalStage, approvalStatus }) => {
+    const rows = Array.from(document.querySelectorAll('#approvalTable tr'));
+    const rowReady = rows.some(row => (row.textContent || '').includes(approvalTitle) && (row.textContent || '').includes(approvalStatus));
+    const stateReady = Array.isArray(window.state?.approvals) && window.state.approvals.some(item => item.title === approvalTitle && item.currentStage === approvalStage && item.status === approvalStatus);
+    return rowReady && stateReady;
+  }, { approvalTitle: title, approvalStage: stage, approvalStatus: status }, { timeout: 120000 });
+}
+
+// 决策成功会立刻重渲染并移除按钮，Playwright 的自动重试会误判为点击失败；这里直接触发一次 DOM 点击。
+async function clickApprovalButton(page, title) {
+  await page.waitForFunction(approvalTitle => {
+    return Array.from(document.querySelectorAll('#approvalTable tr')).some(row => {
+      const button = row.querySelector('button[data-action="approve"]');
+      return button && (row.textContent || '').includes(approvalTitle);
+    });
+  }, title, { timeout: 60000 });
+  await page.evaluate(approvalTitle => {
+    const row = Array.from(document.querySelectorAll('#approvalTable tr')).find(item => (item.textContent || '').includes(approvalTitle));
+    const button = row && row.querySelector('button[data-action="approve"]');
+    if (!button) throw new Error(`未找到审批通过按钮: ${approvalTitle}`);
+    button.click();
+  }, title);
+}
+
 async function waitForMessageText(page, selector) {
   await page.waitForFunction(targetSelector => {
     const element = document.querySelector(targetSelector);
@@ -1083,12 +1109,8 @@ async function main() {
     await login(page, approverUsername, approverPassword);
     await page.waitForTimeout(2000);
     await page.click('button[data-tab="governance"]');
-    await waitForTableRow(page, '#approvalTable', changeTitle);
-    const engineerApprovalRow = page.locator('#approvalTable tr').filter({ hasText: changeTitle }).first();
-    await engineerApprovalRow.scrollIntoViewIfNeeded();
-    await page.waitForTimeout(300);
-    const engineerApproveBtn = engineerApprovalRow.getByRole('button', { name: '通过' });
-    await engineerApproveBtn.click({ force: true });
+    await waitForApprovalStage(page, changeTitle, 'approver', '待运维审批');
+    await clickApprovalButton(page, changeTitle);
     await page.waitForFunction(title => {
       const rows = Array.from(document.querySelectorAll('#approvalTable tr'));
       return rows.some(row => (row.textContent || '').includes(title) && (row.textContent || '').includes('待客户确认'));
@@ -1099,12 +1121,8 @@ async function main() {
     await logout(page);
     await login(page, customerUsername, customerPassword);
     await page.click('button[data-tab="governance"]');
-    await waitForTableRow(page, '#approvalTable', changeTitle);
-    const customerApprovalRow = page.locator('#approvalTable tr').filter({ hasText: changeTitle }).first();
-    await customerApprovalRow.scrollIntoViewIfNeeded();
-    await page.waitForTimeout(300);
-    const customerApproveBtn = customerApprovalRow.getByRole('button', { name: '通过' });
-    await customerApproveBtn.click({ force: true });
+    await waitForApprovalStage(page, changeTitle, 'customer', '待客户确认');
+    await clickApprovalButton(page, changeTitle);
     await page.waitForFunction(title => {
       const rows = Array.from(document.querySelectorAll('#approvalTable tr'));
       return rows.some(row => (row.textContent || '').includes(title) && (row.textContent || '').includes('已通过'));
